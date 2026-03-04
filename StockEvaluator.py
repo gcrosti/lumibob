@@ -10,11 +10,19 @@ class StockEvaluator:
         shifted_lead = lead_stock.shift(lag)
         return shifted_lead.corr(lag_stock)
 
-    def get_action(self, lead_stock, lag_stock, lag):
+    def get_action(self, lead_stock, lag_stock, lag, short_ma=2, long_ma=5):
         """
-        determines whether to buy lag stock based on lead stock
+        determines whether to buy or sell lag stock based on MA crossover of lead stock.
+        short MA above long MA on lead stock signals upward momentum -> buy lag stock.
         """
-        pass
+        shifted_lead = lead_stock.shift(lag)
+        short = shifted_lead.rolling(window=short_ma, min_periods=1).mean()
+        long = shifted_lead.rolling(window=long_ma, min_periods=1).mean()
+        if short.iloc[-1] > long.iloc[-1]:
+            return 'buy'
+        elif short.iloc[-1] < long.iloc[-1]:
+            return 'sell'
+        return 'hold'
 
     def find_optimal_moving_average(self, simulator, lag = 1):
         """
