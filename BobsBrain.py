@@ -29,6 +29,8 @@ class BobsBrain(Strategy):
         self.lookback_window = 60
         self.max_daily_candidates = 10
         self.max_lag = 5
+        # Optionally limit the number of tickers scanned for new pairs (useful for testing)
+        self.ticker_limit = self.parameters.get('ticker_limit', None)
 
         self.file_path = os.path.join(os.path.dirname(__file__), "pairs", "pair_history.json")
         self.pairs = {}
@@ -67,7 +69,7 @@ class BobsBrain(Strategy):
         start_date = datetime.now() - timedelta(days=self.lookback_window)
         end_date = datetime.now()
         yahoo_reader = YahooDBReader()
-        stock_data = yahoo_reader.get_all_stocks(start_date=start_date, end_date=end_date)
+        stock_data = yahoo_reader.get_all_stocks(start_date=start_date, end_date=end_date, limit=self.ticker_limit)
 
         new_candidates = 0
         position_symbols = [p.symbol for p in self.get_positions()]
