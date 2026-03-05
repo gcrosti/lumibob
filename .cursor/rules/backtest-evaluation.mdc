@@ -1,0 +1,57 @@
+---
+description: LumiBob backtest evaluation agent — strategy context, evaluation workflow, and improvement guidance
+alwaysApply: true
+---
+
+# Backtest Evaluation Agent
+
+## Strategy Context
+
+LumiBob implements a **lead/lag correlation strategy** on NYSE/Nasdaq stocks:
+- Pairs stocks where one ("lead") predicts price movement in another ("lag") at a 1-day offset
+- Minimum Pearson correlation threshold: `0.8`
+- Entry signal: short MA (default 2) crosses above long MA (default 5) on the lead stock
+- Exit signal: short MA crosses below long MA, or correlation drops below `0.8`
+- Position sizing: 50% of available cash split equally across all buy candidates on a given day
+- Max 10 new pairs discovered per trading day; pairs persist in `pairs/pair_history.json`
+
+## Evaluation Workflow
+
+When asked to evaluate a backtest, follow these steps in order:
+
+**Step 1 — Identify the run**
+List files in `logs/` and find all files sharing the target `<6-char-id>`. If no ID is specified, use the most recent run (sort by date prefix in the filename).
+
+**Step 2 — Load configuration**
+Read `_settings.json`. Report: date range, budget, `ticker_limit`, and `backtest_time_seconds`.
+
+**Step 3 — Evaluate portfolio performance**
+Read `_stats.csv`. Compute and report:
+- **Total return %**: `(final portfolio_value - budget) / budget * 100`
+- **Max drawdown %**: largest peak-to-trough drop in `portfolio_value`
+- **Portfolio curve**: describe the shape (flat, steady growth, volatile, sharp drawdown, etc.)
+- **Cash utilization**: average `cash / portfolio_value` — high values mean capital was idle
+
+**Step 4 — Evaluate trade activity**
+Read `_trade_events.csv`, filter to `status=fill`. Compute and report:
+- **Total filled orders**: count of fill rows
+- **Buy/sell split**: count of `side=buy` vs `side=sell` fills
+- **Avg slippage per trade**: mean of `trade_slippage` where non-zero
+- **Symbols traded**: unique tickers and frequency
+
+To compute **win rate and avg P&L per pair**: match each `sell` fill to its corresponding `buy` fill by `symbol`. P&L = `(sell_price - buy_price) * filled_quantity - slippage`.
+
+**Step 5 — Flag anomalies**
+Raise these as warnings if present:
+- Zero or very few trades despite a multi-week backtest (pair discovery may be too restrictive)
+- Portfolio value unchanged despite filled trades (pricing data issue)
+- Cash utilization > 80% throughout (strategy rarely investing)
+- Avg slippage unusually high relative to trade cost
+- Sells without matching buys (position tracking bug)
+
+## Proposing Code Improvements
+
+If the available log data is insufficient for a requested metric (e.g., Sharpe ratio, per-pair P&L breakdown, holding period analysis, benchmark comparison), propose adding a `BacktestEvaluator.py` utility class to the project. When doing so:
+1. Outline what the class would compute and how
+2. Create a feature branch and open a pull request with the implementation
+3. The class should load log files by run ID and expose a `.evaluate()` method returning a structured summary dict

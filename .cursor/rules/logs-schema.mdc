@@ -1,0 +1,59 @@
+---
+description: LumiBob backtest log file structure, naming convention, and column reference
+globs: logs/**
+alwaysApply: false
+---
+
+# LumiBob Log File Schema
+
+## Naming Convention
+
+```
+logs/BobsBrain_<YYYY-MM-DD>_<HH-MM>_<6-char-id>_<type>.<ext>
+```
+
+Each backtest run produces a set of files sharing the same `<6-char-id>`. Group files by that ID to work with a single run.
+
+**Example run ID `pMLhKf`:**
+```
+BobsBrain_2026-03-05_15-19_pMLhKf_settings.json
+BobsBrain_2026-03-05_15-19_pMLhKf_stats.csv
+BobsBrain_2026-03-05_15-19_pMLhKf_trade_events.csv
+BobsBrain_2026-03-05_15-19_pMLhKf_trades.csv
+BobsBrain_2026-03-05_15-19_pMLhKf_indicators.csv
+```
+
+Always prefer `.csv` over `.parquet` — parquet is binary and cannot be read directly.
+
+## File Reference
+
+### `_settings.json`
+Key fields: `backtesting_start`, `backtesting_end`, `budget`, `parameters.ticker_limit`, `benchmark_asset` (always `"SPY"`), `backtest_time_seconds`
+
+### `_stats.csv`
+Portfolio timeline — one row per event (market open, strategy iteration, market close).
+
+| Column | Description |
+|---|---|
+| `datetime` | Timestamp of the event |
+| `portfolio_value` | Total portfolio value at that point |
+| `cash` | Uninvested cash |
+| `positions` | JSON list of open positions |
+| `return` | Cumulative return (decimal) since start |
+
+### `_trade_events.csv`
+Full order lifecycle. Each order has multiple rows: `new` (submitted) → `fill` (executed). **Filter to `status=fill` for completed trades.**
+
+| Column | Description |
+|---|---|
+| `time` | Execution timestamp |
+| `symbol` | Ticker traded |
+| `side` | `buy` or `sell` |
+| `status` | `new`, `fill`, etc. |
+| `price` | Fill price |
+| `filled_quantity` | Shares filled |
+| `trade_cost` | Total cost of the trade |
+| `trade_slippage` | Slippage incurred |
+
+### `_indicators.csv`
+Custom strategy signals. Currently empty (no indicators are being logged by `BobsBrain.py`). Columns: `datetime, name, plot_name, type, value, symbol`.
