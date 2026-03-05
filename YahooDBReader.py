@@ -23,6 +23,7 @@ class YahooDBReader:
     def clean_tickers_for_yahoo(self, ticker_list):
         """
         Translates Nasdaq FTP ticker formats into Yahoo Finance formats.
+        Drops tickers that cannot be mapped to a valid Yahoo Finance symbol.
         """
         cleaned_list = []
         for ticker in ticker_list:
@@ -33,13 +34,18 @@ class YahooDBReader:
             # 1. Remove any extra whitespace
             t = ticker.strip()
 
-            # 2. Handle Share Classes/Preferreds:
+            # 2. Drop tickers containing '$' — Nasdaq uses these for certain
+            #    special/test symbols that have no valid Yahoo Finance equivalent
+            if '$' in t:
+                continue
+
+            # 3. Handle Share Classes/Preferreds:
             # Nasdaq often uses dots (BRK.B) or spaces (PFE PR A)
             # Yahoo uses hyphens (BRK-B, PFE-PA)
             t = t.replace(' ', '-')
             t = t.replace('.', '-')
 
-            # 3. Specific fix for Warrants (Nasdaq '.W' -> Yahoo '-WT')
+            # 4. Specific fix for Warrants (Nasdaq '.W' -> Yahoo '-WT')
             if t.endswith('-W'):
                 t = t + 'T'
 
