@@ -1,4 +1,5 @@
 import itertools
+import math
 import os
 import json
 from datetime import datetime, timedelta
@@ -58,7 +59,12 @@ class BobsBrain(Strategy):
             lead_data = self.get_historical_prices(pair['lead_stock'], self.lookback_window, "1d").df['close']
             lag_data = self.get_historical_prices(pair['lag_stock'], self.lookback_window, "1d").df['close']
 
-            pair['corr'] = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
+            corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
+            if math.isnan(corr):
+                print(f"Warning: NaN correlation for existing pair {symbol}, forcing sell.")
+                pair['action'] = 'sell'
+                continue
+            pair['corr'] = corr
 
             if pair['corr'] < self.min_correlation:
                 short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
@@ -88,8 +94,16 @@ class BobsBrain(Strategy):
                 continue
 
             correlation = stock_evaluator.get_correlation(stock_data[stock1], stock_data[stock2], lag=1)
-            if correlation < self.min_correlation:
+            if math.isnan(correlation) or correlation < self.min_correlation:
                 continue
+
+            action = stock_evaluator.get_action(
+                stock_data[stock1], stock_data[stock2], lag=1, short_ma=2, long_ma=5
+            )
+            if action != 'buy':
+                continue
+
+            print(f"Adding new pair: {stock1} -> {stock2} with correlation {correlation:.4f}, action={action}")
 
             self.pairs[stock2] = {
                 'lead_stock': stock1,
@@ -98,7 +112,7 @@ class BobsBrain(Strategy):
                 'short_ma': 2,
                 'long_ma': 5,
                 'corr': correlation,
-                'action': 'hold',
+                'action': action,
             }
             new_candidates += 1
 

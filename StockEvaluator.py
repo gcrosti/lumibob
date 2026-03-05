@@ -4,8 +4,12 @@ class StockEvaluator:
     """
     def get_correlation(self, lead_stock, lag_stock, lag):
         """
-        evaluates the correlation between two stocks,
-        after applying a lag to lead stock
+        Evaluates the Pearson correlation between two stocks after applying a
+        lag to the lead stock.
+
+        Returns float('nan') when the correlation cannot be computed (e.g.
+        insufficient overlapping data, zero-variance series). Callers must
+        guard against NaN before comparing to a threshold.
         """
         shifted_lead = lead_stock.shift(lag)
         return shifted_lead.corr(lag_stock)
