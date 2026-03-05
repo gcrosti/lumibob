@@ -13,14 +13,14 @@ class BobsBrain(Strategy):
     """
     Executes the day's trades using a lead/lag correlation strategy.
 
-    For each day:
-    - Existing positions are re-evaluated: if correlation with their lead stock
-      has dropped, a moving average crossover on the lag stock determines whether
-      to sell. If correlation is still healthy, the lead stock's MA crossover
-      drives the action.
-    - New pairs are discovered across all exchange-listed stocks and added up to
-      max_daily_candidates per day.
-    - Sells are submitted first, then buys with an equal budget split.
+    Lifecycle per trading day:
+    - before_market_opens(): evaluate all pairs once — update correlations,
+      determine actions, discover new candidate pairs. Results are stored in
+      self.pairs so that on_trading_iteration() can act on them.
+    - on_trading_iteration(): execute the queued sells and buys. Keeping
+      execution here (separate from evaluation) allows sleeptime to be reduced
+      below '1D' in future so orders can be spread across multiple intraday
+      iterations without re-running the expensive evaluation step.
     """
 
     def initialize(self):
@@ -38,7 +38,12 @@ class BobsBrain(Strategy):
             with open(self.file_path, "r") as f:
                 self.pairs = json.load(f)
 
-    def on_trading_iteration(self):
+    def before_market_opens(self):
+        """
+        Runs once per trading day before any iterations.
+        Updates correlations and actions for existing positions, then
+        discovers new candidate pairs up to max_daily_candidates.
+        """
         stock_evaluator = StockEvaluator()
 
         # --- Update actions for existing positions ---
@@ -97,6 +102,12 @@ class BobsBrain(Strategy):
             }
             new_candidates += 1
 
+    def on_trading_iteration(self):
+        """
+        Executes queued orders based on actions set by before_market_opens().
+        Separated from evaluation so that sleeptime can later be reduced to
+        allow spreading orders across multiple intraday iterations.
+        """
         # --- Execute sells first ---
         to_remove = []
         for symbol, pair in self.pairs.items():
