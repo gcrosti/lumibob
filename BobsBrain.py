@@ -165,7 +165,7 @@ class BobsBrain(Strategy):
             if self._spy_start_price is None:
                 self._spy_start_price = spy_price
             spy_value = (spy_price / self._spy_start_price) * self._starting_portfolio_value
-            self.record("spy_value", round(spy_value, 2))
+            self.add_line("spy_value", round(spy_value, 2))
 
         active_pairs = list(self.pairs.values())
         avg_corr = (
@@ -173,8 +173,8 @@ class BobsBrain(Strategy):
             if active_pairs else 0.0
         )
 
-        self.record("active_pairs", len(active_pairs))
-        self.record("avg_corr",     round(avg_corr, 4))
-        self.record("cash_ratio",   round(self.cash / portfolio_value, 4))
-        self.record("daily_buys",   len(buy_pairs))
-        self.record("daily_sells",  len(to_remove))
+        self.add_line("active_pairs", float(len(active_pairs)))
+        self.add_line("avg_corr",     round(avg_corr, 4))
+        self.add_line("cash_ratio",   round(self.cash / portfolio_value, 4))
+        self.add_line("daily_buys",   float(len(buy_pairs)))
+        self.add_line("daily_sells",  float(len(to_remove)))
