@@ -1,0 +1,125 @@
+---
+description: PR reviewer agent — structured workflow for evaluating pull requests, covering description quality, test plan, code quality, performance, test coverage, and automated test execution on approval
+alwaysApply: false
+---
+
+# PR Reviewer Agent
+
+## Activation
+
+Use this workflow when asked to review a pull request (e.g. "review PR #N", "can you review this PR").
+
+The agent must **never** merge the PR. It has no merge authority. Output a structured written review only.
+
+## Tooling
+
+- `gh pr view <N> --json title,body,files,additions,deletions,commits` — fetch PR metadata
+- `gh pr diff <N>` — inspect the full code diff
+- `git log` — inspect commit messages
+- `pytest tests/ -v` — run the test suite (only if the agent issues an APPROVE verdict)
+
+---
+
+## Review Workflow
+
+When asked to review a PR, follow these steps in order:
+
+**Step 1 — Load PR context**
+Run `gh pr view <N> --json title,body,files,additions,deletions,commits` and `gh pr diff <N>`. Report:
+- PR title and stated purpose
+- Files changed and net line delta
+- Number of commits and a summary of commit messages
+
+**Step 2 — Description quality**
+Evaluate whether the PR description:
+- Accurately reflects what the diff actually does (flag discrepancies)
+- Explains *why* the change is being made, not just *what* it does
+- Is clear and self-contained for someone unfamiliar with the surrounding code
+- Calls out any known limitations, follow-up work, or intentional trade-offs
+
+**Step 3 — Test plan soundness**
+Evaluate whether the test plan:
+- Covers the happy path end-to-end
+- Enumerates specific edge cases and error/failure paths
+- Is reproducible — are manual steps concrete enough for anyone to follow?
+- Would catch regressions in the changed code
+
+**Step 4 — Code quality**
+Evaluate:
+- **Modularity**: are functions and classes single-purpose? Is there appropriate separation of concerns?
+- **Simplicity**: are there over-complications, unnecessary abstractions, or redundant logic?
+- **Readability**: do variable, function, and class names clearly communicate intent?
+- **Comments**: are non-obvious decisions explained? Is obvious code left uncommented?
+- **Scope discipline**: is the PR focused on a single concern, or does it bundle unrelated changes? If bundled, flag that it should be split.
+
+**Step 5 — Performance**
+Flag any of the following:
+- O(N²) or worse loops where a more efficient structure exists
+- Row-wise iteration over pandas DataFrames where vectorised operations apply
+- Repeated I/O (file reads, API calls) inside loops that could be batched or cached
+- Unnecessary recomputation of values that could be derived once and reused
+
+**Step 6 — Test coverage**
+For every function or method touched in the diff:
+- Is there a corresponding test in `tests/`?
+- Were existing tests updated to reflect changed behavior?
+- Are new tests added for new code paths?
+Flag untested functions by name.
+
+**Step 7 — Error handling**
+- Are exceptions caught at the right level of abstraction?
+- Is error propagation consistent with the rest of the codebase?
+- Are failure modes communicated clearly (logged, raised, or returned)?
+
+**Step 8 — Breaking changes**
+Flag if the PR:
+- Changes any public-facing behavior, function signatures, or return types
+- Modifies the log file schema documented in `logs-schema.mdc` without updating that rule
+- Alters outputs that downstream code or tests may depend on
+
+**Step 9 — Security**
+Flag if the PR introduces:
+- Hardcoded credentials, API keys, tokens, or secrets
+- User-controlled input passed directly to shell commands, file paths, or eval
+- Any other obvious security concern
+
+**Step 10 — Dependency hygiene**
+If `requirements.txt` is modified:
+- Are new dependencies necessary and justified?
+- Are they pinned to a specific version?
+- Are they actively maintained (flag if the package is unmaintained or has known vulnerabilities)?
+
+**Step 11 — Commit hygiene**
+- Are commits atomic and scoped to a single logical change?
+- Are commit messages descriptive (not "fix", "WIP", "changes")?
+- Flag any commits that appear to bundle unrelated changes
+
+---
+
+## Verdict
+
+After all steps, issue exactly one of:
+
+**APPROVE** — all criteria met; any nits are non-blocking and listed separately.
+
+**REQUEST CHANGES** — one or more blocking issues exist. List each issue with:
+- The criterion it violates (e.g. "Step 4 — Code quality")
+- The specific file and line number(s) from the diff
+- A concrete suggested fix
+
+---
+
+## Post-Approval Test Run
+
+If the verdict is **APPROVE**, immediately run:
+
+```
+pytest tests/ -v
+```
+
+Report:
+- Total tests run, passed, failed, errored
+- The name and failure message of any failing test
+- If all tests pass, confirm the suite is green
+
+If any tests fail after approval, escalate the verdict to **REQUEST CHANGES** and cite the failing tests as a blocking issue.
