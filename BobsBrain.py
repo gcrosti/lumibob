@@ -39,6 +39,9 @@ class BobsBrain(Strategy):
             with open(self.file_path, "r") as f:
                 self.pairs = json.load(f)
 
+        self._spy_start_price = None
+        self._starting_portfolio_value = None
+
     def before_market_opens(self):
         """
         Runs once per trading day before any iterations.
@@ -151,3 +154,27 @@ class BobsBrain(Strategy):
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
+
+        # --- Log indicators ---
+        portfolio_value = self.portfolio_value
+        if self._starting_portfolio_value is None:
+            self._starting_portfolio_value = portfolio_value
+
+        spy_price = self.get_last_price("SPY")
+        if spy_price:
+            if self._spy_start_price is None:
+                self._spy_start_price = spy_price
+            spy_value = (spy_price / self._spy_start_price) * self._starting_portfolio_value
+            self.add_line("spy_value", round(spy_value, 2))
+
+        active_pairs = list(self.pairs.values())
+        avg_corr = (
+            sum(p['corr'] for p in active_pairs) / len(active_pairs)
+            if active_pairs else 0.0
+        )
+
+        self.add_line("active_pairs", float(len(active_pairs)))
+        self.add_line("avg_corr",     round(avg_corr, 4))
+        self.add_line("cash_ratio",   round(self.cash / portfolio_value, 4))
+        self.add_line("daily_buys",   float(len(buy_pairs)))
+        self.add_line("daily_sells",  float(len(to_remove)))
