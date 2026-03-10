@@ -19,7 +19,7 @@ logs/
 *.log
 
 # Data / runtime files
-pairs/pair_history.json
+pairs/
 
 # macOS
 .DS_Store

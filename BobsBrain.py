@@ -1,15 +1,16 @@
 import itertools
 import math
 import os
-import json
 import secrets
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from lumibot.strategies import Strategy
 
+from AlpacaClient import AlpacaClient
+from DatabaseClient import DatabaseClient
+from StockDataCache import StockDataCache
 from StockEvaluator import StockEvaluator
-from YahooDBReader import YahooDBReader
 
 load_dotenv()
 
@@ -27,12 +28,8 @@ class BobsBrain(Strategy):
       below '1D' in future so orders can be spread across multiple intraday
       iterations without re-running the expensive evaluation step.
 
-    Data sources (resolved in initialize()):
-    - When DB_URL + ALPACA_API_KEY are set: pair discovery uses StockDataCache
-      (DB-first, Alpaca fallback). Pairs, runs, trades, and snapshots are
-      persisted to PostgreSQL.
-    - Otherwise: falls back to YahooDBReader and pair_history.json, preserving
-      full backward compatibility for backtests without a local DB.
+    Requires DB_URL, ALPACA_API_KEY, and ALPACA_SECRET_KEY to be set (via .env
+    or environment). Raises EnvironmentError on startup if any are missing.
     """
 
     def initialize(self):
@@ -47,60 +44,42 @@ class BobsBrain(Strategy):
         self._spy_start_price = None
         self._starting_portfolio_value = None
 
-        # --- DB + cache layer (optional — degrades gracefully when unconfigured) ---
-        self._db = None
-        self._cache = None
-        self._run_id = None
-
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
         secret_key = os.getenv('ALPACA_SECRET_KEY')
 
-        if db_url:
-            try:
-                from DatabaseClient import DatabaseClient
-                self._db = DatabaseClient(db_url)
-            except Exception as e:
-                print(f"Warning: could not connect to database ({e}). Falling back to file-based storage.")
-                self._db = None
-
-        if self._db and api_key and secret_key:
-            try:
-                from AlpacaClient import AlpacaClient
-                from StockDataCache import StockDataCache
-                alpaca = AlpacaClient(
-                    api_key=api_key,
-                    secret_key=secret_key,
-                    paper=os.getenv('ALPACA_PAPER', 'true').lower() == 'true',
-                    mode=self._run_mode,
-                )
-                self._cache = StockDataCache(self._db, alpaca)
-            except Exception as e:
-                print(f"Warning: could not initialise AlpacaClient/StockDataCache ({e}). "
-                      "Using YahooDBReader for pair discovery.")
-                self._cache = None
-
-        # --- Pairs persistence ---
-        self.pairs = {}
-        if self._db:
-            self._run_id = secrets.token_hex(3)  # 6-char hex, e.g. "a3f7c2"
-            self.pairs = self._db.load_active_pairs()
-            self._db.create_run(
-                run_id=self._run_id,
-                mode=self._run_mode,
-                settings={
-                    'ticker_limit': self.ticker_limit,
-                    'lookback_window': self.lookback_window,
-                    'min_correlation': self.min_correlation,
-                    'max_daily_candidates': self.max_daily_candidates,
-                },
+        missing = [name for name, val in [
+            ('DB_URL', db_url),
+            ('ALPACA_API_KEY', api_key),
+            ('ALPACA_SECRET_KEY', secret_key),
+        ] if not val]
+        if missing:
+            raise EnvironmentError(
+                f"Missing required environment variables: {', '.join(missing)}. "
+                "Copy .env.example to .env and fill in the values."
             )
-        else:
-            # Legacy file-based pairs
-            file_path = os.path.join(os.path.dirname(__file__), "pairs", "pair_history.json")
-            if os.path.exists(file_path):
-                with open(file_path, "r") as f:
-                    self.pairs = json.load(f)
+
+        self._db = DatabaseClient(db_url)
+        self._alpaca = AlpacaClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            paper=os.getenv('ALPACA_PAPER', 'true').lower() == 'true',
+            mode=self._run_mode,
+        )
+        self._cache = StockDataCache(self._db, self._alpaca)
+
+        self._run_id = secrets.token_hex(3)
+        self.pairs = self._db.load_active_pairs()
+        self._db.create_run(
+            run_id=self._run_id,
+            mode=self._run_mode,
+            settings={
+                'ticker_limit': self.ticker_limit,
+                'lookback_window': self.lookback_window,
+                'min_correlation': self.min_correlation,
+                'max_daily_candidates': self.max_daily_candidates,
+            },
+        )
 
     def before_market_opens(self):
         """
@@ -126,12 +105,11 @@ class BobsBrain(Strategy):
             if math.isnan(corr):
                 print(f"Warning: NaN correlation for existing pair {symbol}, forcing sell.")
                 pair['action'] = 'sell'
-                if self._db:
-                    self._db.deactivate_pair(symbol)
+                self._db.deactivate_pair(symbol)
                 continue
-            pair['corr'] = corr
 
-            if self._db and pair.get('pair_id'):
+            pair['corr'] = corr
+            if pair.get('pair_id'):
                 self._db.update_pair_correlation(pair['pair_id'], corr)
 
             if pair['corr'] < self.min_correlation:
@@ -148,18 +126,20 @@ class BobsBrain(Strategy):
         start_date = datetime.now() - timedelta(days=self.lookback_window)
         end_date = datetime.now()
 
-        if self._cache:
-            tickers = self._db.get_tickers() if self._db else []
-            if self.ticker_limit:
-                tickers = tickers[:self.ticker_limit]
-            stock_data = self._cache.get_prices(tickers, start_date, end_date)
-        else:
-            yahoo_reader = YahooDBReader()
-            stock_data = yahoo_reader.get_all_stocks(
-                start_date=start_date, end_date=end_date, limit=self.ticker_limit
-            )
+        tickers = self._db.get_tickers()
+        if not tickers:
+            # First run or after a nightly refresh — populate tickers from Alpaca
+            print("Tickers table empty, fetching tradeable assets from Alpaca...")
+            tickers = self._alpaca.get_tradeable_assets()
+            self._db.upsert_tickers(tickers, 'ALPACA')
+
+        if self.ticker_limit:
+            tickers = tickers[:self.ticker_limit]
+
+        stock_data = self._cache.get_prices(tickers, start_date, end_date)
 
         if stock_data.empty:
+            print("Warning: no price data available for pair discovery.")
             return
 
         new_candidates = 0
@@ -193,11 +173,7 @@ class BobsBrain(Strategy):
                 'corr':       correlation,
                 'action':     action,
             }
-
-            if self._db:
-                pair_id = self._db.save_pair(new_pair)
-                new_pair['pair_id'] = pair_id
-
+            new_pair['pair_id'] = self._db.save_pair(new_pair)
             self.pairs[stock2] = new_pair
             new_candidates += 1
 
@@ -217,19 +193,17 @@ class BobsBrain(Strategy):
                 if position and position.quantity > 0:
                     order = self.create_order(symbol, position.quantity, 'sell')
                     self.submit_order(order)
-                    if self._db and self._run_id:
-                        price = self.get_last_price(symbol) or 0
-                        self._db.log_trade(
-                            run_id=self._run_id,
-                            symbol=symbol,
-                            side='sell',
-                            quantity=float(position.quantity),
-                            price=float(price),
-                            filled_at=now,
-                            pair_id=pair.get('pair_id'),
-                        )
-                if self._db:
-                    self._db.deactivate_pair(symbol)
+                    price = self.get_last_price(symbol) or 0
+                    self._db.log_trade(
+                        run_id=self._run_id,
+                        symbol=symbol,
+                        side='sell',
+                        quantity=float(position.quantity),
+                        price=float(price),
+                        filled_at=now,
+                        pair_id=pair.get('pair_id'),
+                    )
+                self._db.deactivate_pair(symbol)
                 to_remove.append(symbol)
 
         for symbol in to_remove:
@@ -251,16 +225,15 @@ class BobsBrain(Strategy):
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
-                        if self._db and self._run_id:
-                            self._db.log_trade(
-                                run_id=self._run_id,
-                                symbol=pair['lag_stock'],
-                                side='buy',
-                                quantity=float(quantity),
-                                price=float(price),
-                                filled_at=now,
-                                pair_id=pair.get('pair_id'),
-                            )
+                        self._db.log_trade(
+                            run_id=self._run_id,
+                            symbol=pair['lag_stock'],
+                            side='buy',
+                            quantity=float(quantity),
+                            price=float(price),
+                            filled_at=now,
+                            pair_id=pair.get('pair_id'),
+                        )
 
         # --- Log indicators ---
         portfolio_value = self.portfolio_value
@@ -287,16 +260,15 @@ class BobsBrain(Strategy):
         self.add_line("daily_buys",   float(len(buy_pairs)))
         self.add_line("daily_sells",  float(len(to_remove)))
 
-        if self._db and self._run_id:
-            self._db.log_snapshot(
-                run_id=self._run_id,
-                time=now,
-                portfolio_value=float(portfolio_value),
-                cash=float(self.cash),
-                spy_value=spy_value,
-                active_pairs=len(active_pairs),
-                avg_correlation=round(avg_corr, 4),
-                cash_ratio=round(self.cash / portfolio_value, 4),
-                daily_buys=len(buy_pairs),
-                daily_sells=len(to_remove),
-            )
+        self._db.log_snapshot(
+            run_id=self._run_id,
+            time=now,
+            portfolio_value=float(portfolio_value),
+            cash=float(self.cash),
+            spy_value=spy_value,
+            active_pairs=len(active_pairs),
+            avg_correlation=round(avg_corr, 4),
+            cash_ratio=round(self.cash / portfolio_value, 4),
+            daily_buys=len(buy_pairs),
+            daily_sells=len(to_remove),
+        )
