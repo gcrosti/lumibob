@@ -28,7 +28,7 @@ class BobsBrain(Strategy):
       below '1D' in future so orders can be spread across multiple intraday
       iterations without re-running the expensive evaluation step.
 
-    Requires DB_URL, ALPACA_API_KEY, and ALPACA_SECRET_KEY to be set (via .env
+    Requires DB_URL, ALPACA_API_KEY, and ALPACA_API_SECRET to be set (via .env
     or environment). Raises EnvironmentError on startup if any are missing.
     """
 
@@ -193,16 +193,19 @@ class BobsBrain(Strategy):
                 if position and position.quantity > 0:
                     order = self.create_order(symbol, position.quantity, 'sell')
                     self.submit_order(order)
-                    price = self.get_last_price(symbol) or 0
-                    self._db.log_trade(
-                        run_id=self._run_id,
-                        symbol=symbol,
-                        side='sell',
-                        quantity=float(position.quantity),
-                        price=float(price),
-                        filled_at=now,
-                        pair_id=pair.get('pair_id'),
-                    )
+                    price = self.get_last_price(symbol)
+                    if price and price > 0:
+                        self._db.log_trade(
+                            run_id=self._run_id,
+                            symbol=symbol,
+                            side='sell',
+                            quantity=float(position.quantity),
+                            price=float(price),
+                            filled_at=now,
+                            pair_id=pair.get('pair_id'),
+                        )
+                    else:
+                        print(f"Warning: could not log sell trade for {symbol} — price unavailable.")
                 self._db.deactivate_pair(symbol)
                 to_remove.append(symbol)
 
