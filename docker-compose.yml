@@ -1,0 +1,19 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: lumibob
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: lumibob
+    ports:
+      - "5432:5432"
+    volumes:
+      - lumibob_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lumibob"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  lumibob_data:
