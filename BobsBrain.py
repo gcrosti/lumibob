@@ -46,12 +46,12 @@ class BobsBrain(Strategy):
 
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
-        secret_key = os.getenv('ALPACA_SECRET_KEY')
+        secret_key = os.getenv('ALPACA_API_SECRET')
 
         missing = [name for name, val in [
             ('DB_URL', db_url),
             ('ALPACA_API_KEY', api_key),
-            ('ALPACA_SECRET_KEY', secret_key),
+            ('ALPACA_API_SECRET', secret_key),
         ] if not val]
         if missing:
             raise EnvironmentError(
@@ -63,7 +63,7 @@ class BobsBrain(Strategy):
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
-            paper=os.getenv('ALPACA_PAPER', 'true').lower() == 'true',
+            paper=os.getenv('ALPACA_IS_PAPER', 'true').lower() == 'true',
             mode=self._run_mode,
         )
         self._cache = StockDataCache(self._db, self._alpaca)

@@ -71,7 +71,7 @@ class DatabaseClient:
             return pd.DataFrame()
 
         df = pd.DataFrame(rows, columns=["time", "symbol", "close"])
-        df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(None)
+        df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(None)
         return df.pivot(index="time", columns="symbol", values="close")
 
     def upsert_prices(self, df: pd.DataFrame) -> None:
@@ -91,12 +91,7 @@ class DatabaseClient:
                 val = row[symbol]
                 if pd.isna(val):
                     continue
-                if hasattr(df.columns, "levels"):
-                    close = val
-                    rows.append((pd.Timestamp(ts), symbol, None, None, None, close, None))
-                else:
-                    close = val
-                    rows.append((pd.Timestamp(ts), symbol, None, None, None, close, None))
+                rows.append((pd.Timestamp(ts), symbol, None, None, None, float(val), None))
 
         sql = """
             INSERT INTO stock_prices (time, symbol, open, high, low, close, volume)
@@ -207,13 +202,14 @@ class DatabaseClient:
         today = date.today()
         with self._conn() as conn:
             with conn.cursor() as cur:
+                corr = pair.get("corr")
                 cur.execute(sql, (
                     pair["lead_stock"],
                     pair["lag_stock"],
                     pair.get("lag", 1),
                     pair.get("short_ma", 2),
                     pair.get("long_ma", 5),
-                    pair.get("corr"),
+                    float(corr) if corr is not None else None,
                     today,
                     today,
                 ))
@@ -235,7 +231,7 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE pairs SET correlation=%s, last_updated=%s WHERE id=%s",
-                    (correlation, date.today(), pair_id),
+                    (float(correlation), date.today(), pair_id),
                 )
 
     def deactivate_pair(self, lag_symbol: str) -> None:
@@ -288,17 +284,20 @@ class DatabaseClient:
                  daily_buys, daily_sells)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
+        def _f(v):
+            return float(v) if v is not None else None
+
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     time,
                     run_id,
-                    metrics.get("portfolio_value"),
-                    metrics.get("cash"),
-                    metrics.get("spy_value"),
+                    _f(metrics.get("portfolio_value")),
+                    _f(metrics.get("cash")),
+                    _f(metrics.get("spy_value")),
                     metrics.get("active_pairs"),
-                    metrics.get("avg_correlation"),
-                    metrics.get("cash_ratio"),
+                    _f(metrics.get("avg_correlation")),
+                    _f(metrics.get("cash_ratio")),
                     metrics.get("daily_buys"),
                     metrics.get("daily_sells"),
                 ))

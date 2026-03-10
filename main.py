@@ -16,8 +16,8 @@ if __name__ == '__main__':
 
         ALPACA_CONFIG = {
             'API_KEY':    os.getenv('ALPACA_API_KEY'),
-            'API_SECRET': os.getenv('ALPACA_SECRET_KEY'),
-            'PAPER':      os.getenv('ALPACA_PAPER', 'true').lower() == 'true',
+            'API_SECRET': os.getenv('ALPACA_API_SECRET'),
+            'PAPER':      os.getenv('ALPACA_IS_PAPER', 'true').lower() == 'true',
         }
         broker = Alpaca(ALPACA_CONFIG)
         strategy = BobsBrain(
