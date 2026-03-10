@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS pairs (
     active        BOOLEAN     NOT NULL DEFAULT TRUE
 );
 
+-- Enforce one active configuration per lead/lag/lag_days triple.
+-- Required for save_pair()'s ON CONFLICT DO NOTHING to work correctly.
+CREATE UNIQUE INDEX IF NOT EXISTS pairs_lead_lag_days_idx
+    ON pairs (lead_symbol, lag_symbol, lag_days);
+
 CREATE INDEX IF NOT EXISTS pairs_lag_symbol_active_idx
     ON pairs (lag_symbol, active);
 
