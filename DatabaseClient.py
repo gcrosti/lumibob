@@ -76,11 +76,11 @@ class DatabaseClient:
 
     def upsert_prices(self, df: pd.DataFrame) -> None:
         """
-        Bulk-insert OHLCV rows. df must have a DatetimeIndex and symbol
-        columns containing close prices (at minimum). Extra OHLCV columns
-        (open, high, low, volume) are used when present.
+        Bulk-insert close prices. df must have a DatetimeIndex and symbol
+        columns containing close prices.
 
         Duplicate (symbol, time) rows are silently skipped.
+        Use upsert_ohlcv() when full OHLCV data is available.
         """
         if df.empty:
             return
@@ -91,12 +91,7 @@ class DatabaseClient:
                 val = row[symbol]
                 if pd.isna(val):
                     continue
-                if hasattr(df.columns, "levels"):
-                    close = val
-                    rows.append((pd.Timestamp(ts), symbol, None, None, None, close, None))
-                else:
-                    close = val
-                    rows.append((pd.Timestamp(ts), symbol, None, None, None, close, None))
+                rows.append((pd.Timestamp(ts), symbol, None, None, None, float(val), None))
 
         sql = """
             INSERT INTO stock_prices (time, symbol, open, high, low, close, volume)
@@ -201,7 +196,7 @@ class DatabaseClient:
                 (lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
                  correlation, discovered_at, last_updated, active)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (lead_symbol, lag_symbol, lag_days) DO NOTHING
             RETURNING id
         """
         today = date.today()

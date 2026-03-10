@@ -117,6 +117,66 @@ class TestUpsertPrices:
             rows = mock_ev.call_args[0][2]
             assert len(rows) == 2
 
+    def test_skips_nan_values(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool)
+
+        import numpy as np
+        df = pd.DataFrame(
+            {"AAPL": [150.0, np.nan], "MSFT": [np.nan, 300.0]},
+            index=pd.to_datetime(["2025-01-02", "2025-01-03"]),
+        )
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.upsert_prices(df)
+            rows = mock_ev.call_args[0][2]
+            assert len(rows) == 2  # one valid value per symbol
+
+
+# ---------------------------------------------------------------------------
+# upsert_ohlcv
+# ---------------------------------------------------------------------------
+
+class TestUpsertOhlcv:
+    def test_skips_empty_records(self):
+        client, mock_pool = _make_client()
+
+        client.upsert_ohlcv([])
+
+        mock_pool.getconn.assert_not_called()
+
+    def test_inserts_full_ohlcv_records(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool)
+
+        records = [
+            {
+                "time": datetime(2025, 1, 2), "symbol": "AAPL",
+                "open": 148.0, "high": 151.0, "low": 147.0,
+                "close": 150.0, "volume": 1000,
+            }
+        ]
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.upsert_ohlcv(records)
+            assert mock_ev.called
+            rows = mock_ev.call_args[0][2]
+            assert len(rows) == 1
+            assert rows[0][1] == "AAPL"
+            assert rows[0][5] == 150.0  # close is index 5
+
+    def test_handles_missing_optional_ohlcv_fields(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool)
+
+        records = [{"time": datetime(2025, 1, 2), "symbol": "TSLA", "close": 200.0}]
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.upsert_ohlcv(records)
+            rows = mock_ev.call_args[0][2]
+            assert rows[0][2] is None  # open
+            assert rows[0][6] is None  # volume
+
 
 # ---------------------------------------------------------------------------
 # Ticker universe
@@ -177,6 +237,34 @@ class TestPairs:
         result = client.save_pair(pair)
 
         assert result == 42
+
+    def test_save_pair_fetches_existing_id_on_conflict(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=None)
+        # First execute (INSERT) returns nothing (conflict); second (SELECT) returns id
+        mock_cur.fetchone.side_effect = [None, (99,)]
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.88,
+        }
+        result = client.save_pair(pair)
+
+        assert result == 99
+        assert mock_cur.execute.call_count == 2
+
+    def test_update_pair_correlation_executes_update(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_correlation(7, 0.93)
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "UPDATE pairs" in sql
+        assert "correlation" in sql
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] == 0.93
+        assert params[2] == 7
 
     def test_deactivate_pair_executes_update(self):
         client, mock_pool = _make_client()
