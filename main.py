@@ -1,23 +1,46 @@
+import os
 from datetime import datetime
-from lumibot.backtesting import YahooDataBacktesting
+
+from dotenv import load_dotenv
 
 from BobsBrain import BobsBrain
 
+load_dotenv()
+
+RUN_MODE = os.getenv('RUN_MODE', 'backtest')
 
 if __name__ == '__main__':
-    backtesting_start = datetime(2025, 11, 1)
-    backtesting_end = datetime(2025, 11, 14)
-    result = BobsBrain.backtest(
-        YahooDataBacktesting,
-        backtesting_start,
-        backtesting_end,
-        budget=10000,
-        parameters={'ticker_limit': 30},
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-    )
+    if RUN_MODE == 'paper':
+        from lumibot.brokers import Alpaca
+        from lumibot.traders import Trader
 
-    print(result)
+        ALPACA_CONFIG = {
+            'API_KEY':    os.getenv('ALPACA_API_KEY'),
+            'API_SECRET': os.getenv('ALPACA_SECRET_KEY'),
+            'PAPER':      os.getenv('ALPACA_PAPER', 'true').lower() == 'true',
+        }
+        broker = Alpaca(ALPACA_CONFIG)
+        strategy = BobsBrain(
+            broker=broker,
+            parameters={'ticker_limit': 100},
+        )
+        trader = Trader()
+        trader.add_strategy(strategy)
+        trader.run_all()
 
+    else:
+        from lumibot.backtesting import YahooDataBacktesting
 
+        backtesting_start = datetime(2025, 11, 1)
+        backtesting_end = datetime(2025, 11, 14)
+        result = BobsBrain.backtest(
+            YahooDataBacktesting,
+            backtesting_start,
+            backtesting_end,
+            budget=10000,
+            parameters={'ticker_limit': 30},
+            show_plot=False,
+            show_tearsheet=False,
+            save_tearsheet=False,
+        )
+        print(result)
