@@ -69,7 +69,7 @@ class BobsBrain(Strategy):
         self._cache = StockDataCache(self._db, self._alpaca)
 
         self._run_id = secrets.token_hex(3)
-        self.pairs = self._db.load_active_pairs()
+        self.pairs = self._db.load_active_pairs(self._run_id)
         self._db.create_run(
             run_id=self._run_id,
             mode=self._run_mode,
@@ -171,7 +171,7 @@ class BobsBrain(Strategy):
                 'corr':       correlation,
                 'action':     action,
             }
-            new_pair['pair_id'] = self._db.save_pair(new_pair)
+            new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
             self.pairs[stock2] = new_pair
             new_candidates += 1
 
@@ -204,7 +204,7 @@ class BobsBrain(Strategy):
                         )
                     else:
                         print(f"Warning: could not log sell trade for {symbol} — price unavailable.")
-                self._db.deactivate_pair(symbol)
+                self._db.deactivate_pair(symbol, self._run_id)
                 to_remove.append(symbol)
 
         for symbol in to_remove:

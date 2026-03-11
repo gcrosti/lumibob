@@ -54,9 +54,14 @@ SELECT add_retention_policy('stock_prices', INTERVAL '2 years',
 -- Replaces pairs/pair_history.json. Each row carries the full pair config so
 -- historical queries can answer "which pairs had the highest correlation?" or
 -- "how did pairs discovered in November perform vs. December?"
+--
+-- run_id scopes each pair to the run that discovered it, mirroring the
+-- pattern used by trades and portfolio_snapshots. This prevents active pairs
+-- from one run polluting pair discovery and loading in subsequent runs.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pairs (
     id            SERIAL PRIMARY KEY,
+    run_id        VARCHAR(10) REFERENCES backtest_runs(run_id),
     lead_symbol   VARCHAR(20) NOT NULL,
     lag_symbol    VARCHAR(20) NOT NULL,
     lag_days      INT         NOT NULL DEFAULT 1,
@@ -68,10 +73,12 @@ CREATE TABLE IF NOT EXISTS pairs (
     active        BOOLEAN     NOT NULL DEFAULT TRUE
 );
 
--- Enforce one active configuration per lead/lag/lag_days triple.
--- Required for save_pair()'s ON CONFLICT DO NOTHING to work correctly.
-CREATE UNIQUE INDEX IF NOT EXISTS pairs_lead_lag_days_idx
-    ON pairs (lead_symbol, lag_symbol, lag_days);
+-- One active configuration per (run, lead, lag, lag_days) triple.
+-- Partial index: only enforced when run_id is set so legacy NULL rows
+-- (created before this column existed) are left untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS pairs_run_lead_lag_days_idx
+    ON pairs (run_id, lead_symbol, lag_symbol, lag_days)
+    WHERE run_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS pairs_lag_symbol_active_idx
     ON pairs (lag_symbol, active);
