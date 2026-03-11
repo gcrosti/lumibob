@@ -275,3 +275,6 @@ class BobsBrain(Strategy):
             daily_buys=len(buy_pairs),
             daily_sells=len(to_remove),
         )
+
+    def on_strategy_end(self):
+        self._db.close_run(self._run_id)
