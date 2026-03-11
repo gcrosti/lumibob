@@ -155,20 +155,22 @@ class DatabaseClient:
     # Pairs persistence  (replaces pairs/pair_history.json)
     # ------------------------------------------------------------------
 
-    def load_active_pairs(self) -> dict:
+    def load_active_pairs(self, run_id: str) -> dict:
         """
-        Return active pairs as a dict keyed by lag_symbol — the same shape
-        that pair_history.json used — for drop-in compatibility with BobsBrain.
+        Return active pairs for the given run as a dict keyed by lag_symbol —
+        the same shape that pair_history.json used — for drop-in compatibility
+        with BobsBrain.
         """
         sql = """
             SELECT id, lead_symbol, lag_symbol, lag_days,
                    short_ma, long_ma, correlation
             FROM   pairs
             WHERE  active = TRUE
+              AND  run_id = %s
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql)
+                cur.execute(sql, (run_id,))
                 rows = cur.fetchall()
 
         result: dict = {}
@@ -186,17 +188,20 @@ class DatabaseClient:
             }
         return result
 
-    def save_pair(self, pair: dict) -> int:
+    def save_pair(self, pair: dict, run_id: str) -> int:
         """
-        Upsert a pair row (matched on lead_symbol + lag_symbol + lag_days).
-        Returns the pair id.
+        Insert a new pair row scoped to run_id. Returns the new pair id.
+        Silently skips if the same (run_id, lead, lag, lag_days) already exists
+        and returns the existing id instead.
         """
         sql = """
             INSERT INTO pairs
-                (lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
+                (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
                  correlation, discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-            ON CONFLICT DO NOTHING
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
+                WHERE run_id IS NOT NULL
+            DO NOTHING
             RETURNING id
         """
         today = date.today()
@@ -204,6 +209,7 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 corr = pair.get("corr")
                 cur.execute(sql, (
+                    run_id,
                     pair["lead_stock"],
                     pair["lag_stock"],
                     pair.get("lag", 1),
@@ -217,10 +223,12 @@ class DatabaseClient:
                 if row:
                     return row[0]
 
-                # Row already exists — fetch its id
+                # Row already exists for this run — fetch its id
                 cur.execute(
-                    "SELECT id FROM pairs WHERE lead_symbol=%s AND lag_symbol=%s AND lag_days=%s",
-                    (pair["lead_stock"], pair["lag_stock"], pair.get("lag", 1)),
+                    """SELECT id FROM pairs
+                       WHERE run_id=%s AND lead_symbol=%s
+                         AND lag_symbol=%s AND lag_days=%s""",
+                    (run_id, pair["lead_stock"], pair["lag_stock"], pair.get("lag", 1)),
                 )
                 result = cur.fetchone()
                 return result[0] if result else -1
@@ -234,13 +242,13 @@ class DatabaseClient:
                     (float(correlation), date.today(), pair_id),
                 )
 
-    def deactivate_pair(self, lag_symbol: str) -> None:
-        """Mark all active pairs for the given lag symbol as inactive."""
+    def deactivate_pair(self, lag_symbol: str, run_id: str) -> None:
+        """Mark active pairs for the given lag symbol and run as inactive."""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE pairs SET active=FALSE WHERE lag_symbol=%s AND active=TRUE",
-                    (lag_symbol,),
+                    "UPDATE pairs SET active=FALSE WHERE lag_symbol=%s AND run_id=%s AND active=TRUE",
+                    (lag_symbol, run_id),
                 )
 
     # ------------------------------------------------------------------
