@@ -13,33 +13,75 @@ LumiBob implements a **lead/lag correlation strategy** on NYSE/Nasdaq stocks:
 - Entry signal: short MA (default 2) crosses above long MA (default 5) on the lead stock
 - Exit signal: short MA crosses below long MA, or correlation drops below `0.8`
 - Position sizing: 50% of available cash split equally across all buy candidates on a given day
-- Max 10 new pairs discovered per trading day; pairs persist in `pairs/pair_history.json`
+- Max 10 new pairs discovered per trading day; pairs persist in the **`pairs` database table** (previously `pairs/pair_history.json`)
+
+## Data Storage
+
+Run data is stored in a **PostgreSQL/TimescaleDB database** (connection string: `$DB_URL`, default `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+
+| Need | Primary source | Fallback (older runs only) |
+|---|---|---|
+| Run config | `backtest_runs` table (`settings` JSONB column) | `logs/*_settings.json` |
+| Portfolio timeline | `portfolio_snapshots` table | `logs/*_stats.csv` |
+| Trade fills | `trades` table | `logs/*_trade_events.csv` |
+| Active pairs | `pairs` table (`active = TRUE`) | ~~`pairs/pair_history.json`~~ (removed) |
+| Price history | `stock_prices` table (TimescaleDB hypertable) | Alpaca API via `StockDataCache` |
+
+Historical ticker price data is served by `StockDataCache`, which implements a read-through cache: DB first, falling back to Alpaca only for missing symbols or date gaps. Always query the DB directly for evaluation — never call `yfinance` or Alpaca.
 
 ## Evaluation Workflow
 
 When asked to evaluate a backtest, follow these steps in order:
 
 **Step 1 — Identify the run**
-List files in `logs/` and find all files sharing the target `<6-char-id>`. If no ID is specified, use the most recent run (sort by date prefix in the filename).
+Query the DB for the target run. If no ID is given, use the most recent run:
+```sql
+SELECT run_id, mode, started_at, completed_at, settings
+FROM backtest_runs
+ORDER BY started_at DESC
+LIMIT 1;
+```
+As a fallback for runs that pre-date the DB, list files in `logs/` and find all files sharing the target `<6-char-id>`.
 
 **Step 2 — Load configuration**
-Read `_settings.json`. Report: date range, budget, `ticker_limit`, and `backtest_time_seconds`.
+Read the `settings` JSONB field from `backtest_runs`. Report: date range, budget, `ticker_limit`, and `backtest_time_seconds`. Fallback: read `logs/*_settings.json`.
 
 **Step 3 — Evaluate portfolio performance**
-Read `_stats.csv`. Compute and report:
+Query `portfolio_snapshots` for the run. Compute and report:
+```sql
+SELECT time, portfolio_value, cash, spy_value,
+       active_pairs, avg_correlation, cash_ratio,
+       daily_buys, daily_sells
+FROM portfolio_snapshots
+WHERE run_id = '<run_id>'
+ORDER BY time;
+```
 - **Total return %**: `(final portfolio_value - budget) / budget * 100`
 - **Max drawdown %**: largest peak-to-trough drop in `portfolio_value`
 - **Portfolio curve**: describe the shape (flat, steady growth, volatile, sharp drawdown, etc.)
-- **Cash utilization**: average `cash / portfolio_value` — high values mean capital was idle
+- **Cash utilization**: average `cash_ratio` — high values mean capital was idle
+- **SPY comparison**: compare `portfolio_value` trajectory vs `spy_value` (both normalised to starting budget)
+- **Avg active pairs / avg correlation**: from `active_pairs` and `avg_correlation` columns
+
+Fallback: read `logs/*_stats.csv`.
 
 **Step 4 — Evaluate trade activity**
-Read `_trade_events.csv`, filter to `status=fill`. Compute and report:
-- **Total filled orders**: count of fill rows
-- **Buy/sell split**: count of `side=buy` vs `side=sell` fills
-- **Avg slippage per trade**: mean of `trade_slippage` where non-zero
+Query the `trades` table (all rows are fills — no status filtering needed):
+```sql
+SELECT symbol, side, quantity, price, slippage, filled_at, pair_id
+FROM trades
+WHERE run_id = '<run_id>'
+ORDER BY filled_at;
+```
+Compute and report:
+- **Total filled orders**: count of rows
+- **Buy/sell split**: count of `side='buy'` vs `side='sell'`
+- **Avg slippage per trade**: mean of `slippage` where non-zero
 - **Symbols traded**: unique tickers and frequency
 
-To compute **win rate and avg P&L per pair**: match each `sell` fill to its corresponding `buy` fill by `symbol`. P&L = `(sell_price - buy_price) * filled_quantity - slippage`.
+To compute **win rate and avg P&L per pair**: match each `sell` to its corresponding `buy` by `symbol` (and optionally `pair_id`). P&L = `(sell_price - buy_price) * quantity - slippage`.
+
+Fallback: read `logs/*_trade_events.csv`, filter to `status=fill`.
 
 **Step 5 — Flag anomalies**
 Raise these as warnings if present:
@@ -48,10 +90,11 @@ Raise these as warnings if present:
 - Cash utilization > 80% throughout (strategy rarely investing)
 - Avg slippage unusually high relative to trade cost
 - Sells without matching buys (position tracking bug)
+- `completed_at IS NULL` in `backtest_runs` — run may have crashed before finishing
 
 ## Proposing Code Improvements
 
-If the available log data is insufficient for a requested metric (e.g., Sharpe ratio, per-pair P&L breakdown, holding period analysis, benchmark comparison), propose adding a `BacktestEvaluator.py` utility class to the project. When doing so:
+If the available data is insufficient for a requested metric (e.g., Sharpe ratio, per-pair P&L breakdown, holding period analysis, benchmark comparison), propose adding a `BacktestEvaluator.py` utility class to the project. When doing so:
 1. Outline what the class would compute and how
 2. Create a feature branch and open a pull request with the implementation
-3. The class should load log files by run ID and expose a `.evaluate()` method returning a structured summary dict
+3. The class should accept a `DatabaseClient` and a `run_id`, and expose an `.evaluate()` method returning a structured summary dict — it should **not** read log files
