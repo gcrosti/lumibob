@@ -103,10 +103,8 @@ class BobsBrain(Strategy):
 
             corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
             if math.isnan(corr):
-                print(f"Warning: NaN correlation for existing pair {symbol}, forcing sell.")
-                pair['action'] = 'sell'
-                self._db.deactivate_pair(symbol)
-                continue
+                print(f"Warning: NaN correlation for existing pair {symbol}, defaulting to 0.")
+                corr = 0.0
 
             pair['corr'] = corr
             if pair.get('pair_id'):
