@@ -153,18 +153,28 @@ class TestPairs:
             (1, "AAPL", "MSFT", 1, 2, 5, 0.91),
         ])
 
-        result = client.load_active_pairs()
+        result = client.load_active_pairs("run01")
 
         assert "MSFT" in result
         assert result["MSFT"]["lead_stock"] == "AAPL"
         assert result["MSFT"]["pair_id"] == 1
         assert result["MSFT"]["action"] == "hold"
 
+    def test_load_active_pairs_filters_by_run_id(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[])
+
+        client.load_active_pairs("run01")
+
+        sql, params = mock_cur.execute.call_args[0]
+        assert "run_id" in sql
+        assert params == ("run01",)
+
     def test_load_active_pairs_returns_empty_dict_when_none(self):
         client, mock_pool = _make_client()
         _mock_conn(mock_pool, fetchall_return=[])
 
-        assert client.load_active_pairs() == {}
+        assert client.load_active_pairs("run01") == {}
 
     def test_save_pair_returns_id_from_insert(self):
         client, mock_pool = _make_client()
@@ -174,19 +184,41 @@ class TestPairs:
             "lead_stock": "AAPL", "lag_stock": "MSFT",
             "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.88,
         }
-        result = client.save_pair(pair)
+        result = client.save_pair(pair, "run01")
 
         assert result == 42
+
+    def test_save_pair_includes_run_id_in_params(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(42,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.88,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert params[0] == "run01"
 
     def test_deactivate_pair_executes_update(self):
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
-        client.deactivate_pair("MSFT")
+        client.deactivate_pair("MSFT", "run01")
 
         sql_called = mock_cur.execute.call_args[0][0]
         assert "active=FALSE" in sql_called
-        assert mock_cur.execute.call_args[0][1] == ("MSFT",)
+        assert mock_cur.execute.call_args[0][1] == ("MSFT", "run01")
+
+    def test_deactivate_pair_scopes_to_run_id(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.deactivate_pair("MSFT", "run01")
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "run_id" in sql
 
 
 # ---------------------------------------------------------------------------
