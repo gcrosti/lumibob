@@ -1,59 +1,113 @@
 ---
-description: LumiBob backtest log file structure, naming convention, and column reference
+description: LumiBob data storage — database schema (primary) and legacy log file reference
 globs: logs/**
 alwaysApply: false
 ---
 
-# LumiBob Log File Schema
+# LumiBob Data Storage
 
-## Naming Convention
+## Primary Store — PostgreSQL / TimescaleDB
 
+All run data, price history, and pair state are stored in a TimescaleDB database.
+Connection string: `$DB_URL` (default: `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+Schema is defined in `schema.sql`. Apply once via: `psql $DB_URL -f schema.sql`.
+
+### `backtest_runs`
+One row per backtest or paper trading run. Replaces `_settings.json`.
+
+| Column | Type | Description |
+|---|---|---|
+| `run_id` | VARCHAR(10) PK | 6-char Lumibot run ID |
+| `mode` | VARCHAR(10) | `backtest` or `paper` |
+| `started_at` | TIMESTAMPTZ | Strategy startup time |
+| `completed_at` | TIMESTAMPTZ | Strategy finish time (`NULL` if crashed) |
+| `settings` | JSONB | Full settings dict (budget, date range, ticker_limit, etc.) |
+
+### `portfolio_snapshots`
+One row per trading day per run. Replaces `_stats.csv` and `_indicators.csv`. TimescaleDB hypertable.
+
+| Column | Type | Description |
+|---|---|---|
+| `time` | TIMESTAMPTZ | Trading day timestamp |
+| `run_id` | VARCHAR(10) | FK → `backtest_runs` |
+| `portfolio_value` | NUMERIC | Total portfolio value |
+| `cash` | NUMERIC | Uninvested cash |
+| `spy_value` | NUMERIC | SPY normalised to starting portfolio value |
+| `active_pairs` | INT | Number of pairs being monitored |
+| `avg_correlation` | NUMERIC | Mean Pearson correlation across active pairs |
+| `cash_ratio` | NUMERIC | `cash / portfolio_value` |
+| `daily_buys` | INT | Buy orders submitted that day |
+| `daily_sells` | INT | Sell orders submitted that day |
+
+### `trades`
+One row per filled order. Replaces `_trade_events.csv`. All rows are fills — no status filtering needed.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | SERIAL PK | Auto-increment |
+| `run_id` | VARCHAR(10) | FK → `backtest_runs` |
+| `pair_id` | INT | FK → `pairs` (nullable) |
+| `symbol` | VARCHAR(20) | Ticker traded |
+| `side` | VARCHAR(4) | `buy` or `sell` |
+| `quantity` | NUMERIC | Shares filled |
+| `price` | NUMERIC | Fill price |
+| `slippage` | NUMERIC | Slippage incurred (default 0) |
+| `filled_at` | TIMESTAMPTZ | Execution timestamp |
+
+### `pairs`
+Discovered lead/lag pairs. Replaces `pairs/pair_history.json` (that file is no longer used).
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | SERIAL PK | Auto-increment |
+| `lead_symbol` | VARCHAR(20) | Lead ticker |
+| `lag_symbol` | VARCHAR(20) | Lag ticker |
+| `lag_days` | INT | Offset in days (default 1) |
+| `short_ma` | INT | Short MA window (default 2) |
+| `long_ma` | INT | Long MA window (default 5) |
+| `correlation` | NUMERIC | Pearson correlation at last update |
+| `discovered_at` | DATE | Date first discovered |
+| `last_updated` | DATE | Date correlation was last recomputed |
+| `active` | BOOLEAN | Whether pair is currently being monitored |
+
+### `stock_prices`
+OHLCV price cache. TimescaleDB hypertable, partitioned by `time`. 2-year rolling retention, compressed after 90 days.
+
+| Column | Type | Description |
+|---|---|---|
+| `time` | TIMESTAMPTZ | Trading day (UTC) |
+| `symbol` | VARCHAR(20) | Ticker |
+| `open/high/low` | NUMERIC | Optional OHLC fields |
+| `close` | NUMERIC | Close price (required) |
+| `volume` | BIGINT | Daily volume |
+
+Price data is served by `StockDataCache` (read-through cache: DB first, Alpaca as fallback for gaps). Never call `yfinance` directly for price data.
+
+### `tickers`
+Tradeable universe. Refreshed nightly via `AlpacaClient.get_tradeable_assets()`.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol` | VARCHAR(20) PK | Ticker |
+| `exchange` | VARCHAR(10) | NYSE, NASDAQ, etc. |
+| `last_updated` | DATE | Date of last refresh |
+
+---
+
+## Legacy Log Files (Lumibot-generated, older runs only)
+
+Lumibot still writes flat files to `logs/` as a side effect. These are **not** the authoritative source for current runs — use the DB instead. They remain useful only for runs that pre-date the DB integration.
+
+### Naming Convention
 ```
 logs/BobsBrain_<YYYY-MM-DD>_<HH-MM>_<6-char-id>_<type>.<ext>
 ```
 
-Each backtest run produces a set of files sharing the same `<6-char-id>`. Group files by that ID to work with a single run.
-
-**Example run ID `pMLhKf`:**
-```
-BobsBrain_2026-03-05_15-19_pMLhKf_settings.json
-BobsBrain_2026-03-05_15-19_pMLhKf_stats.csv
-BobsBrain_2026-03-05_15-19_pMLhKf_trade_events.csv
-BobsBrain_2026-03-05_15-19_pMLhKf_trades.csv
-BobsBrain_2026-03-05_15-19_pMLhKf_indicators.csv
-```
-
 Always prefer `.csv` over `.parquet` — parquet is binary and cannot be read directly.
 
-## File Reference
-
-### `_settings.json`
-Key fields: `backtesting_start`, `backtesting_end`, `budget`, `parameters.ticker_limit`, `benchmark_asset` (always `"SPY"`), `backtest_time_seconds`
-
-### `_stats.csv`
-Portfolio timeline — one row per event (market open, strategy iteration, market close).
-
-| Column | Description |
-|---|---|
-| `datetime` | Timestamp of the event |
-| `portfolio_value` | Total portfolio value at that point |
-| `cash` | Uninvested cash |
-| `positions` | JSON list of open positions |
-| `return` | Cumulative return (decimal) since start |
-
-### `_trade_events.csv`
-Full order lifecycle. Each order has multiple rows: `new` (submitted) → `fill` (executed). **Filter to `status=fill` for completed trades.**
-
-| Column | Description |
-|---|---|
-| `time` | Execution timestamp |
-| `symbol` | Ticker traded |
-| `side` | `buy` or `sell` |
-| `status` | `new`, `fill`, etc. |
-| `price` | Fill price |
-| `filled_quantity` | Shares filled |
-| `trade_cost` | Total cost of the trade |
-| `trade_slippage` | Slippage incurred |
-
-### `_indicators.csv`
-Custom strategy signals. Currently empty (no indicators are being logged by `BobsBrain.py`). Columns: `datetime, name, plot_name, type, value, symbol`.
+### Files produced per run
+- `_settings.json` — run config (superseded by `backtest_runs`)
+- `_stats.csv` — portfolio timeline (superseded by `portfolio_snapshots`)
+- `_trade_events.csv` — full order lifecycle including `new` events; filter to `status=fill` (superseded by `trades`)
+- `_trades.csv` — duplicate of `_trade_events.csv`
+- `_indicators.csv` — custom signals; currently empty
