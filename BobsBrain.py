@@ -1,6 +1,7 @@
 import itertools
 import math
 import os
+import random
 import secrets
 from datetime import datetime, timedelta
 
@@ -134,6 +135,10 @@ class BobsBrain(Strategy):
         if self.ticker_limit:
             tickers = tickers[:self.ticker_limit]
 
+        # Shuffle so pair discovery explores different regions of the universe
+        # each day rather than always starting from the same alphabetical slice.
+        random.shuffle(tickers)
+
         stock_data = self._cache.get_prices(tickers, start_date, end_date)
 
         if stock_data.empty:
@@ -148,6 +153,10 @@ class BobsBrain(Strategy):
                 break
 
             if stock2 in self.pairs or stock2 in position_symbols:
+                continue
+
+            # Skip penny stocks (price < $5) inline — data is already fetched.
+            if stock_data[stock1].iloc[-1] < 5 or stock_data[stock2].iloc[-1] < 5:
                 continue
 
             correlation = stock_evaluator.get_correlation(stock_data[stock1], stock_data[stock2], lag=1)
