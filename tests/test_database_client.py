@@ -231,6 +231,46 @@ class TestPairs:
         sql = mock_cur.execute.call_args[0][0]
         assert "run_id" in sql
 
+    def test_save_pair_includes_simulated_return_when_provided(self):
+        """simulated_return is passed through to the INSERT params."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(7,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 2, "short_ma": 1, "long_ma": 3,
+            "corr": 0.92, "simulated_return": 0.07,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert 0.07 in params
+
+    def test_save_pair_passes_none_for_missing_simulated_return(self):
+        """When simulated_return is absent, None is stored."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(8,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.91,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert None in params
+
+    def test_migrate_pairs_simulated_return_executes_alter(self):
+        """Migration should issue an ALTER TABLE … ADD COLUMN IF NOT EXISTS statement."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_pairs_simulated_return()
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "simulated_return" in sql
+        assert "ADD COLUMN" in sql
+
 
 # ---------------------------------------------------------------------------
 # Run metadata

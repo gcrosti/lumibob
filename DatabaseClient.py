@@ -198,17 +198,36 @@ class DatabaseClient:
             }
         return result
 
+    def migrate_pairs_simulated_return(self) -> None:
+        """
+        Idempotent migration: add the simulated_return column to the pairs table
+        if it does not already exist.  Safe to call on every startup — the ALTER
+        TABLE is a no-op when the column is already present.
+        """
+        sql = """
+            ALTER TABLE pairs
+            ADD COLUMN IF NOT EXISTS simulated_return DOUBLE PRECISION
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+
     def save_pair(self, pair: dict, run_id: str) -> int:
         """
         Insert a new pair row scoped to run_id. Returns the new pair id.
         Silently skips if the same (run_id, lead, lag, lag_days) already exists
         and returns the existing id instead.
+
+        Optional pair keys:
+            simulated_return (float) -- best historical simulated return from
+                                        PairSimulator.optimize(); stored for
+                                        post-run comparison vs actual P&L.
         """
         sql = """
             INSERT INTO pairs
                 (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
-                 correlation, discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                 correlation, simulated_return, discovered_at, last_updated, active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -218,6 +237,7 @@ class DatabaseClient:
         with self._conn() as conn:
             with conn.cursor() as cur:
                 corr = pair.get("corr")
+                sim_ret = pair.get("simulated_return")
                 cur.execute(sql, (
                     run_id,
                     pair["lead_stock"],
@@ -226,6 +246,7 @@ class DatabaseClient:
                     pair.get("short_ma", 2),
                     pair.get("long_ma", 5),
                     float(corr) if corr is not None else None,
+                    float(sim_ret) if sim_ret is not None else None,
                     today,
                     today,
                 ))

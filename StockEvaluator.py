@@ -55,23 +55,3 @@ class StockEvaluator:
             return float(p_value) < p_threshold
         except Exception:
             return False
-
-    def find_optimal_moving_average(self, simulator, lag = 1):
-        """
-        finds the moving average window between two stocks that will generate
-        the highest return when running a full cash switching strategy
-        returns short moving average, long moving average tuple
-        """
-        max_return = 0.0
-        short_moving_average = 1
-        long_moving_average = 2
-
-        for short_ma in range(1,5):
-            for long_ma in range(short_ma + 1,6):
-                r = simulator.run_simulation(short_ma,long_ma,lag=lag)[0]
-                if r > max_return:
-                    max_return = r
-                    short_moving_average = short_ma
-                    long_moving_average = long_ma
-
-        return short_moving_average, long_moving_average
