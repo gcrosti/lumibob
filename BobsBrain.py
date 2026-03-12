@@ -3,8 +3,9 @@ import math
 import os
 import random
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+import pandas as pd
 from dotenv import load_dotenv
 from lumibot.strategies import Strategy
 
@@ -89,21 +90,68 @@ class BobsBrain(Strategy):
         Runs once per trading day before any iterations.
         Updates correlations and actions for existing positions, then
         discovers new candidate pairs up to max_daily_candidates.
+
+        Price data is fetched lazily: each symbol is pulled from StockDataCache
+        the first time it is needed and stored in a per-call cache so that the
+        same symbol is never fetched twice within a single execution. This
+        avoids the previous approach of bulk-fetching the entire ticker universe
+        upfront regardless of how many pairs are ultimately needed.
+
+        Both the existing-positions update and the discovery loop share the
+        same cache, so symbols used in open pairs are free for any subsequent
+        discovery combination that happens to include them.
         """
         stock_evaluator = StockEvaluator()
         simulator = PairSimulator()
 
+        end_date = self.get_datetime()
+        start_date = end_date - timedelta(days=self.lookback_window)
+
+        # Per-call price series cache shared across the whole method.
+        _series_cache: dict[str, pd.Series | None] = {}
+
+        def _get_series(symbol: str) -> pd.Series | None:
+            """Return the close-price series for symbol, fetching once if needed."""
+            if symbol not in _series_cache:
+                df = self._cache.get_prices([symbol], start_date, end_date)
+                if df.empty or symbol not in df.columns:
+                    _series_cache[symbol] = None
+                else:
+                    series = df[symbol].dropna()
+                    _series_cache[symbol] = series if not series.empty else None
+            return _series_cache[symbol]
+
         # --- Update actions for existing positions ---
-        positions = self.get_positions()
-        for position in positions:
+        for position in self.get_positions():
             symbol = position.symbol
             if symbol not in self.pairs:
                 print(f"Warning: open position {symbol} not found in pairs dict, skipping.")
                 continue
 
             pair = self.pairs[symbol]
-            lead_data = self.get_historical_prices(pair['lead_stock'], self.lookback_window, "1d").df['close']
-            lag_data = self.get_historical_prices(pair['lag_stock'], self.lookback_window, "1d").df['close']
+
+            # Always fetch the lag stock — needed for the MA fallback regardless.
+            lag_data = _get_series(pair['lag_stock'])
+            if lag_data is None:
+                pair['action'] = 'sell'
+                continue
+
+            # If yesterday's stored correlation is already below the threshold,
+            # use the lag stock's own MA crossover to decide without fetching
+            # the lead stock at all — no point pulling data for a pair we are
+            # likely to exit anyway.
+            # Default 1.0 when 'corr' is absent: treat as above-threshold so
+            # that the lead stock is always fetched for pairs with unknown corr.
+            if pair.get('corr', 1.0) < self.min_correlation:
+                short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
+                long_ma = lag_data.rolling(window=pair['long_ma'], min_periods=1).mean()
+                pair['action'] = 'sell' if short_ma.iloc[-1] < long_ma.iloc[-1] else 'hold'
+                continue
+
+            lead_data = _get_series(pair['lead_stock'])
+            if lead_data is None:
+                pair['action'] = 'sell'
+                continue
 
             corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
             if math.isnan(corr):
@@ -125,9 +173,6 @@ class BobsBrain(Strategy):
                 )
 
         # --- Discover new pairs ---
-        start_date = datetime.now() - timedelta(days=self.lookback_window)
-        end_date = datetime.now()
-
         tickers = self._db.get_tickers()
         if not tickers:
             # First run or after a nightly refresh — populate tickers from Alpaca
@@ -143,43 +188,41 @@ class BobsBrain(Strategy):
         if self.ticker_limit:
             tickers = tickers[:self.ticker_limit]
 
-        stock_data = self._cache.get_prices(tickers, start_date, end_date)
-
-        if stock_data.empty:
-            print("Warning: no price data available for pair discovery.")
-            return
-
         new_candidates = 0
-        position_symbols = [p.symbol for p in self.get_positions()]
+        position_symbols = {p.symbol for p in self.get_positions()}
 
-        for stock1, stock2 in itertools.combinations(stock_data.columns, 2):
+        for stock1, stock2 in itertools.combinations(tickers, 2):
             if new_candidates >= self.max_daily_candidates:
                 break
 
             if stock2 in self.pairs or stock2 in position_symbols:
                 continue
 
-            if self._is_penny_stock(stock_data[stock1]) or self._is_penny_stock(stock_data[stock2]):
+            # Fetch each stock lazily; skip immediately if no data or penny stock.
+            s1 = _get_series(stock1)
+            if s1 is None or s1.iloc[-1] < 5:
                 continue
 
-            correlation = stock_evaluator.get_correlation(stock_data[stock1], stock_data[stock2], lag=1)
+            s2 = _get_series(stock2)
+            if s2 is None or s2.iloc[-1] < 5:
+                continue
+
+            correlation = stock_evaluator.get_correlation(s1, s2, lag=1)
             if math.isnan(correlation) or correlation < self.min_correlation:
                 continue
 
-            if not stock_evaluator.is_cointegrated(stock_data[stock1], stock_data[stock2]):
+            if not stock_evaluator.is_cointegrated(s1, s2):
                 continue
 
             # Optimize lag and MA parameters via mini-backtest simulation.
             # Rejects pairs where the strategy wouldn't have been historically
             # profitable, or where the signal never fired more than once.
-            sim_result = simulator.optimize(
-                stock_data[stock1], stock_data[stock2], max_lag=self.max_lag
-            )
+            sim_result = simulator.optimize(s1, s2, max_lag=self.max_lag)
             if sim_result.total_return <= 0 or sim_result.num_trades < 2:
                 continue
 
             action = stock_evaluator.get_action(
-                stock_data[stock1], stock_data[stock2],
+                s1, s2,
                 lag=sim_result.lag,
                 short_ma=sim_result.short_ma,
                 long_ma=sim_result.long_ma,
