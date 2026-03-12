@@ -106,7 +106,7 @@ Once the user approves, execute each run in the plan sequentially.
 
 **Step 1 — Update `main.py`**
 
-Edit only the backtest block (lines ~34–44). Change `backtesting_start`, `backtesting_end`, `budget`, and `parameters={'ticker_limit': N}` to the approved values. Do not change any other part of the file.
+Locate the backtest block by finding the `backtesting_start` assignment and the surrounding `BobsBrain.backtest(...)` call. Update `backtesting_start`, `backtesting_end`, `budget`, and `parameters={'ticker_limit': N}` to the approved values. Do not change any other part of the file.
 
 Example of the block to edit:
 ```python
