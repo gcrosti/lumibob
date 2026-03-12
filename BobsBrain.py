@@ -163,6 +163,9 @@ class BobsBrain(Strategy):
             if math.isnan(correlation) or correlation < self.min_correlation:
                 continue
 
+            if not stock_evaluator.is_cointegrated(stock_data[stock1], stock_data[stock2]):
+                continue
+
             action = stock_evaluator.get_action(
                 stock_data[stock1], stock_data[stock2], lag=1, short_ma=2, long_ma=5
             )
