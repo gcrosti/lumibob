@@ -1,0 +1,150 @@
+---
+description: LumiBob backtesting agent — reads a PR, designs a tailored backtesting plan, executes on approval, and hands off to the evaluation agent
+alwaysApply: false
+---
+
+# Backtesting Agent
+
+Use this agent when the user asks to run a backtest to evaluate a code change. The workflow is four phases: understand the change, generate a plan, await approval, then execute and hand off.
+
+---
+
+## Phase 1 — Understand the Change
+
+The user will point to a PR (URL or number). Read it with these two commands:
+
+```bash
+gh pr view <PR> --json title,body,files,additions,deletions
+gh pr diff <PR>
+```
+
+From the PR title, description, and diff, determine:
+- **What changed** — which files and which logic areas were affected
+- **Why it changed** — bug fix, optimisation, new feature, refactor, etc.
+
+Classify the change into one or more of these categories (this drives all parameter choices in Phase 2):
+
+| Category | Examples |
+|---|---|
+| **Pair discovery** | Correlation logic, `min_correlation`, `lookback_window`, `max_daily_candidates`, `max_lag` |
+| **Signal generation** | MA window sizes, entry/exit crossover logic |
+| **Position sizing / risk** | Cash allocation fraction, max positions, stop-loss logic |
+| **Bug fix / data fix** | Correctness change; output should now differ from (or match) a baseline |
+| **Performance / infrastructure** | No behavioural change expected; timing or DB/cache layer only |
+
+If the PR's intent or scope is still unclear after reading the diff, ask the user up to **2** targeted clarifying questions before proceeding to Phase 2.
+
+---
+
+## Phase 2 — Generate a Backtesting Plan
+
+Design a backtesting plan tailored to the classified change. Present the plan as structured text before any code or file changes.
+
+### Choosing the run configuration
+
+All parameters map directly to editable values in `main.py` (backtest block):
+
+| Parameter | In `main.py` | Notes |
+|---|---|---|
+| Start date | `backtesting_start = datetime(Y, M, D)` | See date range guidance below |
+| End date | `backtesting_end = datetime(Y, M, D)` | See date range guidance below |
+| Budget | `budget=10000` | Use default unless position sizing is under test |
+| Universe size | `parameters={'ticker_limit': N}` | See tier guidance below |
+
+**Date range by change category:**
+
+- **Quick smoke test** (~1 month, most recent available data): use for infrastructure/performance changes where correctness rather than performance quality is the goal.
+- **Standard validation** (~3 months, recent): use for bug fixes and signal generation changes.
+- **Full validation** (~6 months, spanning at least one volatile and one calm period): use for pair discovery or position sizing changes that affect capital allocation.
+- **Comparative** (two separate runs, ideally one "before" period and one "after" period): use when the change is expected to alter return profile and you want a direct before/after comparison.
+
+**`ticker_limit` tier:**
+
+- `50` — smoke test; fastest, least representative
+- `100` — standard; good balance of speed and coverage (current default)
+- `200+` — full validation; use when pair discovery changes need a large universe to surface differences
+
+**Number of runs:**
+
+- Single run for most changes.
+- Two runs (different date ranges, or `ticker_limit` values) for significant algorithm changes where a single data point is insufficient.
+
+### Signals to watch (by category)
+
+Include the relevant subset in the plan's output so the evaluation agent knows what to focus on:
+
+- **Pair discovery** → `active_pairs` count, `avg_correlation`, total trade count, pair churn rate
+- **Signal generation** → win rate, avg P&L per pair, trade frequency, avg holding period
+- **Position sizing / risk** → cash utilization (`cash_ratio`), max drawdown %, total return %, SPY comparison
+- **Bug fix** → anomaly flags (unmatched sells, zero trades, unchanged portfolio value, `completed_at IS NULL`)
+- **Infrastructure** → `backtest_time_seconds`, equivalence of output vs. a known-good baseline run
+
+### Plan output format
+
+Present the plan with these sections:
+1. **Change summary** — one paragraph describing what the PR does and why a backtest is warranted
+2. **Classification** — which category/categories apply
+3. **Run configuration(s)** — exact date range(s), budget, `ticker_limit`, and number of runs
+4. **Signals to watch** — the specific metrics and anomaly flags most relevant to this change
+5. **Justification** — 1–2 sentences explaining the parameter choices
+
+---
+
+## Phase 3 — Await Approval
+
+After presenting the plan, **stop**. Do not edit any files or run any commands until the user explicitly approves.
+
+If the user requests changes to the plan (different date range, more runs, different `ticker_limit`), revise and re-present before proceeding.
+
+---
+
+## Phase 4 — Execute and Hand Off
+
+Once the user approves, execute each run in the plan sequentially.
+
+### For each run:
+
+**Step 1 — Update `main.py`**
+
+Edit only the backtest block (lines ~34–44). Change `backtesting_start`, `backtesting_end`, `budget`, and `parameters={'ticker_limit': N}` to the approved values. Do not change any other part of the file.
+
+Example of the block to edit:
+```python
+backtesting_start = datetime(2025, 11, 1)
+backtesting_end = datetime(2025, 12, 1)
+result = BobsBrain.backtest(
+    YahooDataBacktesting,
+    backtesting_start,
+    backtesting_end,
+    budget=10000,
+    parameters={'ticker_limit': 100},
+    show_plot=False,
+    show_tearsheet=False,
+    save_tearsheet=False,
+)
+```
+
+**Step 2 — Run the backtest**
+
+```bash
+RUN_MODE=backtest python main.py
+```
+
+Wait for the process to complete. If the run crashes or exits with a non-zero code, report the error output and do not proceed to the next step.
+
+**Step 3 — Retrieve the run ID**
+
+```sql
+SELECT run_id, started_at, completed_at
+FROM backtest_runs
+ORDER BY started_at DESC
+LIMIT 1;
+```
+
+Check that `completed_at IS NOT NULL`. If it is NULL, flag this as an anomaly — the run may have crashed silently before writing the completion timestamp.
+
+**Step 4 — Hand off to the evaluation agent**
+
+Pass the `run_id` to the backtest evaluation workflow (defined in `backtest-evaluation.mdc`). Follow that workflow in full — Steps 1 through 5 — to produce the evaluation report.
+
+If the plan called for multiple runs, complete all runs before handing off. Pass all `run_id` values to the evaluation agent and ask it to compare the results side by side where relevant.
