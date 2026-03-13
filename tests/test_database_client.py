@@ -222,6 +222,69 @@ class TestPairs:
 
 
 # ---------------------------------------------------------------------------
+# Failed ticker registry
+# ---------------------------------------------------------------------------
+
+class TestFailedTickers:
+    def test_migrate_creates_table_if_not_exists(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_failed_tickers()
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "CREATE TABLE IF NOT EXISTS" in sql
+        assert "failed_tickers" in sql
+
+    def test_get_failed_tickers_returns_symbol_list(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[("T.PRA",), ("ACHR.WS",)])
+
+        result = client.get_failed_tickers()
+
+        assert result == ["T.PRA", "ACHR.WS"]
+
+    def test_get_failed_tickers_returns_empty_list_when_none(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[])
+
+        result = client.get_failed_tickers()
+
+        assert result == []
+
+    def test_mark_ticker_failed_inserts_symbol_and_reason(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.mark_ticker_failed("T.PRA", "no data from Alpaca")
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "INSERT INTO failed_tickers" in sql
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] == "T.PRA"
+        assert params[1] == "no data from Alpaca"
+
+    def test_mark_ticker_failed_uses_on_conflict_do_nothing(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.mark_ticker_failed("T.PRA")
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "ON CONFLICT" in sql
+        assert "DO NOTHING" in sql
+
+    def test_mark_ticker_failed_default_reason_is_empty_string(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.mark_ticker_failed("T.PRA")
+
+        params = mock_cur.execute.call_args[0][1]
+        assert params[1] == ""
+
+
+# ---------------------------------------------------------------------------
 # Run metadata
 # ---------------------------------------------------------------------------
 

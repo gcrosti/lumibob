@@ -38,7 +38,8 @@ class StockDataCache:
         self._db = db
         self._alpaca = alpaca
         # Ensure the table exists (idempotent) then load the known-bad set.
-        # Any symbol in this set is skipped for all Alpaca fetches in this run.
+        # Any symbol in this set is skipped for all Alpaca fetches in this
+        # run and all future runs (the set is persisted to the DB).
         db.migrate_failed_tickers()
         self._failed: set[str] = set(db.get_failed_tickers())
 

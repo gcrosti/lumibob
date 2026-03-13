@@ -159,6 +159,77 @@ class TestWarmCache:
 
 
 # ---------------------------------------------------------------------------
+# get_prices — failed ticker filtering
+# ---------------------------------------------------------------------------
+
+class TestFailedTickerFiltering:
+    def test_known_bad_symbol_is_not_sent_to_alpaca(self):
+        cache, mock_db, mock_alpaca = _make_cache()
+        cache._failed = {"BAD"}
+
+        cache.get_prices(["BAD"], START, END)
+
+        mock_alpaca.get_historical_bars.assert_not_called()
+
+    def test_symbol_not_returned_by_alpaca_is_added_to_failed_set(self):
+        # Alpaca returns AAPL but silently drops MSFT
+        fresh = _close_df(["AAPL"], ["2025-01-02"])
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=fresh
+        )
+
+        cache.get_prices(["AAPL", "MSFT"], START, END)
+
+        assert "MSFT" in cache._failed
+
+    def test_symbol_not_returned_by_alpaca_is_persisted_to_db(self):
+        fresh = _close_df(["AAPL"], ["2025-01-02"])
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=fresh
+        )
+
+        cache.get_prices(["AAPL", "MSFT"], START, END)
+
+        mock_db.mark_ticker_failed.assert_called_once_with("MSFT", "no data from Alpaca")
+
+    def test_symbol_in_failed_set_skipped_on_subsequent_call(self):
+        fresh = _close_df(["AAPL"], ["2025-01-02"])
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=fresh
+        )
+        # First call marks MSFT as failed
+        cache.get_prices(["AAPL", "MSFT"], START, END)
+        mock_alpaca.get_historical_bars.reset_mock()
+
+        # Second call should not request MSFT from Alpaca at all
+        cache.get_prices(["MSFT"], START, END)
+
+        mock_alpaca.get_historical_bars.assert_not_called()
+
+    def test_failed_symbols_loaded_from_db_at_init(self):
+        mock_db = MagicMock()
+        mock_alpaca = MagicMock()
+        mock_db.get_failed_tickers.return_value = ["T.PRA", "ACHR.WS"]
+        mock_alpaca.get_historical_bars.return_value = pd.DataFrame()
+
+        cache = StockDataCache(mock_db, mock_alpaca)
+
+        assert "T.PRA" in cache._failed
+        assert "ACHR.WS" in cache._failed
+
+    def test_all_failed_when_alpaca_returns_empty(self):
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=pd.DataFrame()
+        )
+
+        cache.get_prices(["AAPL", "MSFT"], START, END)
+
+        assert "AAPL" in cache._failed
+        assert "MSFT" in cache._failed
+        assert mock_db.mark_ticker_failed.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # _find_missing_symbols
 # ---------------------------------------------------------------------------
 
