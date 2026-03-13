@@ -141,6 +141,17 @@ class TestTickers:
             rows = mock_ev.call_args[0][2]
             assert all(r[1] == "NASDAQ" for r in rows)
 
+    def test_clear_tickers_executes_delete(self):
+        """clear_tickers() should issue a DELETE FROM tickers statement."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.clear_tickers()
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "DELETE" in sql.upper()
+        assert "tickers" in sql.lower()
+
 
 # ---------------------------------------------------------------------------
 # Pairs

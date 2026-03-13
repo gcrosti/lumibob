@@ -60,9 +60,12 @@ class AlpacaClient:
 
         Filters applied on top of the Alpaca-active + tradable baseline:
         - Symbols containing '.' are non-common-share instruments on Alpaca
-          (warrants, preferred series, rights, units, e.g. ACHR.WS, BRK.B).
+          (warrants, preferred series, rights, units, e.g. ACHR.WS, PSNY.WS).
+          Note: this also excludes a small number of legitimate common shares
+          (e.g. BRK.B) as a known trade-off in favour of filter simplicity.
         - Assets whose name contains 'ETF' are exchange-traded funds, which
           don't exhibit the lead/lag equity dynamics the strategy targets.
+          Best-effort heuristic: funds without 'ETF' in their name are not caught.
 
         Results should be stored in the tickers table via DatabaseClient and
         refreshed nightly rather than called on every before_market_opens().
