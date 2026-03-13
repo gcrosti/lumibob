@@ -37,6 +37,10 @@ class StockDataCache:
     def __init__(self, db: DatabaseClient, alpaca: AlpacaClient):
         self._db = db
         self._alpaca = alpaca
+        # Ensure the table exists (idempotent) then load the known-bad set.
+        # Any symbol in this set is skipped for all Alpaca fetches in this run.
+        db.migrate_failed_tickers()
+        self._failed: set[str] = set(db.get_failed_tickers())
 
     def get_prices(
         self,
@@ -49,7 +53,10 @@ class StockDataCache:
         symbol columns.
 
         Data is read from the DB when available; only missing symbols or
-        date ranges are fetched from Alpaca and written back.
+        date ranges are fetched from Alpaca and written back.  Symbols that
+        previously returned no data from Alpaca are recorded in the
+        failed_tickers table and skipped on all subsequent calls, eliminating
+        repeated API round-trips for delisted or invalid tickers.
 
         Returns an empty DataFrame if no data is available for any symbol.
         """
@@ -59,11 +66,21 @@ class StockDataCache:
         cached = self._db.get_prices(symbols, start, end)
         missing_symbols = self._find_missing_symbols(symbols, cached, start, end)
 
-        if missing_symbols:
-            fresh = self._alpaca.get_historical_bars(missing_symbols, start, end)
+        # Filter out symbols already known to be unfetchable.
+        fetchable = [s for s in missing_symbols if s not in self._failed]
+
+        if fetchable:
+            fresh = self._alpaca.get_historical_bars(fetchable, start, end)
             if not fresh.empty:
                 self._db.upsert_prices(fresh)
                 cached = _merge(cached, fresh)
+
+            # Any symbol we requested but didn't get back → mark as failed.
+            returned = set(fresh.columns) if not fresh.empty else set()
+            for symbol in fetchable:
+                if symbol not in returned:
+                    self._failed.add(symbol)
+                    self._db.mark_ticker_failed(symbol, "no data from Alpaca")
 
         return cached
 
@@ -116,10 +133,13 @@ class StockDataCache:
 
             # Check date coverage — treat a gap of >1 trading day as a miss.
             # This deliberately errs on the side of re-fetching to keep data fresh.
-            earliest = pd.Timestamp(series.index.min())
-            latest = pd.Timestamp(series.index.max())
-            start_ts = pd.Timestamp(start).normalize()
-            end_ts = pd.Timestamp(end).normalize()
+            # Strip timezone from all four timestamps so tz-aware DB values
+            # (UTC) compare cleanly with potentially tz-aware Lumibot datetimes
+            # and with each other regardless of origin.
+            earliest = _to_naive(pd.Timestamp(series.index.min()))
+            latest = _to_naive(pd.Timestamp(series.index.max()))
+            start_ts = _to_naive(pd.Timestamp(start))
+            end_ts = _to_naive(pd.Timestamp(end))
 
             if earliest > start_ts + timedelta(days=2) or latest < end_ts - timedelta(days=2):
                 missing.append(symbol)
@@ -130,6 +150,13 @@ class StockDataCache:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _to_naive(ts: pd.Timestamp) -> pd.Timestamp:
+    """Return a tz-naive, date-only Timestamp regardless of whether ts is tz-aware."""
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts.normalize()
+
 
 def _merge(cached: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     """Combine two close-price DataFrames, preferring fresh data on overlap."""
