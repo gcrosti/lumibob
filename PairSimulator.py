@@ -69,6 +69,12 @@ class PairSimulator:
     or fully in cash based on the lead signal.
     """
 
+    # Grid bounds used by optimize().  short_ma ∈ [1, _MAX_SHORT_MA] and
+    # long_ma ∈ [short_ma+1, _MAX_LONG_MA].  Keeping them as class constants
+    # makes it easy to widen the search space in one place.
+    _MAX_SHORT_MA: int = 4
+    _MAX_LONG_MA: int = 5
+
     def run(
         self,
         lead: pd.Series,
@@ -179,22 +185,26 @@ class PairSimulator:
     ) -> SimResult:
         """
         Grid search over lag ∈ [1..max_lag] and all valid (short_ma, long_ma)
-        combinations where short_ma ∈ [1..4] and long_ma ∈ [short_ma+1..5].
+        combinations where short_ma ∈ [1.._MAX_SHORT_MA] and
+        long_ma ∈ [short_ma+1.._MAX_LONG_MA].
 
         Returns the SimResult with the highest total_return.  When all
         combinations produce non-positive returns the result with the highest
         total_return (least negative) is still returned — callers are
         responsible for applying the total_return > 0 acceptance threshold.
 
-        The grid is: 5 lags × 10 MA combos = 50 simulations maximum, all
-        vectorised, so this is fast enough to call per-pair during discovery.
+        The grid is: max_lag lags × 10 MA combos = up to 50 simulations,
+        all vectorised, so this is fast enough to call per-pair during discovery.
         """
         best: SimResult | None = None
 
         for lag in range(1, max_lag + 1):
-            for short_ma in range(1, 5):
-                for long_ma in range(short_ma + 1, 6):
-                    result = self.run(lead, lag_stock, lag, short_ma, long_ma)
+            for short_ma in range(1, self._MAX_SHORT_MA + 1):
+                for long_ma in range(short_ma + 1, self._MAX_LONG_MA + 1):
+                    try:
+                        result = self.run(lead, lag_stock, lag, short_ma, long_ma)
+                    except Exception:
+                        continue
                     if best is None or result.total_return > best.total_return:
                         best = result
 
