@@ -139,3 +139,15 @@ CREATE TABLE IF NOT EXISTS trades (
 
 CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
     ON trades (run_id, symbol, filled_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Unfetchable symbols
+-- Symbols for which Alpaca returned no price data are recorded here so the
+-- fetch attempt is skipped on every subsequent day, eliminating repeated
+-- API calls and log noise for delisted or invalid tickers.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS failed_tickers (
+    symbol     VARCHAR(20) PRIMARY KEY,
+    reason     TEXT,
+    failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

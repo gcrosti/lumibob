@@ -252,6 +252,48 @@ class DatabaseClient:
                 )
 
     # ------------------------------------------------------------------
+    # Unfetchable ticker registry
+    # ------------------------------------------------------------------
+
+    def migrate_failed_tickers(self) -> None:
+        """
+        Idempotent migration: create the failed_tickers table if it does not
+        already exist. Safe to call on every startup.
+        """
+        sql = """
+            CREATE TABLE IF NOT EXISTS failed_tickers (
+                symbol     VARCHAR(20) PRIMARY KEY,
+                reason     TEXT,
+                failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+
+    def get_failed_tickers(self) -> list[str]:
+        """Return all symbols that have been marked as unfetchable."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT symbol FROM failed_tickers")
+                return [row[0] for row in cur.fetchall()]
+
+    def mark_ticker_failed(self, symbol: str, reason: str = "") -> None:
+        """
+        Record a symbol as unfetchable. Idempotent — if the symbol is already
+        present the row is left unchanged so the original failed_at timestamp
+        is preserved.
+        """
+        sql = """
+            INSERT INTO failed_tickers (symbol, reason)
+            VALUES (%s, %s)
+            ON CONFLICT (symbol) DO NOTHING
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (symbol, reason))
+
+    # ------------------------------------------------------------------
     # Run metadata
     # ------------------------------------------------------------------
 
