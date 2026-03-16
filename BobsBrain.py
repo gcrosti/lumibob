@@ -1,6 +1,7 @@
 import itertools
 import math
 import os
+import random
 import secrets
 from datetime import datetime, timedelta
 
@@ -131,6 +132,11 @@ class BobsBrain(Strategy):
             tickers = self._alpaca.get_tradeable_assets()
             self._db.upsert_tickers(tickers, 'ALPACA')
 
+        # Shuffle before applying ticker_limit so the limit picks a different
+        # random subset of the universe each day rather than always the same
+        # alphabetical head.
+        random.shuffle(tickers)
+
         if self.ticker_limit:
             tickers = tickers[:self.ticker_limit]
 
@@ -148,6 +154,9 @@ class BobsBrain(Strategy):
                 break
 
             if stock2 in self.pairs or stock2 in position_symbols:
+                continue
+
+            if self._is_penny_stock(stock_data[stock1]) or self._is_penny_stock(stock_data[stock2]):
                 continue
 
             correlation = stock_evaluator.get_correlation(stock_data[stock1], stock_data[stock2], lag=1)
@@ -276,3 +285,12 @@ class BobsBrain(Strategy):
 
     def on_strategy_end(self):
         self._db.close_run(self._run_id)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_penny_stock(series) -> bool:
+        """Return True if the most recent close price in *series* is below $5."""
+        return not series.empty and float(series.iloc[-1]) < 5
