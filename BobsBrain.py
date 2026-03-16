@@ -10,6 +10,7 @@ from lumibot.strategies import Strategy
 
 from AlpacaClient import AlpacaClient
 from DatabaseClient import DatabaseClient
+from PairSimulator import PairSimulator
 from StockDataCache import StockDataCache
 from StockEvaluator import StockEvaluator
 
@@ -61,6 +62,7 @@ class BobsBrain(Strategy):
             )
 
         self._db = DatabaseClient(db_url)
+        self._db.migrate_pairs_simulated_return()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -89,6 +91,7 @@ class BobsBrain(Strategy):
         discovers new candidate pairs up to max_daily_candidates.
         """
         stock_evaluator = StockEvaluator()
+        simulator = PairSimulator()
 
         # --- Update actions for existing positions ---
         positions = self.get_positions()
@@ -166,22 +169,39 @@ class BobsBrain(Strategy):
             if not stock_evaluator.is_cointegrated(stock_data[stock1], stock_data[stock2]):
                 continue
 
+            # Optimize lag and MA parameters via mini-backtest simulation.
+            # Rejects pairs where the strategy wouldn't have been historically
+            # profitable, or where the signal never fired more than once.
+            sim_result = simulator.optimize(
+                stock_data[stock1], stock_data[stock2], max_lag=self.max_lag
+            )
+            if sim_result.total_return <= 0 or sim_result.num_trades < 2:
+                continue
+
             action = stock_evaluator.get_action(
-                stock_data[stock1], stock_data[stock2], lag=1, short_ma=2, long_ma=5
+                stock_data[stock1], stock_data[stock2],
+                lag=sim_result.lag,
+                short_ma=sim_result.short_ma,
+                long_ma=sim_result.long_ma,
             )
             if action != 'buy':
                 continue
 
-            print(f"Adding new pair: {stock1} -> {stock2} with correlation {correlation:.4f}, action={action}")
+            print(
+                f"Adding new pair: {stock1} -> {stock2} | corr={correlation:.4f} "
+                f"lag={sim_result.lag} ma=({sim_result.short_ma},{sim_result.long_ma}) "
+                f"sim_return={sim_result.total_return:.2%}"
+            )
 
             new_pair = {
-                'lead_stock': stock1,
-                'lag_stock':  stock2,
-                'lag':        1,
-                'short_ma':   2,
-                'long_ma':    5,
-                'corr':       correlation,
-                'action':     action,
+                'lead_stock':       stock1,
+                'lag_stock':        stock2,
+                'lag':              sim_result.lag,
+                'short_ma':         sim_result.short_ma,
+                'long_ma':          sim_result.long_ma,
+                'corr':             correlation,
+                'action':           action,
+                'simulated_return': sim_result.total_return,
             }
             new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
             self.pairs[stock2] = new_pair
