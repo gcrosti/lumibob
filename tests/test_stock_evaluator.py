@@ -1,6 +1,7 @@
 import math
 import unittest
 
+import numpy as np
 import pandas as pd
 
 import sys
@@ -99,6 +100,63 @@ class TestGetAction(unittest.TestCase):
         action_explicit = self.evaluator.get_action(lead, lag_series, lag=1, short_ma=2, long_ma=5)
         action_default = self.evaluator.get_action(lead, lag_series, lag=1)
         self.assertEqual(action_explicit, action_default)
+
+
+class TestIsCointegrated(unittest.TestCase):
+    def setUp(self):
+        self.evaluator = StockEvaluator()
+
+    def _make_cointegrated_pair(self, n: int = 100):
+        """
+        Construct a cointegrated pair: lag = lead + stationary noise.
+        The spread is mean-reverting by construction, so coint() should reject
+        the null of no cointegration.
+        """
+        rng = np.random.default_rng(42)
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        lag = lead + rng.normal(0, 0.5, n)
+        return lead, lag
+
+    def _make_independent_pair(self, n: int = 100):
+        """Two independent random walks — should not be cointegrated."""
+        rng = np.random.default_rng(99)
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        lag = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        return lead, lag
+
+    def test_cointegrated_pair_returns_true(self):
+        """A pair whose spread is stationary should be identified as cointegrated."""
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.is_cointegrated(lead, lag)
+        self.assertTrue(result)
+
+    def test_independent_pair_returns_false(self):
+        """Two independent random walks should not be flagged as cointegrated."""
+        lead, lag = self._make_independent_pair()
+        result = self.evaluator.is_cointegrated(lead, lag)
+        self.assertFalse(result)
+
+    def test_returns_false_for_insufficient_data(self):
+        """Fewer than 10 overlapping observations → safe False rather than error."""
+        short = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        result = self.evaluator.is_cointegrated(short, short)
+        self.assertFalse(result)
+
+    def test_returns_false_for_all_nan_series(self):
+        """All-NaN input should return False gracefully."""
+        nan_series = pd.Series([float('nan')] * 50)
+        other = pd.Series(range(50), dtype=float)
+        result = self.evaluator.is_cointegrated(nan_series, other)
+        self.assertFalse(result)
+
+    def test_respects_custom_p_threshold(self):
+        """A very strict threshold (p < 0.0001) should reject most pairs."""
+        lead, lag = self._make_cointegrated_pair()
+        # Even a strongly cointegrated pair is unlikely to meet p < 0.0001
+        strict_result = self.evaluator.is_cointegrated(lead, lag, p_threshold=0.0001)
+        lenient_result = self.evaluator.is_cointegrated(lead, lag, p_threshold=0.05)
+        # Lenient should accept; strict may reject — at minimum lenient >= strict
+        self.assertGreaterEqual(int(lenient_result), int(strict_result))
 
 
 if __name__ == '__main__':

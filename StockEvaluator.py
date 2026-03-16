@@ -1,3 +1,6 @@
+from statsmodels.tsa.stattools import coint
+
+
 class StockEvaluator:
     """
     Evaluates the relationship between two stocks
@@ -27,6 +30,31 @@ class StockEvaluator:
         elif short.iloc[-1] < long.iloc[-1]:
             return 'sell'
         return 'hold'
+
+    def is_cointegrated(self, lead_stock, lag_stock, p_threshold: float = 0.05) -> bool:
+        """
+        Test whether two price series are cointegrated using the Engle-Granger
+        two-step method. Returns True if the p-value from the cointegration test
+        is below p_threshold, indicating a statistically significant long-run
+        equilibrium relationship between the two series.
+
+        Cointegration is independent of the MA-crossover signal — it validates
+        that the lead/lag relationship is structural rather than coincidental,
+        complementing the Pearson correlation pre-filter.
+
+        Returns False when the test cannot be computed (e.g. insufficient data,
+        all-NaN series) so callers can treat it as a safe rejection.
+        """
+        try:
+            lead_clean = lead_stock.dropna()
+            lag_clean = lag_stock.dropna()
+            common_index = lead_clean.index.intersection(lag_clean.index)
+            if len(common_index) < 10:
+                return False
+            _, p_value, _ = coint(lead_clean.loc[common_index], lag_clean.loc[common_index])
+            return float(p_value) < p_threshold
+        except Exception:
+            return False
 
     def find_optimal_moving_average(self, simulator, lag = 1):
         """
