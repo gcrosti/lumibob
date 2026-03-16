@@ -137,6 +137,16 @@ class DatabaseClient:
                 cur.execute("SELECT symbol FROM tickers ORDER BY symbol")
                 return [row[0] for row in cur.fetchall()]
 
+    def clear_tickers(self) -> None:
+        """
+        Remove all rows from the tickers table, forcing a full refresh from
+        Alpaca on the next run. Call this after changing asset filters in
+        AlpacaClient.get_tradeable_assets() so stale symbols are evicted.
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tickers")
+
     def upsert_tickers(self, symbols: list[str], exchange: str) -> None:
         """Insert or update ticker rows for a given exchange."""
         today = date.today()

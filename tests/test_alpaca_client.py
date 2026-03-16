@@ -33,11 +33,12 @@ def _make_client(mode: str = "backtest") -> tuple[AlpacaClient, MagicMock, Magic
         return client, mock_data, mock_trade
 
 
-def _make_asset(symbol: str, exchange, tradable: bool = True):
+def _make_asset(symbol: str, exchange, tradable: bool = True, name: str = ""):
     asset = MagicMock()
     asset.symbol = symbol
     asset.exchange = exchange
     asset.tradable = tradable
+    asset.name = name
     return asset
 
 
@@ -95,6 +96,66 @@ class TestGetTradeableAssets:
         mock_trade.get_all_assets.return_value = []
 
         assert client.get_tradeable_assets() == []
+
+    def test_excludes_symbols_with_dot(self):
+        """Symbols containing '.' are warrants, preferreds, or rights — excluded."""
+        from alpaca.trading.enums import AssetExchange
+
+        client, _, mock_trade = _make_client()
+        mock_trade.get_all_assets.return_value = [
+            _make_asset("AAPL", AssetExchange.NASDAQ, name="Apple Inc."),
+            _make_asset("ACHR.WS", AssetExchange.NYSE, name="Archer Aviation Warrant"),
+            _make_asset("BRK.B", AssetExchange.NYSE, name="Berkshire Hathaway Class B"),
+        ]
+
+        result = client.get_tradeable_assets()
+
+        assert "AAPL" in result
+        assert "ACHR.WS" not in result
+        assert "BRK.B" not in result
+
+    def test_excludes_etfs_by_name(self):
+        """Assets whose name contains 'ETF' are excluded from the universe."""
+        from alpaca.trading.enums import AssetExchange
+
+        client, _, mock_trade = _make_client()
+        mock_trade.get_all_assets.return_value = [
+            _make_asset("AAPL", AssetExchange.NASDAQ, name="Apple Inc."),
+            _make_asset("AAXJ", AssetExchange.NASDAQ, name="iShares MSCI All Country Asia ex Japan ETF"),
+            _make_asset("SPY", AssetExchange.NYSE, name="SPDR S&P 500 ETF Trust"),
+        ]
+
+        result = client.get_tradeable_assets()
+
+        assert "AAPL" in result
+        assert "AAXJ" not in result
+        assert "SPY" not in result
+
+    def test_etf_exclusion_is_case_insensitive(self):
+        """ETF name check is case-insensitive."""
+        from alpaca.trading.enums import AssetExchange
+
+        client, _, mock_trade = _make_client()
+        mock_trade.get_all_assets.return_value = [
+            _make_asset("XYZ", AssetExchange.NYSE, name="XYZ Etf Trust"),
+        ]
+
+        result = client.get_tradeable_assets()
+
+        assert "XYZ" not in result
+
+    def test_handles_asset_with_none_name(self):
+        """Assets with a None name field should not raise an error."""
+        from alpaca.trading.enums import AssetExchange
+
+        client, _, mock_trade = _make_client()
+        mock_trade.get_all_assets.return_value = [
+            _make_asset("XYZ", AssetExchange.NYSE, name=None),
+        ]
+
+        result = client.get_tradeable_assets()
+
+        assert "XYZ" in result
 
 
 # ---------------------------------------------------------------------------

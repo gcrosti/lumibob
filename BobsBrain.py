@@ -34,7 +34,7 @@ class BobsBrain(Strategy):
 
     def initialize(self):
         self.sleeptime = '1D'
-        self.min_correlation = 0.8
+        self.min_correlation = 0.9
         self.lookback_window = 60
         self.max_daily_candidates = 10
         self.max_lag = 5
