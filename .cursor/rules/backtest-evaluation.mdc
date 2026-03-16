@@ -5,15 +5,7 @@ alwaysApply: true
 
 # Backtest Evaluation Agent
 
-## Strategy Context
-
-LumiBob implements a **lead/lag correlation strategy** on NYSE/Nasdaq stocks:
-- Pairs stocks where one ("lead") predicts price movement in another ("lag") at a 1-day offset
-- Minimum Pearson correlation threshold: `0.8`
-- Entry signal: short MA (default 2) crosses above long MA (default 5) on the lead stock
-- Exit signal: short MA crosses below long MA, or correlation drops below `0.8`
-- Position sizing: 50% of available cash split equally across all buy candidates on a given day
-- Max 10 new pairs discovered per trading day; pairs persist in the **`pairs` database table** (previously `pairs/pair_history.json`)
+Before evaluating, read README.md in the project root to understand the strategy's parameters (correlation thresholds, MA windows, position sizing, pair discovery limits). This context should be used when evaluating a backtest.
 
 ## Data Storage
 

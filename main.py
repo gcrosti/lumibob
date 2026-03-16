@@ -31,14 +31,14 @@ if __name__ == '__main__':
     else:
         from lumibot.backtesting import YahooDataBacktesting
 
-        backtesting_start = datetime(2025, 11, 1)
-        backtesting_end = datetime(2025, 11, 14)
+        backtesting_start = datetime(2024, 1, 1)
+        backtesting_end = datetime(2024, 6, 30)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,
             backtesting_end,
             budget=10000,
-            parameters={'ticker_limit': 30},
+            parameters={'ticker_limit': 100},
             show_plot=False,
             show_tearsheet=False,
             save_tearsheet=False,
