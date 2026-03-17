@@ -226,11 +226,13 @@ class BobsBrain(Strategy):
             # Screening at lag=1 only would silently reject pairs that are
             # correlated at a different lag, discarding candidates before the
             # optimizer can find the best offset.
+            corr_by_lag = {
+                lag: stock_evaluator.get_correlation(s1, s2, lag)
+                for lag in range(1, self.max_lag + 1)
+            }
             best_corr = max(
-                (stock_evaluator.get_correlation(s1, s2, lag)
-                 for lag in range(1, self.max_lag + 1)),
+                (c for c in corr_by_lag.values() if not math.isnan(c)),
                 default=float('nan'),
-                key=lambda c: c if not math.isnan(c) else -1.0,
             )
             if math.isnan(best_corr) or best_corr < self.min_correlation:
                 gate_counts['correlation'] += 1
@@ -262,8 +264,9 @@ class BobsBrain(Strategy):
 
             candidates_buy_ready += 1
 
-            # Use correlation at the optimized lag for the stored pair record.
-            corr_at_opt_lag = stock_evaluator.get_correlation(s1, s2, sim_result.lag)
+            # Use correlation at the optimized lag for the stored pair record,
+            # falling back to the best screened lag if the optimized lag is missing.
+            corr_at_opt_lag = corr_by_lag.get(sim_result.lag, best_corr)
             if math.isnan(corr_at_opt_lag):
                 corr_at_opt_lag = best_corr
 
@@ -368,11 +371,15 @@ class BobsBrain(Strategy):
 
         # --- Top up existing positions with a buy signal ---
         daily_topups = 0
+        available_cash = self.get_cash()
         for symbol, pair in self.pairs.items():
             if pair['action'] != 'buy':
                 continue
             if symbol in new_buy_symbols:
                 continue  # just bought today, skip same-day top-up
+            if available_cash <= 0:
+                break
+
             position = self.get_position(symbol)
             if not position or position.quantity <= 0:
                 continue
@@ -391,11 +398,12 @@ class BobsBrain(Strategy):
             if gap <= 0:
                 continue
 
-            top_up_dollars = gap * self.top_up_rate
+            top_up_dollars = min(gap * self.top_up_rate, available_cash)
             quantity = int(top_up_dollars / price)
             if quantity > 0:
                 order = self.create_order(symbol, quantity, 'buy')
                 self.submit_order(order)
+                available_cash -= quantity * price
                 daily_topups += 1
                 self._db.log_trade(
                     run_id=self._run_id,
