@@ -161,7 +161,7 @@ class TestPairs:
     def test_load_active_pairs_returns_dict_keyed_by_lag(self):
         client, mock_pool = _make_client()
         _mock_conn(mock_pool, fetchall_return=[
-            (1, "AAPL", "MSFT", 1, 2, 5, 0.91),
+            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, None),
         ])
 
         result = client.load_active_pairs("run01")
@@ -261,15 +261,55 @@ class TestPairs:
         assert None in params
 
     def test_migrate_pairs_simulated_return_executes_alter(self):
-        """Migration should issue an ALTER TABLE … ADD COLUMN IF NOT EXISTS statement."""
+        """Migration should issue ALTER TABLE … ADD COLUMN IF NOT EXISTS for all new columns."""
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
         client.migrate_pairs_simulated_return()
 
+        all_calls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        assert any("simulated_return" in sql for sql in all_calls)
+        assert any("initial_cost" in sql for sql in all_calls)
+        assert any("daily_topups" in sql for sql in all_calls)
+        assert any("pairs_scanned" in sql for sql in all_calls)
+        assert any("ADD COLUMN" in sql for sql in all_calls)
+
+    def test_update_pair_initial_cost_executes_update(self):
+        """update_pair_initial_cost should UPDATE pairs SET initial_cost for the given id."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_initial_cost(42, 500.0)
+
         sql = mock_cur.execute.call_args[0][0]
-        assert "simulated_return" in sql
-        assert "ADD COLUMN" in sql
+        assert "initial_cost" in sql
+        assert "UPDATE pairs" in sql
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] == 500.0
+        assert params[1] == 42
+
+    def test_load_active_pairs_includes_initial_cost(self):
+        """load_active_pairs should return initial_cost in each pair dict."""
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[
+            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, 487.50),
+        ])
+
+        result = client.load_active_pairs("run01")
+
+        assert "MSFT" in result
+        assert result["MSFT"]["initial_cost"] == 487.50
+
+    def test_load_active_pairs_initial_cost_none_when_not_set(self):
+        """initial_cost should be None when the DB value is NULL."""
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[
+            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, None),
+        ])
+
+        result = client.load_active_pairs("run01")
+
+        assert result["MSFT"]["initial_cost"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +416,8 @@ class TestLogging:
             spy_value=10200.0, active_pairs=3,
             avg_correlation=0.87, cash_ratio=0.48,
             daily_buys=2, daily_sells=1,
+            daily_topups=3, pairs_scanned=120,
+            candidates_found=5, candidates_buy_ready=3,
         )
 
         sql = mock_cur.execute.call_args[0][0]
@@ -384,6 +426,32 @@ class TestLogging:
         assert params[0] == ts
         assert params[1] == "abc123"
         assert params[2] == 10500.0
+
+    def test_log_snapshot_includes_funnel_and_topup_columns(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+        ts = datetime(2025, 11, 3, 14, 30)
+
+        client.log_snapshot(
+            "abc123", ts,
+            portfolio_value=10500.0, cash=5000.0,
+            daily_buys=2, daily_sells=1,
+            daily_topups=3, pairs_scanned=120,
+            candidates_found=5, candidates_buy_ready=3,
+        )
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "daily_topups" in sql
+        assert "pairs_scanned" in sql
+        assert "candidates_found" in sql
+        assert "candidates_buy_ready" in sql
+        params = mock_cur.execute.call_args[0][1]
+        # daily_topups, pairs_scanned, candidates_found, candidates_buy_ready
+        # are the last four positional params
+        assert params[-4] == 3    # daily_topups
+        assert params[-3] == 120  # pairs_scanned
+        assert params[-2] == 5    # candidates_found
+        assert params[-1] == 3    # candidates_buy_ready
 
     def test_log_trade_inserts_fill_row(self):
         client, mock_pool = _make_client()

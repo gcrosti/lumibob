@@ -173,7 +173,7 @@ class DatabaseClient:
         """
         sql = """
             SELECT id, lead_symbol, lag_symbol, lag_days,
-                   short_ma, long_ma, correlation
+                   short_ma, long_ma, correlation, initial_cost
             FROM   pairs
             WHERE  active = TRUE
               AND  run_id = %s
@@ -185,32 +185,39 @@ class DatabaseClient:
 
         result: dict = {}
         for row in rows:
-            pid, lead, lag, lag_days, short_ma, long_ma, corr = row
+            pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost = row
             result[lag] = {
-                "pair_id":    pid,
-                "lead_stock": lead,
-                "lag_stock":  lag,
-                "lag":        lag_days,
-                "short_ma":   short_ma,
-                "long_ma":    long_ma,
-                "corr":       float(corr) if corr is not None else None,
-                "action":     "hold",
+                "pair_id":      pid,
+                "lead_stock":   lead,
+                "lag_stock":    lag,
+                "lag":          lag_days,
+                "short_ma":     short_ma,
+                "long_ma":      long_ma,
+                "corr":         float(corr) if corr is not None else None,
+                "action":       "hold",
+                "initial_cost": float(initial_cost) if initial_cost is not None else None,
             }
         return result
 
     def migrate_pairs_simulated_return(self) -> None:
         """
-        Idempotent migration: add the simulated_return column to the pairs table
-        if it does not already exist.  Safe to call on every startup — the ALTER
-        TABLE is a no-op when the column is already present.
+        Idempotent migration: add the simulated_return and initial_cost columns
+        to the pairs table if they do not already exist, and add the discovery
+        funnel + top-up indicator columns to portfolio_snapshots.
+        Safe to call on every startup.
         """
-        sql = """
-            ALTER TABLE pairs
-            ADD COLUMN IF NOT EXISTS simulated_return DOUBLE PRECISION
-        """
+        statements = [
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS simulated_return DOUBLE PRECISION",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS initial_cost NUMERIC",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS daily_topups INT",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS pairs_scanned INT",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS candidates_found INT",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS candidates_buy_ready INT",
+        ]
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql)
+                for sql in statements:
+                    cur.execute(sql)
 
     def save_pair(self, pair: dict, run_id: str) -> int:
         """
@@ -271,6 +278,15 @@ class DatabaseClient:
                 cur.execute(
                     "UPDATE pairs SET correlation=%s, last_updated=%s WHERE id=%s",
                     (float(correlation), date.today(), pair_id),
+                )
+
+    def update_pair_initial_cost(self, pair_id: int, initial_cost: float) -> None:
+        """Record the initial purchase cost for a pair at first buy time."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE pairs SET initial_cost=%s WHERE id=%s",
+                    (float(initial_cost), pair_id),
                 )
 
     def deactivate_pair(self, lag_symbol: str, run_id: str) -> None:
@@ -356,14 +372,17 @@ class DatabaseClient:
         """
         Insert one portfolio snapshot row. Accepted keyword metrics:
             portfolio_value, cash, spy_value, active_pairs,
-            avg_correlation, cash_ratio, daily_buys, daily_sells
+            avg_correlation, cash_ratio, daily_buys, daily_sells,
+            daily_topups, pairs_scanned, candidates_found,
+            candidates_buy_ready
         """
         sql = """
             INSERT INTO portfolio_snapshots
                 (time, run_id, portfolio_value, cash, spy_value,
                  active_pairs, avg_correlation, cash_ratio,
-                 daily_buys, daily_sells)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 daily_buys, daily_sells, daily_topups,
+                 pairs_scanned, candidates_found, candidates_buy_ready)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         def _f(v):
             return float(v) if v is not None else None
@@ -381,6 +400,10 @@ class DatabaseClient:
                     _f(metrics.get("cash_ratio")),
                     metrics.get("daily_buys"),
                     metrics.get("daily_sells"),
+                    metrics.get("daily_topups"),
+                    metrics.get("pairs_scanned"),
+                    metrics.get("candidates_found"),
+                    metrics.get("candidates_buy_ready"),
                 ))
 
     # ------------------------------------------------------------------

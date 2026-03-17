@@ -34,7 +34,7 @@ Classify the change into one or more of these categories (this drives all parame
 
 | Category | Examples |
 |---|---|
-| **Pair discovery** | Correlation logic, `min_correlation`, `lookback_window`, `max_daily_candidates`, `max_lag` |
+| **Pair discovery** | Correlation logic, `min_correlation`, `lookback_window`, `min_daily_pairs`, `max_lag` |
 | **Signal generation** | MA window sizes, entry/exit crossover logic |
 | **Position sizing / risk** | Cash allocation fraction, max positions, stop-loss logic |
 | **Bug fix / data fix** | Correctness change; output should now differ from (or match) a baseline |
@@ -81,9 +81,9 @@ All parameters map directly to editable values in `main.py` (backtest block):
 
 Include the relevant subset in the plan's output so the evaluation agent knows what to focus on:
 
-- **Pair discovery** → `active_pairs` count, `avg_correlation`, total trade count, pair churn rate
+- **Pair discovery** → `active_pairs` count, `avg_correlation`, total trade count, pair churn rate, `candidates_found`, `candidates_buy_ready` (discovery throughput funnel)
 - **Signal generation** → win rate, avg P&L per pair, trade frequency, avg holding period
-- **Position sizing / risk** → cash utilization (`cash_ratio`), max drawdown %, total return %, SPY comparison
+- **Position sizing / risk** → cash utilization (`cash_ratio`), max drawdown %, total return %, SPY comparison, `daily_topups` (top-up activity)
 - **Bug fix** → anomaly flags (unmatched sells, zero trades, unchanged portfolio value, `completed_at IS NULL`)
 - **Infrastructure** → `backtest_time_seconds`, equivalence of output vs. a known-good baseline run
 
@@ -125,7 +125,7 @@ result = BobsBrain.backtest(
     backtesting_start,
     backtesting_end,
     budget=10000,
-    parameters={'ticker_limit': 100},
+    parameters={'ticker_limit': 100, 'min_daily_pairs': 10, 'max_position_multiplier': 3.0, 'top_up_rate': 0.5},
     show_plot=False,
     show_tearsheet=False,
     save_tearsheet=False,
