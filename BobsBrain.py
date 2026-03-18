@@ -350,7 +350,7 @@ class BobsBrain(Strategy):
             for pair in buy_pairs:
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
-                    quantity = int(per_stock_budget / price)
+                    quantity = round(per_stock_budget / price, 6)
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
@@ -399,7 +399,7 @@ class BobsBrain(Strategy):
                 continue
 
             top_up_dollars = min(gap * self.top_up_rate, available_cash)
-            quantity = int(top_up_dollars / price)
+            quantity = round(top_up_dollars / price, 6)
             if quantity > 0:
                 order = self.create_order(symbol, quantity, 'buy')
                 self.submit_order(order)
