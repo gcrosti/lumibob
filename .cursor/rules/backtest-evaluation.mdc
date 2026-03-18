@@ -36,14 +36,15 @@ LIMIT 1;
 As a fallback for runs that pre-date the DB, list files in `logs/` and find all files sharing the target `<6-char-id>`.
 
 **Step 2 — Load configuration**
-Read the `settings` JSONB field from `backtest_runs`. Report: date range, budget, `ticker_limit`, and `backtest_time_seconds`. Fallback: read `logs/*_settings.json`.
+Read the `settings` JSONB field from `backtest_runs`. Report: date range, budget, `ticker_limit`, `min_daily_pairs`, `max_position_multiplier`, `top_up_rate`, and `backtest_time_seconds`. Fallback: read `logs/*_settings.json`.
 
 **Step 3 — Evaluate portfolio performance**
 Query `portfolio_snapshots` for the run. Compute and report:
 ```sql
 SELECT time, portfolio_value, cash, spy_value,
        active_pairs, avg_correlation, cash_ratio,
-       daily_buys, daily_sells
+       daily_buys, daily_sells, daily_topups,
+       pairs_scanned, candidates_found, candidates_buy_ready
 FROM portfolio_snapshots
 WHERE run_id = '<run_id>'
 ORDER BY time;
@@ -79,7 +80,7 @@ Fallback: read `logs/*_trade_events.csv`, filter to `status=fill`.
 Raise these as warnings if present:
 - Zero or very few trades despite a multi-week backtest (pair discovery may be too restrictive)
 - Portfolio value unchanged despite filled trades (pricing data issue)
-- Cash utilization > 80% throughout (strategy rarely investing)
+- Cash utilization > 80% throughout (strategy rarely investing) — use `candidates_found` and `candidates_buy_ready` to distinguish discovery failure (low `candidates_found`) from signal timing (low `candidates_buy_ready` despite reasonable `candidates_found`)
 - Avg slippage unusually high relative to trade cost
 - Sells without matching buys (position tracking bug)
 - `completed_at IS NULL` in `backtest_runs` — run may have crashed before finishing

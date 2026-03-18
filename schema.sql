@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS pairs (
     short_ma      INT         NOT NULL DEFAULT 2,
     long_ma       INT         NOT NULL DEFAULT 5,
     correlation   NUMERIC,
+    simulated_return DOUBLE PRECISION,
+    initial_cost  NUMERIC,
     discovered_at DATE        NOT NULL,
     last_updated  DATE,
     active        BOOLEAN     NOT NULL DEFAULT TRUE
@@ -99,7 +101,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 -- ---------------------------------------------------------------------------
 -- Portfolio snapshots + all strategy indicators
 -- One row per trading day per run. Replaces _stats.csv and _indicators.csv.
--- Columns mirror all six self.add_line() calls in BobsBrain.on_trading_iteration().
+-- Columns mirror all self.add_line() calls in BobsBrain.on_trading_iteration().
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     time            TIMESTAMPTZ NOT NULL,
@@ -111,8 +113,12 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     active_pairs    INT,          -- pairs being monitored that day
     avg_correlation NUMERIC,      -- mean Pearson correlation across active pairs
     cash_ratio      NUMERIC,      -- cash / portfolio_value
-    daily_buys      INT,          -- buy orders submitted
-    daily_sells     INT           -- sell orders submitted
+    daily_buys           INT,     -- new pair entry buy orders (excludes top-ups)
+    daily_sells          INT,     -- sell orders submitted
+    daily_topups         INT,     -- top-up buy orders submitted
+    pairs_scanned        INT,     -- combinations evaluated through quality gates
+    candidates_found     INT,     -- passed all quality gates (penny/corr/coint/sim)
+    candidates_buy_ready INT      -- subset of candidates_found with a buy signal
 );
 
 SELECT create_hypertable('portfolio_snapshots', 'time', if_not_exists => TRUE);

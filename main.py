@@ -22,7 +22,12 @@ if __name__ == '__main__':
         broker = Alpaca(ALPACA_CONFIG)
         strategy = BobsBrain(
             broker=broker,
-            parameters={'ticker_limit': 100},
+            parameters={
+                'ticker_limit': 100,
+                'min_daily_pairs': 10,
+                'max_position_multiplier': 3.0,
+                'top_up_rate': 0.5,
+            },
         )
         trader = Trader()
         trader.add_strategy(strategy)
@@ -38,7 +43,12 @@ if __name__ == '__main__':
             backtesting_start,
             backtesting_end,
             budget=10000,
-            parameters={'ticker_limit': 100},
+            parameters={
+                'ticker_limit': 100,
+                'min_daily_pairs': 10,
+                'max_position_multiplier': 3.0,
+                'top_up_rate': 0.5,
+            },
             show_plot=False,
             show_tearsheet=False,
             save_tearsheet=False,

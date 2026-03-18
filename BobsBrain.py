@@ -39,13 +39,18 @@ class BobsBrain(Strategy):
         self.sleeptime = '1D'
         self.min_correlation = 0.9
         self.lookback_window = 60
-        self.max_daily_candidates = 10
+        self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
         self.max_lag = 5
+        self.max_position_multiplier = self.parameters.get('max_position_multiplier', 3.0)
+        self.top_up_rate = self.parameters.get('top_up_rate', 0.5)
         self.ticker_limit = self.parameters.get('ticker_limit', None)
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
 
         self._spy_start_price = None
         self._starting_portfolio_value = None
+        self._pairs_scanned = 0
+        self._candidates_found = 0
+        self._candidates_buy_ready = 0
 
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
@@ -71,6 +76,7 @@ class BobsBrain(Strategy):
             mode=self._run_mode,
         )
         self._cache = StockDataCache(self._db, self._alpaca)
+        self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
         self._run_id = secrets.token_hex(3)
         self.pairs = self._db.load_active_pairs(self._run_id)
@@ -81,7 +87,9 @@ class BobsBrain(Strategy):
                 'ticker_limit': self.ticker_limit,
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
-                'max_daily_candidates': self.max_daily_candidates,
+                'min_daily_pairs': self.min_daily_pairs,
+                'max_position_multiplier': self.max_position_multiplier,
+                'top_up_rate': self.top_up_rate,
             },
         )
 
@@ -180,6 +188,10 @@ class BobsBrain(Strategy):
             tickers = self._alpaca.get_tradeable_assets()
             self._db.upsert_tickers(tickers, 'ALPACA')
 
+        # Remove tickers that have previously failed price lookups so they
+        # cannot form new pairs that would clog the buy queue at execution time.
+        tickers = [t for t in tickers if t not in self._failed_tickers]
+
         # Shuffle before applying ticker_limit so the limit picks a different
         # random subset of the universe each day rather than always the same
         # alphabetical head.
@@ -190,9 +202,13 @@ class BobsBrain(Strategy):
 
         new_candidates = 0
         position_symbols = {p.symbol for p in self.get_positions()}
+        gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'action': 0}
+        pairs_scanned = 0
+        candidates_found = 0
+        candidates_buy_ready = 0
 
         for stock1, stock2 in itertools.combinations(tickers, 2):
-            if new_candidates >= self.max_daily_candidates:
+            if new_candidates >= self.min_daily_pairs:
                 break
 
             if stock2 in self.pairs or stock2 in position_symbols:
@@ -201,17 +217,34 @@ class BobsBrain(Strategy):
             # Fetch each stock lazily; skip immediately if no data or penny stock.
             s1 = _get_series(stock1)
             if s1 is None or s1.iloc[-1] < 5:
+                gate_counts['penny'] += 1
                 continue
 
             s2 = _get_series(stock2)
             if s2 is None or s2.iloc[-1] < 5:
+                gate_counts['penny'] += 1
                 continue
 
-            correlation = stock_evaluator.get_correlation(s1, s2, lag=1)
-            if math.isnan(correlation) or correlation < self.min_correlation:
+            pairs_scanned += 1
+
+            # Check correlation across all candidate lags, take the best.
+            # Screening at lag=1 only would silently reject pairs that are
+            # correlated at a different lag, discarding candidates before the
+            # optimizer can find the best offset.
+            corr_by_lag = {
+                lag: stock_evaluator.get_correlation(s1, s2, lag)
+                for lag in range(1, self.max_lag + 1)
+            }
+            best_corr = max(
+                (c for c in corr_by_lag.values() if not math.isnan(c)),
+                default=float('nan'),
+            )
+            if math.isnan(best_corr) or best_corr < self.min_correlation:
+                gate_counts['correlation'] += 1
                 continue
 
             if not stock_evaluator.is_cointegrated(s1, s2):
+                gate_counts['cointegration'] += 1
                 continue
 
             # Optimize lag and MA parameters via mini-backtest simulation.
@@ -219,7 +252,10 @@ class BobsBrain(Strategy):
             # profitable, or where the signal never fired more than once.
             sim_result = simulator.optimize(s1, s2, max_lag=self.max_lag)
             if sim_result.total_return <= 0 or sim_result.num_trades < 2:
+                gate_counts['simulation'] += 1
                 continue
+
+            candidates_found += 1
 
             action = stock_evaluator.get_action(
                 s1, s2,
@@ -228,10 +264,19 @@ class BobsBrain(Strategy):
                 long_ma=sim_result.long_ma,
             )
             if action != 'buy':
+                gate_counts['action'] += 1
                 continue
 
+            candidates_buy_ready += 1
+
+            # Use correlation at the optimized lag for the stored pair record,
+            # falling back to the best screened lag if the optimized lag is missing.
+            corr_at_opt_lag = corr_by_lag.get(sim_result.lag, best_corr)
+            if math.isnan(corr_at_opt_lag):
+                corr_at_opt_lag = best_corr
+
             print(
-                f"Adding new pair: {stock1} -> {stock2} | corr={correlation:.4f} "
+                f"Adding new pair: {stock1} -> {stock2} | corr={corr_at_opt_lag:.4f} "
                 f"lag={sim_result.lag} ma=({sim_result.short_ma},{sim_result.long_ma}) "
                 f"sim_return={sim_result.total_return:.2%}"
             )
@@ -242,13 +287,24 @@ class BobsBrain(Strategy):
                 'lag':              sim_result.lag,
                 'short_ma':         sim_result.short_ma,
                 'long_ma':          sim_result.long_ma,
-                'corr':             correlation,
+                'corr':             corr_at_opt_lag,
                 'action':           action,
                 'simulated_return': sim_result.total_return,
             }
             new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
             self.pairs[stock2] = new_pair
             new_candidates += 1
+
+        if new_candidates < self.min_daily_pairs:
+            print(
+                f"Warning: only {new_candidates} new pairs found "
+                f"(target: {self.min_daily_pairs}). "
+                f"Scanned {pairs_scanned} pairs. Gates: {gate_counts}"
+            )
+
+        self._pairs_scanned = pairs_scanned
+        self._candidates_found = candidates_found
+        self._candidates_buy_ready = candidates_buy_ready
 
     def on_trading_iteration(self):
         """
@@ -286,21 +342,29 @@ class BobsBrain(Strategy):
             self.pairs.pop(symbol)
 
         # --- Execute buys ---
+        existing_position_symbols = {p.symbol for p in self.get_positions()}
         buy_pairs = [
             pair for symbol, pair in self.pairs.items()
-            if pair['action'] == 'buy' and symbol not in [p.symbol for p in self.get_positions()]
+            if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
+        new_buy_symbols: set[str] = set()
+        no_price_symbols: list[str] = []
         if buy_pairs:
             budget = self.get_cash() / 2
             per_stock_budget = budget / len(buy_pairs)
             for pair in buy_pairs:
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
-                    quantity = int(per_stock_budget / price)
+                    quantity = round(per_stock_budget / price, 6)
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
+                        initial_cost = float(quantity * price)
+                        pair['initial_cost'] = initial_cost
+                        if pair.get('pair_id'):
+                            self._db.update_pair_initial_cost(pair['pair_id'], initial_cost)
+                        new_buy_symbols.add(pair['lag_stock'])
                         self._db.log_trade(
                             run_id=self._run_id,
                             symbol=pair['lag_stock'],
@@ -310,6 +374,63 @@ class BobsBrain(Strategy):
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
                         )
+                else:
+                    # Price permanently unavailable — record and evict from queue
+                    # so this pair stops diluting the per-stock budget each day.
+                    symbol = pair['lag_stock']
+                    self._failed_tickers.add(symbol)
+                    self._db.mark_ticker_failed(symbol, 'get_last_price returned None')
+                    no_price_symbols.append(symbol)
+
+        for symbol in no_price_symbols:
+            self.pairs.pop(symbol, None)
+            self._db.deactivate_pair(symbol, self._run_id)
+
+        # --- Top up existing positions with a buy signal ---
+        daily_topups = 0
+        available_cash = self.get_cash()
+        for symbol, pair in self.pairs.items():
+            if pair['action'] != 'buy':
+                continue
+            if symbol in new_buy_symbols:
+                continue  # just bought today, skip same-day top-up
+            if available_cash <= 0:
+                break
+
+            position = self.get_position(symbol)
+            if not position or position.quantity <= 0:
+                continue
+
+            initial_cost = pair.get('initial_cost')
+            if not initial_cost:
+                continue
+
+            price = self.get_last_price(symbol)
+            if not price or price <= 0:
+                continue
+
+            max_value = initial_cost * self.max_position_multiplier
+            current_value = float(position.quantity) * price
+            gap = max_value - current_value
+            if gap <= 0:
+                continue
+
+            top_up_dollars = min(gap * self.top_up_rate, available_cash)
+            quantity = round(top_up_dollars / price, 6)
+            if quantity > 0:
+                order = self.create_order(symbol, quantity, 'buy')
+                self.submit_order(order)
+                available_cash -= quantity * price
+                daily_topups += 1
+                self._db.log_trade(
+                    run_id=self._run_id,
+                    symbol=symbol,
+                    side='buy',
+                    quantity=float(quantity),
+                    price=float(price),
+                    filled_at=now,
+                    pair_id=pair.get('pair_id'),
+                )
 
         # --- Log indicators ---
         portfolio_value = self.portfolio_value
@@ -330,11 +451,15 @@ class BobsBrain(Strategy):
             if active_pairs else 0.0
         )
 
-        self.add_line("active_pairs", float(len(active_pairs)))
-        self.add_line("avg_corr",     round(avg_corr, 4))
-        self.add_line("cash_ratio",   round(self.cash / portfolio_value, 4))
-        self.add_line("daily_buys",   float(len(buy_pairs)))
-        self.add_line("daily_sells",  float(len(to_remove)))
+        self.add_line("active_pairs",         float(len(active_pairs)))
+        self.add_line("avg_corr",             round(avg_corr, 4))
+        self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
+        self.add_line("daily_buys",           float(len(buy_pairs)))
+        self.add_line("daily_sells",          float(len(to_remove)))
+        self.add_line("daily_topups",         float(daily_topups))
+        self.add_line("pairs_scanned",        float(self._pairs_scanned))
+        self.add_line("candidates_found",     float(self._candidates_found))
+        self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
 
         self._db.log_snapshot(
             run_id=self._run_id,
@@ -347,6 +472,10 @@ class BobsBrain(Strategy):
             cash_ratio=round(self.cash / portfolio_value, 4),
             daily_buys=len(buy_pairs),
             daily_sells=len(to_remove),
+            daily_topups=daily_topups,
+            pairs_scanned=self._pairs_scanned,
+            candidates_found=self._candidates_found,
+            candidates_buy_ready=self._candidates_buy_ready,
         )
 
     def on_strategy_end(self):
