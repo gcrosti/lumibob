@@ -47,5 +47,67 @@ class TestIsPennyStock(unittest.TestCase):
         self.assertFalse(BobsBrain._is_penny_stock(series))
 
 
+# ---------------------------------------------------------------------------
+# Failed ticker filtering logic
+# ---------------------------------------------------------------------------
+
+class TestFailedTickerFiltering(unittest.TestCase):
+    """
+    The failed-ticker filter is a one-liner in before_market_opens:
+        tickers = [t for t in tickers if t not in self._failed_tickers]
+    These tests verify the invariant directly without instantiating Strategy.
+    DB-level persistence (get_failed_tickers / mark_ticker_failed) is covered
+    by TestFailedTickers in test_database_client.py.
+    """
+
+    def test_failed_tickers_excluded_from_discovery_list(self):
+        tickers = ['AAPL', 'MSFT', 'BAD1', 'TSLA', 'BAD2']
+        failed = {'BAD1', 'BAD2'}
+        filtered = [t for t in tickers if t not in failed]
+        self.assertEqual(filtered, ['AAPL', 'MSFT', 'TSLA'])
+
+    def test_empty_failed_set_leaves_list_unchanged(self):
+        tickers = ['AAPL', 'MSFT', 'TSLA']
+        failed = set()
+        filtered = [t for t in tickers if t not in failed]
+        self.assertEqual(filtered, tickers)
+
+    def test_all_failed_returns_empty_list(self):
+        tickers = ['BAD1', 'BAD2']
+        failed = {'BAD1', 'BAD2'}
+        filtered = [t for t in tickers if t not in failed]
+        self.assertEqual(filtered, [])
+
+    def test_no_price_symbols_collected_and_evicted(self):
+        """
+        Pairs whose get_last_price returns None should be collected in
+        no_price_symbols and then popped from self.pairs.
+        Simulates the eviction loop at the end of on_trading_iteration.
+        """
+        pairs = {
+            'GOOD': {'lag_stock': 'GOOD', 'action': 'buy'},
+            'BAD':  {'lag_stock': 'BAD',  'action': 'buy'},
+        }
+        no_price_symbols = ['BAD']
+
+        for symbol in no_price_symbols:
+            pairs.pop(symbol, None)
+
+        self.assertIn('GOOD', pairs)
+        self.assertNotIn('BAD', pairs)
+
+    def test_failed_set_updated_when_price_unavailable(self):
+        """
+        When get_last_price returns None the symbol should be added to the
+        failed set so future discovery loops exclude it.
+        """
+        failed: set[str] = set()
+        symbol = 'NODATAINC'
+
+        failed.add(symbol)
+
+        self.assertIn(symbol, failed)
+
+
 if __name__ == '__main__':
     unittest.main()

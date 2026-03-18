@@ -76,6 +76,7 @@ class BobsBrain(Strategy):
             mode=self._run_mode,
         )
         self._cache = StockDataCache(self._db, self._alpaca)
+        self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
         self._run_id = secrets.token_hex(3)
         self.pairs = self._db.load_active_pairs(self._run_id)
@@ -186,6 +187,10 @@ class BobsBrain(Strategy):
             print("Tickers table empty, fetching tradeable assets from Alpaca...")
             tickers = self._alpaca.get_tradeable_assets()
             self._db.upsert_tickers(tickers, 'ALPACA')
+
+        # Remove tickers that have previously failed price lookups so they
+        # cannot form new pairs that would clog the buy queue at execution time.
+        tickers = [t for t in tickers if t not in self._failed_tickers]
 
         # Shuffle before applying ticker_limit so the limit picks a different
         # random subset of the universe each day rather than always the same
@@ -344,6 +349,7 @@ class BobsBrain(Strategy):
         ]
 
         new_buy_symbols: set[str] = set()
+        no_price_symbols: list[str] = []
         if buy_pairs:
             budget = self.get_cash() / 2
             per_stock_budget = budget / len(buy_pairs)
@@ -368,6 +374,17 @@ class BobsBrain(Strategy):
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
                         )
+                else:
+                    # Price permanently unavailable — record and evict from queue
+                    # so this pair stops diluting the per-stock budget each day.
+                    symbol = pair['lag_stock']
+                    self._failed_tickers.add(symbol)
+                    self._db.mark_ticker_failed(symbol, 'get_last_price returned None')
+                    no_price_symbols.append(symbol)
+
+        for symbol in no_price_symbols:
+            self.pairs.pop(symbol, None)
+            self._db.deactivate_pair(symbol, self._run_id)
 
         # --- Top up existing positions with a buy signal ---
         daily_topups = 0
