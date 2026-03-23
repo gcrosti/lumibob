@@ -219,6 +219,23 @@ class DatabaseClient:
                 for sql in statements:
                     cur.execute(sql)
 
+    def migrate_zscore_columns(self) -> None:
+        """
+        Idempotent migration: add Z-score signal columns to the pairs table
+        and avg_zscore to portfolio_snapshots.  Safe to call on every startup.
+        """
+        statements = [
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS signal_type TEXT",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS zscore_window INT",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS entry_threshold DOUBLE PRECISION",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS exit_threshold DOUBLE PRECISION",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS avg_zscore DOUBLE PRECISION",
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
     def save_pair(self, pair: dict, run_id: str) -> int:
         """
         Insert a new pair row scoped to run_id. Returns the new pair id.
@@ -226,15 +243,19 @@ class DatabaseClient:
         and returns the existing id instead.
 
         Optional pair keys:
-            simulated_return (float) -- best historical simulated return from
-                                        PairSimulator.optimize(); stored for
-                                        post-run comparison vs actual P&L.
+            simulated_return (float)   -- best historical simulated return
+            signal_type (str)          -- 'ma' or 'zscore'
+            zscore_window (int)        -- rolling window for Z-score spread
+            entry_threshold (float)    -- Z-score entry level
+            exit_threshold (float)     -- Z-score exit level
         """
         sql = """
             INSERT INTO pairs
                 (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
-                 correlation, simulated_return, discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                 correlation, simulated_return, signal_type, zscore_window,
+                 entry_threshold, exit_threshold,
+                 discovered_at, last_updated, active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -245,6 +266,10 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 corr = pair.get("corr")
                 sim_ret = pair.get("simulated_return")
+                signal_type = pair.get("signal_type", "ma")
+                zscore_window = pair.get("zscore_window")
+                entry_threshold = pair.get("entry_threshold")
+                exit_threshold = pair.get("exit_threshold")
                 cur.execute(sql, (
                     run_id,
                     pair["lead_stock"],
@@ -254,6 +279,10 @@ class DatabaseClient:
                     pair.get("long_ma", 5),
                     float(corr) if corr is not None else None,
                     float(sim_ret) if sim_ret is not None else None,
+                    signal_type,
+                    int(zscore_window) if zscore_window is not None else None,
+                    float(entry_threshold) if entry_threshold is not None else None,
+                    float(exit_threshold) if exit_threshold is not None else None,
                     today,
                     today,
                 ))
@@ -374,15 +403,16 @@ class DatabaseClient:
             portfolio_value, cash, spy_value, active_pairs,
             avg_correlation, cash_ratio, daily_buys, daily_sells,
             daily_topups, pairs_scanned, candidates_found,
-            candidates_buy_ready
+            candidates_buy_ready, avg_zscore
         """
         sql = """
             INSERT INTO portfolio_snapshots
                 (time, run_id, portfolio_value, cash, spy_value,
                  active_pairs, avg_correlation, cash_ratio,
                  daily_buys, daily_sells, daily_topups,
-                 pairs_scanned, candidates_found, candidates_buy_ready)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 pairs_scanned, candidates_found, candidates_buy_ready,
+                 avg_zscore)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         def _f(v):
             return float(v) if v is not None else None
@@ -404,6 +434,7 @@ class DatabaseClient:
                     metrics.get("pairs_scanned"),
                     metrics.get("candidates_found"),
                     metrics.get("candidates_buy_ready"),
+                    _f(metrics.get("avg_zscore")),
                 ))
 
     # ------------------------------------------------------------------

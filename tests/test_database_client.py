@@ -446,12 +446,12 @@ class TestLogging:
         assert "candidates_found" in sql
         assert "candidates_buy_ready" in sql
         params = mock_cur.execute.call_args[0][1]
-        # daily_topups, pairs_scanned, candidates_found, candidates_buy_ready
-        # are the last four positional params
-        assert params[-4] == 3    # daily_topups
-        assert params[-3] == 120  # pairs_scanned
-        assert params[-2] == 5    # candidates_found
-        assert params[-1] == 3    # candidates_buy_ready
+        # avg_zscore is now the final param; funnel/topup columns are offset by 1
+        assert params[-5] == 3    # daily_topups
+        assert params[-4] == 120  # pairs_scanned
+        assert params[-3] == 5    # candidates_found
+        assert params[-2] == 3    # candidates_buy_ready
+        assert params[-1] is None  # avg_zscore (not passed → None)
 
     def test_log_trade_inserts_fill_row(self):
         client, mock_pool = _make_client()
