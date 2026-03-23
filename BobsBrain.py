@@ -44,6 +44,11 @@ class BobsBrain(Strategy):
         self.max_position_multiplier = self.parameters.get('max_position_multiplier', 3.0)
         self.top_up_rate = self.parameters.get('top_up_rate', 0.5)
         self.ticker_limit = self.parameters.get('ticker_limit', None)
+        # max_daily_spend_pct: fraction of portfolio value that can be deployed per day.
+        # per_pair_allocation: fraction of max_daily_spend allocated to each new pair.
+        # With defaults (0.5 × 0.10), each new pair receives ~5% of portfolio value.
+        self.max_daily_spend_pct = self.parameters.get('max_daily_spend_pct', 0.5)
+        self.per_pair_allocation = self.parameters.get('per_pair_allocation', 0.10)
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
 
         self._spy_start_price = None
@@ -51,6 +56,12 @@ class BobsBrain(Strategy):
         self._pairs_scanned = 0
         self._candidates_found = 0
         self._candidates_buy_ready = 0
+
+        # Watchlist: pairs that passed all discovery gates but lacked a buy signal.
+        # Keyed by lag_symbol. Re-evaluated cheaply each day (action check only —
+        # no cointegration or simulation re-runs). Entries expire after _watchlist_ttl_days.
+        self._watchlist: dict[str, dict] = {}
+        self._watchlist_ttl_days: int = 5
 
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
@@ -90,6 +101,8 @@ class BobsBrain(Strategy):
                 'min_daily_pairs': self.min_daily_pairs,
                 'max_position_multiplier': self.max_position_multiplier,
                 'top_up_rate': self.top_up_rate,
+                'max_daily_spend_pct': self.max_daily_spend_pct,
+                'per_pair_allocation': self.per_pair_allocation,
             },
         )
 
@@ -180,6 +193,43 @@ class BobsBrain(Strategy):
                     short_ma=pair['short_ma'], long_ma=pair['long_ma']
                 )
 
+        # --- Evaluate watchlist candidates ---
+        # Re-check the action signal for pairs that previously passed all discovery
+        # gates but didn't have a buy signal. This is cheap (no cointegration or
+        # simulation re-runs) and converts idle-cash days into buy opportunities.
+        today = end_date.date()
+        position_symbols = {p.symbol for p in self.get_positions()}
+        stale_watchlist = []
+        for symbol, candidate in self._watchlist.items():
+            if (today - candidate['watchlist_date']).days > self._watchlist_ttl_days:
+                stale_watchlist.append(symbol)
+                continue
+            if symbol in self.pairs or symbol in position_symbols:
+                stale_watchlist.append(symbol)
+                continue
+
+            lead_data = _get_series(candidate['lead_stock'])
+            lag_data = _get_series(candidate['lag_stock'])
+            if lead_data is None or lag_data is None:
+                stale_watchlist.append(symbol)
+                continue
+
+            action = stock_evaluator.get_action(
+                lead_data, lag_data,
+                lag=candidate['lag'],
+                short_ma=candidate['short_ma'],
+                long_ma=candidate['long_ma'],
+            )
+            if action == 'buy':
+                candidate['action'] = 'buy'
+                candidate['pair_id'] = self._db.save_pair(candidate, self._run_id)
+                self.pairs[symbol] = candidate
+                stale_watchlist.append(symbol)
+                print(f"Watchlist promotion: {candidate['lead_stock']} -> {symbol}")
+
+        for symbol in stale_watchlist:
+            self._watchlist.pop(symbol, None)
+
         # --- Discover new pairs ---
         tickers = self._db.get_tickers()
         if not tickers:
@@ -188,8 +238,8 @@ class BobsBrain(Strategy):
             tickers = self._alpaca.get_tradeable_assets()
             self._db.upsert_tickers(tickers, 'ALPACA')
 
-        # Remove tickers that have previously failed price lookups so they
-        # cannot form new pairs that would clog the buy queue at execution time.
+        # Remove tickers that have previously failed price lookups or were identified
+        # as penny stocks so they cannot form new pairs or consume the ticker_limit.
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
         # Shuffle before applying ticker_limit so the limit picks a different
@@ -201,11 +251,11 @@ class BobsBrain(Strategy):
             tickers = tickers[:self.ticker_limit]
 
         new_candidates = 0
-        position_symbols = {p.symbol for p in self.get_positions()}
         gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'action': 0}
         pairs_scanned = 0
         candidates_found = 0
         candidates_buy_ready = 0
+        new_penny_stocks: set[str] = set()
 
         for stock1, stock2 in itertools.combinations(tickers, 2):
             if new_candidates >= self.min_daily_pairs:
@@ -215,14 +265,19 @@ class BobsBrain(Strategy):
                 continue
 
             # Fetch each stock lazily; skip immediately if no data or penny stock.
+            # Track penny stocks so they are excluded from future runs.
             s1 = _get_series(stock1)
             if s1 is None or s1.iloc[-1] < 5:
                 gate_counts['penny'] += 1
+                if s1 is not None:
+                    new_penny_stocks.add(stock1)
                 continue
 
             s2 = _get_series(stock2)
             if s2 is None or s2.iloc[-1] < 5:
                 gate_counts['penny'] += 1
+                if s2 is not None:
+                    new_penny_stocks.add(stock2)
                 continue
 
             pairs_scanned += 1
@@ -265,6 +320,20 @@ class BobsBrain(Strategy):
             )
             if action != 'buy':
                 gate_counts['action'] += 1
+                # Park in watchlist rather than discard — re-check action signal
+                # cheaply each day until buy-ready or TTL expires.
+                if stock2 not in self._watchlist and stock2 not in self.pairs:
+                    self._watchlist[stock2] = {
+                        'lead_stock':       stock1,
+                        'lag_stock':        stock2,
+                        'lag':              sim_result.lag,
+                        'short_ma':         sim_result.short_ma,
+                        'long_ma':          sim_result.long_ma,
+                        'corr':             corr_at_opt_lag,
+                        'simulated_return': sim_result.total_return,
+                        'watchlist_date':   today,
+                        'action':           action,
+                    }
                 continue
 
             candidates_buy_ready += 1
@@ -301,6 +370,12 @@ class BobsBrain(Strategy):
                 f"(target: {self.min_daily_pairs}). "
                 f"Scanned {pairs_scanned} pairs. Gates: {gate_counts}"
             )
+
+        # Persist newly discovered penny stocks so future runs exclude them before
+        # applying ticker_limit, making the daily sample cleaner over time.
+        for sym in new_penny_stocks:
+            self._failed_tickers.add(sym)
+            self._db.mark_ticker_failed(sym, 'penny stock')
 
         self._pairs_scanned = pairs_scanned
         self._candidates_found = candidates_found
@@ -348,18 +423,25 @@ class BobsBrain(Strategy):
             if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
+        # Fixed per-pair allocation: each new position receives a uniform slice of
+        # portfolio value regardless of how many pairs fire on a given day.
+        # This replaces the previous "half of cash / N pairs" approach which caused
+        # variable and sometimes outsized single-pair allocations on low-activity days.
         new_buy_symbols: set[str] = set()
         no_price_symbols: list[str] = []
         if buy_pairs:
-            budget = self.get_cash() / 2
-            per_stock_budget = budget / len(buy_pairs)
+            per_stock_budget = self.portfolio_value * self.max_daily_spend_pct * self.per_pair_allocation
+            remaining_cash = self.get_cash()
             for pair in buy_pairs:
+                if remaining_cash < per_stock_budget:
+                    break
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
                     quantity = round(per_stock_budget / price, 6)
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
+                        remaining_cash -= per_stock_budget
                         initial_cost = float(quantity * price)
                         pair['initial_cost'] = initial_cost
                         if pair.get('pair_id'):
@@ -376,7 +458,7 @@ class BobsBrain(Strategy):
                         )
                 else:
                     # Price permanently unavailable — record and evict from queue
-                    # so this pair stops diluting the per-stock budget each day.
+                    # so this pair stops consuming cash budget each day.
                     symbol = pair['lag_stock']
                     self._failed_tickers.add(symbol)
                     self._db.mark_ticker_failed(symbol, 'get_last_price returned None')
@@ -389,6 +471,7 @@ class BobsBrain(Strategy):
         # --- Top up existing positions with a buy signal ---
         daily_topups = 0
         available_cash = self.get_cash()
+        per_stock_budget = self.portfolio_value * self.max_daily_spend_pct * self.per_pair_allocation
         for symbol, pair in self.pairs.items():
             if pair['action'] != 'buy':
                 continue
@@ -415,7 +498,9 @@ class BobsBrain(Strategy):
             if gap <= 0:
                 continue
 
-            top_up_dollars = min(gap * self.top_up_rate, available_cash)
+            # Cap top-up at the same per-pair budget used for new positions so
+            # top-ups don't consume disproportionate capital on any single day.
+            top_up_dollars = min(gap * self.top_up_rate, per_stock_budget, available_cash)
             quantity = round(top_up_dollars / price, 6)
             if quantity > 0:
                 order = self.create_order(symbol, quantity, 'buy')
@@ -460,6 +545,7 @@ class BobsBrain(Strategy):
         self.add_line("pairs_scanned",        float(self._pairs_scanned))
         self.add_line("candidates_found",     float(self._candidates_found))
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
+        self.add_line("watchlist_size",       float(len(self._watchlist)))
 
         self._db.log_snapshot(
             run_id=self._run_id,
