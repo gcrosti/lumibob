@@ -230,6 +230,31 @@ class BobsBrain(Strategy):
         for symbol in stale_watchlist:
             self._watchlist.pop(symbol, None)
 
+        # --- Re-evaluate pending buy pairs (queued but not yet positions) ---
+        # Pairs promoted from the watchlist or discovered on a prior day may not
+        # have been executed yet (cash ran out). Their MA signal can expire while
+        # they sit in the queue. Re-evaluate here so only pairs with a live buy
+        # signal remain as buy candidates; others revert to hold/sell and are
+        # cleaned up by on_trading_iteration's normal sell path.
+        for symbol in list(self.pairs.keys()):
+            if symbol in position_symbols:
+                continue  # already handled in the existing positions loop above
+            pair = self.pairs[symbol]
+            lag_data = _get_series(pair['lag_stock'])
+            if lag_data is None:
+                pair['action'] = 'sell'
+                continue
+            lead_data = _get_series(pair['lead_stock'])
+            if lead_data is None:
+                pair['action'] = 'sell'
+                continue
+            pair['action'] = stock_evaluator.get_action(
+                lead_data, lag_data,
+                lag=pair['lag'],
+                short_ma=pair['short_ma'],
+                long_ma=pair['long_ma'],
+            )
+
         # --- Discover new pairs ---
         tickers = self._db.get_tickers()
         if not tickers:
@@ -312,6 +337,12 @@ class BobsBrain(Strategy):
 
             candidates_found += 1
 
+            # Compute correlation at the optimized lag here so it is available
+            # for both the watchlist path and the active-pair path below.
+            corr_at_opt_lag = corr_by_lag.get(sim_result.lag, best_corr)
+            if math.isnan(corr_at_opt_lag):
+                corr_at_opt_lag = best_corr
+
             action = stock_evaluator.get_action(
                 s1, s2,
                 lag=sim_result.lag,
@@ -337,12 +368,6 @@ class BobsBrain(Strategy):
                 continue
 
             candidates_buy_ready += 1
-
-            # Use correlation at the optimized lag for the stored pair record,
-            # falling back to the best screened lag if the optimized lag is missing.
-            corr_at_opt_lag = corr_by_lag.get(sim_result.lag, best_corr)
-            if math.isnan(corr_at_opt_lag):
-                corr_at_opt_lag = best_corr
 
             print(
                 f"Adding new pair: {stock1} -> {stock2} | corr={corr_at_opt_lag:.4f} "
@@ -429,6 +454,7 @@ class BobsBrain(Strategy):
         # variable and sometimes outsized single-pair allocations on low-activity days.
         new_buy_symbols: set[str] = set()
         no_price_symbols: list[str] = []
+        daily_new_buys = 0
         if buy_pairs:
             per_stock_budget = self.portfolio_value * self.max_daily_spend_pct * self.per_pair_allocation
             remaining_cash = self.get_cash()
@@ -447,6 +473,7 @@ class BobsBrain(Strategy):
                         if pair.get('pair_id'):
                             self._db.update_pair_initial_cost(pair['pair_id'], initial_cost)
                         new_buy_symbols.add(pair['lag_stock'])
+                        daily_new_buys += 1
                         self._db.log_trade(
                             run_id=self._run_id,
                             symbol=pair['lag_stock'],
@@ -539,7 +566,7 @@ class BobsBrain(Strategy):
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
-        self.add_line("daily_buys",           float(len(buy_pairs)))
+        self.add_line("daily_buys",           float(daily_new_buys))
         self.add_line("daily_sells",          float(len(to_remove)))
         self.add_line("daily_topups",         float(daily_topups))
         self.add_line("pairs_scanned",        float(self._pairs_scanned))
@@ -556,7 +583,7 @@ class BobsBrain(Strategy):
             active_pairs=len(active_pairs),
             avg_correlation=round(avg_corr, 4),
             cash_ratio=round(self.cash / portfolio_value, 4),
-            daily_buys=len(buy_pairs),
+            daily_buys=daily_new_buys,
             daily_sells=len(to_remove),
             daily_topups=daily_topups,
             pairs_scanned=self._pairs_scanned,
