@@ -116,21 +116,22 @@ class TestFailedTickerFiltering(unittest.TestCase):
 class TestPerPairBudget(unittest.TestCase):
     """
     The per-pair allocation is:
-        per_stock_budget = portfolio_value * max_daily_spend_pct * per_pair_allocation
+        per_stock_budget = available_cash * max_daily_spend_pct * per_pair_allocation
     These tests verify the formula directly without instantiating Strategy.
     """
 
-    def _budget(self, portfolio_value, max_daily_spend_pct, per_pair_allocation):
-        return portfolio_value * max_daily_spend_pct * per_pair_allocation
+    def _budget(self, available_cash, max_daily_spend_pct, per_pair_allocation):
+        return available_cash * max_daily_spend_pct * per_pair_allocation
 
-    def test_default_params_give_five_pct_of_portfolio(self):
-        """With defaults (0.5 × 0.10), each pair gets 5% of portfolio value."""
+    def test_default_params_give_five_pct_of_cash_on_day_one(self):
+        """With full starting cash ($10k) and defaults (0.5 × 0.10), per pair = $500."""
         result = self._budget(10_000, 0.5, 0.10)
         self.assertAlmostEqual(result, 500.0)
 
-    def test_scales_with_portfolio_value(self):
-        result = self._budget(20_000, 0.5, 0.10)
-        self.assertAlmostEqual(result, 1_000.0)
+    def test_shrinks_as_cash_depletes(self):
+        """After deploying half the capital, per-pair budget halves too."""
+        result = self._budget(5_000, 0.5, 0.10)
+        self.assertAlmostEqual(result, 250.0)
 
     def test_zero_allocation_gives_zero_budget(self):
         result = self._budget(10_000, 0.5, 0.0)

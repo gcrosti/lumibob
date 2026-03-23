@@ -41,8 +41,6 @@ class BobsBrain(Strategy):
         self.lookback_window = 60
         self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
         self.max_lag = 5
-        self.max_position_multiplier = self.parameters.get('max_position_multiplier', 3.0)
-        self.top_up_rate = self.parameters.get('top_up_rate', 0.5)
         self.ticker_limit = self.parameters.get('ticker_limit', None)
         # max_daily_spend_pct: fraction of portfolio value that can be deployed per day.
         # per_pair_allocation: fraction of max_daily_spend allocated to each new pair.
@@ -102,8 +100,6 @@ class BobsBrain(Strategy):
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
-                'max_position_multiplier': self.max_position_multiplier,
-                'top_up_rate': self.top_up_rate,
                 'max_daily_spend_pct': self.max_daily_spend_pct,
                 'per_pair_allocation': self.per_pair_allocation,
                 'entry_threshold': self.entry_threshold,
@@ -497,10 +493,6 @@ class BobsBrain(Strategy):
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
                         remaining_cash -= per_stock_budget
-                        initial_cost = float(quantity * price)
-                        pair['initial_cost'] = initial_cost
-                        if pair.get('pair_id'):
-                            self._db.update_pair_initial_cost(pair['pair_id'], initial_cost)
                         new_buy_symbols.add(pair['lag_stock'])
                         daily_new_buys += 1
                         self._db.log_trade(
@@ -523,55 +515,6 @@ class BobsBrain(Strategy):
         for symbol in no_price_symbols:
             self.pairs.pop(symbol, None)
             self._db.deactivate_pair(symbol, self._run_id)
-
-        # --- Top up existing positions with a buy signal ---
-        daily_topups = 0
-        available_cash = self.get_cash()
-        per_stock_budget = available_cash * self.max_daily_spend_pct * self.per_pair_allocation
-        for symbol, pair in self.pairs.items():
-            if pair['action'] != 'buy':
-                continue
-            if symbol in new_buy_symbols:
-                continue  # just bought today, skip same-day top-up
-            if available_cash <= 0:
-                break
-
-            position = self.get_position(symbol)
-            if not position or position.quantity <= 0:
-                continue
-
-            initial_cost = pair.get('initial_cost')
-            if not initial_cost:
-                continue
-
-            price = self.get_last_price(symbol)
-            if not price or price <= 0:
-                continue
-
-            max_value = initial_cost * self.max_position_multiplier
-            current_value = float(position.quantity) * price
-            gap = max_value - current_value
-            if gap <= 0:
-                continue
-
-            # Cap top-up at the same per-pair budget used for new positions so
-            # top-ups don't consume disproportionate capital on any single day.
-            top_up_dollars = min(gap * self.top_up_rate, per_stock_budget, available_cash)
-            quantity = round(top_up_dollars / price, 6)
-            if quantity > 0:
-                order = self.create_order(symbol, quantity, 'buy')
-                self.submit_order(order)
-                available_cash -= quantity * price
-                daily_topups += 1
-                self._db.log_trade(
-                    run_id=self._run_id,
-                    symbol=symbol,
-                    side='buy',
-                    quantity=float(quantity),
-                    price=float(price),
-                    filled_at=now,
-                    pair_id=pair.get('pair_id'),
-                )
 
         # --- Log indicators ---
         portfolio_value = self.portfolio_value
@@ -603,7 +546,6 @@ class BobsBrain(Strategy):
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
         self.add_line("daily_buys",           float(daily_new_buys))
         self.add_line("daily_sells",          float(len(to_remove)))
-        self.add_line("daily_topups",         float(daily_topups))
         self.add_line("pairs_scanned",        float(self._pairs_scanned))
         self.add_line("candidates_found",     float(self._candidates_found))
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
@@ -622,7 +564,7 @@ class BobsBrain(Strategy):
             cash_ratio=round(self.cash / portfolio_value, 4),
             daily_buys=daily_new_buys,
             daily_sells=len(to_remove),
-            daily_topups=daily_topups,
+            daily_topups=0,
             pairs_scanned=self._pairs_scanned,
             candidates_found=self._candidates_found,
             candidates_buy_ready=self._candidates_buy_ready,
