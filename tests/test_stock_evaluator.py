@@ -221,34 +221,41 @@ class TestGetZscoreAction(unittest.TestCase):
 
     def test_buy_when_zscore_below_negative_entry(self):
         lag = self._make_lag_with_zscore(-3.0, self.lead)
-        action = self.evaluator.get_zscore_action(self.lead, lag, window=20,
-                                                   entry_threshold=2.0, exit_threshold=0.5)
+        action, z = self.evaluator.get_zscore_action(self.lead, lag, window=20,
+                                                      entry_threshold=2.0, exit_threshold=0.5)
         self.assertEqual(action, 'buy')
+        self.assertIsNotNone(z)
 
     def test_sell_when_zscore_above_negative_exit(self):
         lag = self._make_lag_with_zscore(1.0, self.lead)
-        action = self.evaluator.get_zscore_action(self.lead, lag, window=20,
-                                                   entry_threshold=2.0, exit_threshold=0.5)
+        action, z = self.evaluator.get_zscore_action(self.lead, lag, window=20,
+                                                      entry_threshold=2.0, exit_threshold=0.5)
         self.assertEqual(action, 'sell')
+        self.assertIsNotNone(z)
 
     def test_hold_when_zscore_in_band(self):
-        # Patch compute_zscore to return a controlled value in the hold band
-        # (-2.0 <= z <= -0.5). Constructing a synthetic series that lands
-        # precisely here is fragile because changing the final price also shifts
-        # the OLS hedge ratio used inside compute_zscore.
         with patch.object(self.evaluator, 'compute_zscore',
                           return_value=pd.Series([-1.2])):
-            action = self.evaluator.get_zscore_action(
+            action, z = self.evaluator.get_zscore_action(
                 self.lead, self.lead, window=20,
                 entry_threshold=2.0, exit_threshold=0.5,
             )
         self.assertEqual(action, 'hold')
+        self.assertAlmostEqual(z, -1.2)
 
     def test_hold_on_too_short_series(self):
         short = pd.Series([100.0, 101.0])
-        action = self.evaluator.get_zscore_action(short, short, window=20,
-                                                   entry_threshold=2.0, exit_threshold=0.5)
+        action, z = self.evaluator.get_zscore_action(short, short, window=20,
+                                                      entry_threshold=2.0, exit_threshold=0.5)
         self.assertEqual(action, 'hold')
+        self.assertIsNone(z)
+
+    def test_returns_tuple(self):
+        lag = self._make_lag_with_zscore(-3.0, self.lead)
+        result = self.evaluator.get_zscore_action(self.lead, lag, window=20,
+                                                   entry_threshold=2.0, exit_threshold=0.5)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
 
 
 if __name__ == '__main__':

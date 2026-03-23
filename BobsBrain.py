@@ -170,20 +170,13 @@ class BobsBrain(Strategy):
             signal_type = pair.get('signal_type', 'ma')
 
             if signal_type == 'zscore':
-                action = stock_evaluator.get_zscore_action(
+                action, current_z = stock_evaluator.get_zscore_action(
                     lead_data, lag_data,
                     window=pair['zscore_window'],
                     entry_threshold=pair['entry_threshold'],
                     exit_threshold=pair['exit_threshold'],
                 )
-                zscore_series = stock_evaluator.compute_zscore(
-                    lead_data, lag_data, window=pair['zscore_window']
-                )
-                pair['current_zscore'] = (
-                    float(zscore_series.iloc[-1])
-                    if not zscore_series.empty and not math.isnan(zscore_series.iloc[-1])
-                    else None
-                )
+                pair['current_zscore'] = current_z
                 pair['action'] = action
             else:
                 # Legacy MA crossover path — also update correlation for existing MA pairs.
@@ -228,7 +221,7 @@ class BobsBrain(Strategy):
                 continue
 
             if candidate.get('signal_type', 'ma') == 'zscore':
-                action = stock_evaluator.get_zscore_action(
+                action, _ = stock_evaluator.get_zscore_action(
                     lead_data, lag_data,
                     window=candidate['zscore_window'],
                     entry_threshold=candidate['entry_threshold'],
@@ -270,7 +263,7 @@ class BobsBrain(Strategy):
                 pair['action'] = 'sell'
                 continue
             if pair.get('signal_type', 'ma') == 'zscore':
-                pair['action'] = stock_evaluator.get_zscore_action(
+                pair['action'], _ = stock_evaluator.get_zscore_action(
                     lead_data, lag_data,
                     window=pair['zscore_window'],
                     entry_threshold=pair['entry_threshold'],
@@ -369,7 +362,7 @@ class BobsBrain(Strategy):
             # Use the best-corr lag for reporting; z-score doesn't use lag directly.
             corr_at_opt_lag = best_corr
 
-            action = stock_evaluator.get_zscore_action(
+            action, _ = stock_evaluator.get_zscore_action(
                 s1, s2,
                 window=sim_result.zscore_window,
                 entry_threshold=sim_result.entry_threshold,

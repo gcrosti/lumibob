@@ -79,30 +79,32 @@ class StockEvaluator:
         window: int,
         entry_threshold: float,
         exit_threshold: float,
-    ) -> str:
+    ) -> tuple[str, float | None]:
         """
-        Return the trading action for the lag stock based on the current Z-score.
+        Return the trading action and current Z-score for the lag stock.
 
         A very negative Z-score means the lag stock is unusually cheap relative
         to the lead — we buy expecting mean reversion upward.  Once the spread
         reverts past exit_threshold (closer to zero or above), we sell.
 
-        Returns:
-            'buy'  when zscore < -entry_threshold
-            'sell' when zscore > -exit_threshold
-            'hold' otherwise (spread within normal range, or Z-score is NaN)
+        Returns a (action, current_zscore) tuple where:
+            action        -- 'buy', 'sell', or 'hold'
+            current_zscore -- the most recent Z-score value, or None if NaN/empty
+
+        Returning both values from a single compute_zscore call avoids the
+        caller having to invoke compute_zscore a second time to read the z value.
         """
         zscore = self.compute_zscore(lead, lag, window)
         if zscore.empty:
-            return 'hold'
+            return 'hold', None
         z = float(zscore.iloc[-1])
         if np.isnan(z):
-            return 'hold'
+            return 'hold', None
         if z < -entry_threshold:
-            return 'buy'
+            return 'buy', z
         if z > -exit_threshold:
-            return 'sell'
-        return 'hold'
+            return 'sell', z
+        return 'hold', z
 
     def is_cointegrated(self, lead_stock, lag_stock, p_threshold: float = 0.05) -> bool:
         """
