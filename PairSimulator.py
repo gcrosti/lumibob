@@ -424,3 +424,66 @@ class PairSimulator:
             )
 
         return best
+
+    def optimize_zscore_with_holdout(
+        self,
+        lead: pd.Series,
+        lag_stock: pd.Series,
+        train_frac: float = 0.67,
+    ) -> tuple[ZScoreSimResult, float]:
+        """
+        Walk-forward holdout validation for z-score parameters.
+
+        Splits the price series at `train_frac`:
+        - Train split  (~first 67%): optimize z-score parameters via grid search
+        - Holdout split (~last 33%): validate the winning parameters on unseen data
+
+        Returns ``(train_result, holdout_return)`` where:
+        - ``train_result``    -- ZScoreSimResult from optimization on the train split
+        - ``holdout_return``  -- total_return achieved by the train parameters on the
+                                holdout split; -1.0 when data is insufficient or the
+                                train result itself fails the basic acceptance gates
+                                (total_return <= 0 or num_trades < 2).
+
+        A holdout_return of 0.0 (signal never fired in holdout) is returned as-is so
+        callers can distinguish "no signal" (0.0) from "short data / train failure"
+        (-1.0).
+        """
+        _FALLBACK = ZScoreSimResult(
+            total_return=0.0, sharpe=float('nan'), max_drawdown=0.0,
+            win_rate=float('nan'), num_trades=0, avg_holding_days=float('nan'),
+            zscore_window=20, entry_threshold=2.0, exit_threshold=0.5,
+        )
+
+        common = lead.index.intersection(lag_stock.index)
+        n = len(common)
+        split = int(n * train_frac)
+
+        # Require enough bars for a meaningful train optimisation and holdout
+        if split < 30 or (n - split) < 10:
+            return _FALLBACK, -1.0
+
+        lead_a = lead.loc[common]
+        lag_a = lag_stock.loc[common]
+
+        train_lead = lead_a.iloc[:split]
+        train_lag = lag_a.iloc[:split]
+        holdout_lead = lead_a.iloc[split:]
+        holdout_lag = lag_a.iloc[split:]
+
+        train_result = self.optimize_zscore(train_lead, train_lag)
+
+        # Pre-screen train result before running the holdout — avoids a wasted
+        # run_zscore call when the pair clearly fails the basic acceptance gates.
+        if train_result.total_return <= 0 or train_result.num_trades < 2:
+            return train_result, -1.0
+
+        holdout_result = self.run_zscore(
+            holdout_lead,
+            holdout_lag,
+            zscore_window=train_result.zscore_window,
+            entry_threshold=train_result.entry_threshold,
+            exit_threshold=train_result.exit_threshold,
+        )
+
+        return train_result, holdout_result.total_return

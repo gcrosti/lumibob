@@ -49,6 +49,7 @@ class BobsBrain(Strategy):
         self.per_pair_allocation = self.parameters.get('per_pair_allocation', 0.10)
         self.entry_threshold = self.parameters.get('entry_threshold', 2.0)
         self.exit_threshold = self.parameters.get('exit_threshold', 0.5)
+        self.min_sharpe = self.parameters.get('min_sharpe', 0.5)
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
 
         self._spy_start_price = None
@@ -104,6 +105,7 @@ class BobsBrain(Strategy):
                 'per_pair_allocation': self.per_pair_allocation,
                 'entry_threshold': self.entry_threshold,
                 'exit_threshold': self.exit_threshold,
+                'min_sharpe': self.min_sharpe,
             },
         )
 
@@ -294,7 +296,7 @@ class BobsBrain(Strategy):
             tickers = tickers[:self.ticker_limit]
 
         new_candidates = 0
-        gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'action': 0}
+        gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
         pairs_scanned = 0
         candidates_found = 0
         candidates_buy_ready = 0
@@ -345,12 +347,21 @@ class BobsBrain(Strategy):
                 gate_counts['cointegration'] += 1
                 continue
 
-            # Optimise Z-score parameters via mini-backtest simulation.
-            # Rejects pairs where the strategy wouldn't have been historically
-            # profitable, or where the signal never fired more than once.
-            sim_result = simulator.optimize_zscore(s1, s2)
+            # Walk-forward holdout: optimise Z-score params on the train split
+            # (first ~67% of lookback) and validate on the holdout split (last
+            # ~33%). Rejects pairs that overfit to recent history by requiring
+            # profitable performance on data the optimiser never saw.
+            sim_result, holdout_return = simulator.optimize_zscore_with_holdout(s1, s2)
             if sim_result.total_return <= 0 or sim_result.num_trades < 2:
                 gate_counts['simulation'] += 1
+                continue
+
+            if sim_result.sharpe < self.min_sharpe:
+                gate_counts['sharpe'] += 1
+                continue
+
+            if holdout_return <= 0:
+                gate_counts['holdout'] += 1
                 continue
 
             candidates_found += 1
