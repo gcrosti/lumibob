@@ -289,8 +289,8 @@ class PairSimulator:
         lead_c = lead.loc[common]
         lag_c = lag_stock.loc[common]
 
-        log_lead = np.log(lead_c.clip(lower=1e-9))
-        log_lag = np.log(lag_c.clip(lower=1e-9))
+        log_lead = np.log(lead_c.astype(float).clip(lower=1e-9))
+        log_lag = np.log(lag_c.astype(float).clip(lower=1e-9))
 
         try:
             hedge = float(np.polyfit(log_lead.values, log_lag.values, 1)[0])

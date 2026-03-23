@@ -51,8 +51,8 @@ class StockEvaluator:
         """
         import pandas as pd
 
-        log_lead = np.log(lead.clip(lower=1e-9))
-        log_lag = np.log(lag.clip(lower=1e-9))
+        log_lead = np.log(lead.astype(float).clip(lower=1e-9))
+        log_lag = np.log(lag.astype(float).clip(lower=1e-9))
 
         common = log_lead.index.intersection(log_lag.index)
         if len(common) < window + 2:
