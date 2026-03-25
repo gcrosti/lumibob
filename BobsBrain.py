@@ -556,6 +556,7 @@ class BobsBrain(Strategy):
             candidates_found=self._candidates_found,
             candidates_buy_ready=self._candidates_buy_ready,
             avg_zscore=avg_zscore,
+            avg_watchlist_ttl=avg_watchlist_ttl,
         )
 
     def on_strategy_end(self):
