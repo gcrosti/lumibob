@@ -165,37 +165,14 @@ class BobsBrain(Strategy):
                 pair['action'] = 'sell'
                 continue
 
-            signal_type = pair.get('signal_type', 'ma')
-
-            if signal_type == 'zscore':
-                action, current_z = stock_evaluator.get_zscore_action(
-                    lead_data, lag_data,
-                    window=pair['zscore_window'],
-                    entry_threshold=pair['entry_threshold'],
-                    exit_threshold=pair['exit_threshold'],
-                )
-                pair['current_zscore'] = current_z
-                pair['action'] = action
-            else:
-                # Legacy MA crossover path — also update correlation for existing MA pairs.
-                corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
-                if math.isnan(corr):
-                    print(f"Warning: NaN correlation for existing pair {symbol}, defaulting to 0.")
-                    corr = 0.0
-
-                pair['corr'] = corr
-                if pair.get('pair_id'):
-                    self._db.update_pair_correlation(pair['pair_id'], corr)
-
-                if pair['corr'] < self.min_correlation:
-                    short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
-                    long_ma = lag_data.rolling(window=pair['long_ma'], min_periods=1).mean()
-                    pair['action'] = 'sell' if short_ma.iloc[-1] < long_ma.iloc[-1] else 'hold'
-                else:
-                    pair['action'] = stock_evaluator.get_action(
-                        lead_data, lag_data, pair['lag'],
-                        short_ma=pair['short_ma'], long_ma=pair['long_ma']
-                    )
+            action, current_z = stock_evaluator.get_zscore_action(
+                lead_data, lag_data,
+                window=pair['zscore_window'],
+                entry_threshold=pair['entry_threshold'],
+                exit_threshold=pair['exit_threshold'],
+            )
+            pair['current_zscore'] = current_z
+            pair['action'] = action
 
         # --- Evaluate watchlist candidates ---
         # Re-check the action signal for pairs that previously passed all discovery
@@ -218,20 +195,12 @@ class BobsBrain(Strategy):
                 stale_watchlist.append(symbol)
                 continue
 
-            if candidate.get('signal_type', 'ma') == 'zscore':
-                action, _ = stock_evaluator.get_zscore_action(
-                    lead_data, lag_data,
-                    window=candidate['zscore_window'],
-                    entry_threshold=candidate['entry_threshold'],
-                    exit_threshold=candidate['exit_threshold'],
-                )
-            else:
-                action = stock_evaluator.get_action(
-                    lead_data, lag_data,
-                    lag=candidate['lag'],
-                    short_ma=candidate['short_ma'],
-                    long_ma=candidate['long_ma'],
-                )
+            action, _ = stock_evaluator.get_zscore_action(
+                lead_data, lag_data,
+                window=candidate['zscore_window'],
+                entry_threshold=candidate['entry_threshold'],
+                exit_threshold=candidate['exit_threshold'],
+            )
             if action == 'buy':
                 candidate['action'] = 'buy'
                 candidate['pair_id'] = self._db.save_pair(candidate, self._run_id)
@@ -260,20 +229,12 @@ class BobsBrain(Strategy):
             if lead_data is None:
                 pair['action'] = 'sell'
                 continue
-            if pair.get('signal_type', 'ma') == 'zscore':
-                pair['action'], _ = stock_evaluator.get_zscore_action(
-                    lead_data, lag_data,
-                    window=pair['zscore_window'],
-                    entry_threshold=pair['entry_threshold'],
-                    exit_threshold=pair['exit_threshold'],
-                )
-            else:
-                pair['action'] = stock_evaluator.get_action(
-                    lead_data, lag_data,
-                    lag=pair['lag'],
-                    short_ma=pair['short_ma'],
-                    long_ma=pair['long_ma'],
-                )
+            pair['action'], _ = stock_evaluator.get_zscore_action(
+                lead_data, lag_data,
+                window=pair['zscore_window'],
+                entry_threshold=pair['entry_threshold'],
+                exit_threshold=pair['exit_threshold'],
+            )
 
         # --- Discover new pairs ---
         tickers = self._db.get_tickers()
@@ -383,9 +344,6 @@ class BobsBrain(Strategy):
                     self._watchlist[stock2] = {
                         'lead_stock':       stock1,
                         'lag_stock':        stock2,
-                        'lag':              1,
-                        'short_ma':         2,
-                        'long_ma':          5,
                         'corr':             corr_at_opt_lag,
                         'simulated_return': sim_result.total_return,
                         'watchlist_date':   today,
@@ -409,9 +367,6 @@ class BobsBrain(Strategy):
             new_pair = {
                 'lead_stock':       stock1,
                 'lag_stock':        stock2,
-                'lag':              1,
-                'short_ma':         2,
-                'long_ma':          5,
                 'corr':             corr_at_opt_lag,
                 'action':           action,
                 'simulated_return': sim_result.total_return,
