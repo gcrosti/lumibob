@@ -154,7 +154,9 @@ class BobsBrain(Strategy):
 
             pair = self.pairs[symbol]
 
-            # Always fetch the lag stock — needed for the signal regardless.
+            # Fetch price history for both legs. If either is unavailable (data
+            # gap, delisting, API error) we cannot compute a Z-score, so force a
+            # sell rather than hold a position we can no longer evaluate.
             lag_data = _get_series(pair['lag_stock'])
             if lag_data is None:
                 pair['action'] = 'sell'
@@ -182,7 +184,8 @@ class BobsBrain(Strategy):
         position_symbols = {p.symbol for p in self.get_positions()}
         stale_watchlist = []
         for symbol, candidate in self._watchlist.items():
-            if (today - candidate['watchlist_date']).days > self._watchlist_ttl_days:
+            ttl = candidate.get('watchlist_ttl', self._watchlist_ttl_days)
+            if (today - candidate['watchlist_date']).days > ttl:
                 stale_watchlist.append(symbol)
                 continue
             if symbol in self.pairs or symbol in position_symbols:
@@ -312,7 +315,7 @@ class BobsBrain(Strategy):
             # (first ~67% of lookback) and validate on the holdout split (last
             # ~33%). Rejects pairs that overfit to recent history by requiring
             # profitable performance on data the optimiser never saw.
-            sim_result, holdout_return = simulator.optimize_zscore_with_holdout(s1, s2)
+            sim_result, holdout_return, holdout_days_to_first_signal = simulator.optimize_zscore_with_holdout(s1, s2)
             if sim_result.total_return <= 0 or sim_result.num_trades < 2:
                 gate_counts['simulation'] += 1
                 continue
@@ -340,13 +343,20 @@ class BobsBrain(Strategy):
                 gate_counts['action'] += 1
                 # Park in watchlist rather than discard — re-check action signal
                 # cheaply each day until buy-ready or TTL expires.
+                # TTL is derived from the holdout simulation: how many days did
+                # the signal take to fire on unseen data? Add 1 day of buffer.
+                # Fall back to the global default when the signal never fired.
                 if stock2 not in self._watchlist and stock2 not in self.pairs:
+                    ttl = (holdout_days_to_first_signal + 1
+                           if holdout_days_to_first_signal > 0
+                           else self._watchlist_ttl_days)
                     self._watchlist[stock2] = {
                         'lead_stock':       stock1,
                         'lag_stock':        stock2,
                         'corr':             corr_at_opt_lag,
                         'simulated_return': sim_result.total_return,
                         'watchlist_date':   today,
+                        'watchlist_ttl':    ttl,
                         'action':           action,
                         'signal_type':      'zscore',
                         'zscore_window':    sim_result.zscore_window,
@@ -507,6 +517,15 @@ class BobsBrain(Strategy):
         ]
         avg_zscore = round(sum(zscore_pairs) / len(zscore_pairs), 4) if zscore_pairs else None
 
+        watchlist_ttls = [
+            c.get('watchlist_ttl', self._watchlist_ttl_days)
+            for c in self._watchlist.values()
+        ]
+        avg_watchlist_ttl = (
+            round(sum(watchlist_ttls) / len(watchlist_ttls), 1)
+            if watchlist_ttls else None
+        )
+
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
@@ -518,6 +537,8 @@ class BobsBrain(Strategy):
         self.add_line("watchlist_size",       float(len(self._watchlist)))
         if avg_zscore is not None:
             self.add_line("avg_zscore", avg_zscore)
+        if avg_watchlist_ttl is not None:
+            self.add_line("avg_watchlist_ttl", avg_watchlist_ttl)
 
         self._db.log_snapshot(
             run_id=self._run_id,

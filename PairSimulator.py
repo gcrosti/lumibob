@@ -70,9 +70,12 @@ class ZScoreSimResult:
     win_rate          -- fraction of completed buy→sell cycles that were profitable
     num_trades        -- number of completed buy→sell cycles
     avg_holding_days  -- mean bars held per trade
-    zscore_window     -- rolling window used to compute the spread Z-score
-    entry_threshold   -- Z-score below which a buy is triggered (positive value)
-    exit_threshold    -- Z-score above which a sell is triggered (positive value)
+    zscore_window          -- rolling window used to compute the spread Z-score
+    entry_threshold        -- Z-score below which a buy is triggered (positive value)
+    exit_threshold         -- Z-score above which a sell is triggered (positive value)
+    days_to_first_signal   -- number of bars from series start until the first buy
+                              signal fires; 0 when the signal never fires or no
+                              valid Z-score is available (e.g. warm-up period only)
     """
     total_return: float
     sharpe: float
@@ -83,6 +86,7 @@ class ZScoreSimResult:
     zscore_window: int
     entry_threshold: float
     exit_threshold: float
+    days_to_first_signal: int = 0
 
 
 class PairSimulator:
@@ -287,10 +291,11 @@ class PairSimulator:
             )
 
         lead_c = lead.loc[common]
-        lag_c = lag_stock.loc[common]
+        lag_c = lag_stock.loc[common].astype(float)
+        lead_c = lead_c.astype(float)
 
-        log_lead = np.log(lead_c.astype(float).clip(lower=1e-9))
-        log_lag = np.log(lag_c.astype(float).clip(lower=1e-9))
+        log_lead = np.log(lead_c.clip(lower=1e-9))
+        log_lag = np.log(lag_c.clip(lower=1e-9))
 
         try:
             hedge = float(np.polyfit(log_lead.values, log_lag.values, 1)[0])
@@ -368,6 +373,17 @@ class PairSimulator:
             win_rate = float('nan')
             avg_holding_days = float('nan')
 
+        # First bar index where a buy signal fires (z < -entry_threshold).
+        # Uses the raw position array (before lag-shift) so the value reflects
+        # when the signal was generated, not when it would have been executed.
+        first_signal_indices = np.where(
+            np.array([
+                (not np.isnan(z)) and z < -entry_threshold
+                for z in zscore.values
+            ])
+        )[0]
+        days_to_first_signal = int(first_signal_indices[0]) if len(first_signal_indices) > 0 else 0
+
         return ZScoreSimResult(
             total_return=total_return,
             sharpe=sharpe,
@@ -378,6 +394,7 @@ class PairSimulator:
             zscore_window=zscore_window,
             entry_threshold=entry_threshold,
             exit_threshold=exit_threshold,
+            days_to_first_signal=days_to_first_signal,
         )
 
     def optimize_zscore(
@@ -430,7 +447,7 @@ class PairSimulator:
         lead: pd.Series,
         lag_stock: pd.Series,
         train_frac: float = 0.67,
-    ) -> tuple[ZScoreSimResult, float]:
+    ) -> tuple[ZScoreSimResult, float, int]:
         """
         Walk-forward holdout validation for z-score parameters.
 
@@ -438,16 +455,17 @@ class PairSimulator:
         - Train split  (~first 67%): optimize z-score parameters via grid search
         - Holdout split (~last 33%): validate the winning parameters on unseen data
 
-        Returns ``(train_result, holdout_return)`` where:
-        - ``train_result``    -- ZScoreSimResult from optimization on the train split
-        - ``holdout_return``  -- total_return achieved by the train parameters on the
-                                holdout split; -1.0 when data is insufficient or the
-                                train result itself fails the basic acceptance gates
-                                (total_return <= 0 or num_trades < 2).
-
-        A holdout_return of 0.0 (signal never fired in holdout) is returned as-is so
-        callers can distinguish "no signal" (0.0) from "short data / train failure"
-        (-1.0).
+        Returns ``(train_result, holdout_return, holdout_days_to_first_signal)`` where:
+        - ``train_result``                  -- ZScoreSimResult from optimization on the
+                                               train split
+        - ``holdout_return``                -- total_return achieved by the train
+                                               parameters on the holdout split; -1.0
+                                               when data is insufficient or the train
+                                               result fails the basic acceptance gates
+                                               (total_return <= 0 or num_trades < 2)
+        - ``holdout_days_to_first_signal``  -- days until the first buy signal fires
+                                               on the holdout split; 0 when the signal
+                                               never fires or the holdout was not run
         """
         _FALLBACK = ZScoreSimResult(
             total_return=0.0, sharpe=float('nan'), max_drawdown=0.0,
@@ -461,7 +479,7 @@ class PairSimulator:
 
         # Require enough bars for a meaningful train optimisation and holdout
         if split < 30 or (n - split) < 10:
-            return _FALLBACK, -1.0
+            return _FALLBACK, -1.0, 0
 
         lead_a = lead.loc[common]
         lag_a = lag_stock.loc[common]
@@ -476,7 +494,7 @@ class PairSimulator:
         # Pre-screen train result before running the holdout — avoids a wasted
         # run_zscore call when the pair clearly fails the basic acceptance gates.
         if train_result.total_return <= 0 or train_result.num_trades < 2:
-            return train_result, -1.0
+            return train_result, -1.0, 0
 
         holdout_result = self.run_zscore(
             holdout_lead,
@@ -486,4 +504,4 @@ class PairSimulator:
             exit_threshold=train_result.exit_threshold,
         )
 
-        return train_result, holdout_result.total_return
+        return train_result, holdout_result.total_return, holdout_result.days_to_first_signal
