@@ -41,14 +41,14 @@ class BobsBrain(Strategy):
         self.lookback_window = 60
         self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
         self.max_lag = 5
-        self.max_position_multiplier = self.parameters.get('max_position_multiplier', 3.0)
-        self.top_up_rate = self.parameters.get('top_up_rate', 0.5)
         self.ticker_limit = self.parameters.get('ticker_limit', None)
         # max_daily_spend_pct: fraction of portfolio value that can be deployed per day.
         # per_pair_allocation: fraction of max_daily_spend allocated to each new pair.
         # With defaults (0.5 × 0.10), each new pair receives ~5% of portfolio value.
         self.max_daily_spend_pct = self.parameters.get('max_daily_spend_pct', 0.5)
         self.per_pair_allocation = self.parameters.get('per_pair_allocation', 0.10)
+        self.entry_threshold = self.parameters.get('entry_threshold', 2.0)
+        self.exit_threshold = self.parameters.get('exit_threshold', 0.5)
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
 
         self._spy_start_price = None
@@ -80,6 +80,7 @@ class BobsBrain(Strategy):
 
         self._db = DatabaseClient(db_url)
         self._db.migrate_pairs_simulated_return()
+        self._db.migrate_zscore_columns()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -99,10 +100,10 @@ class BobsBrain(Strategy):
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
-                'max_position_multiplier': self.max_position_multiplier,
-                'top_up_rate': self.top_up_rate,
                 'max_daily_spend_pct': self.max_daily_spend_pct,
                 'per_pair_allocation': self.per_pair_allocation,
+                'entry_threshold': self.entry_threshold,
+                'exit_threshold': self.exit_threshold,
             },
         )
 
@@ -151,22 +152,10 @@ class BobsBrain(Strategy):
 
             pair = self.pairs[symbol]
 
-            # Always fetch the lag stock — needed for the MA fallback regardless.
+            # Always fetch the lag stock — needed for the signal regardless.
             lag_data = _get_series(pair['lag_stock'])
             if lag_data is None:
                 pair['action'] = 'sell'
-                continue
-
-            # If yesterday's stored correlation is already below the threshold,
-            # use the lag stock's own MA crossover to decide without fetching
-            # the lead stock at all — no point pulling data for a pair we are
-            # likely to exit anyway.
-            # Default 1.0 when 'corr' is absent: treat as above-threshold so
-            # that the lead stock is always fetched for pairs with unknown corr.
-            if pair.get('corr', 1.0) < self.min_correlation:
-                short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
-                long_ma = lag_data.rolling(window=pair['long_ma'], min_periods=1).mean()
-                pair['action'] = 'sell' if short_ma.iloc[-1] < long_ma.iloc[-1] else 'hold'
                 continue
 
             lead_data = _get_series(pair['lead_stock'])
@@ -174,24 +163,37 @@ class BobsBrain(Strategy):
                 pair['action'] = 'sell'
                 continue
 
-            corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
-            if math.isnan(corr):
-                print(f"Warning: NaN correlation for existing pair {symbol}, defaulting to 0.")
-                corr = 0.0
+            signal_type = pair.get('signal_type', 'ma')
 
-            pair['corr'] = corr
-            if pair.get('pair_id'):
-                self._db.update_pair_correlation(pair['pair_id'], corr)
-
-            if pair['corr'] < self.min_correlation:
-                short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
-                long_ma = lag_data.rolling(window=pair['long_ma'], min_periods=1).mean()
-                pair['action'] = 'sell' if short_ma.iloc[-1] < long_ma.iloc[-1] else 'hold'
-            else:
-                pair['action'] = stock_evaluator.get_action(
-                    lead_data, lag_data, pair['lag'],
-                    short_ma=pair['short_ma'], long_ma=pair['long_ma']
+            if signal_type == 'zscore':
+                action, current_z = stock_evaluator.get_zscore_action(
+                    lead_data, lag_data,
+                    window=pair['zscore_window'],
+                    entry_threshold=pair['entry_threshold'],
+                    exit_threshold=pair['exit_threshold'],
                 )
+                pair['current_zscore'] = current_z
+                pair['action'] = action
+            else:
+                # Legacy MA crossover path — also update correlation for existing MA pairs.
+                corr = stock_evaluator.get_correlation(lead_data, lag_data, pair['lag'])
+                if math.isnan(corr):
+                    print(f"Warning: NaN correlation for existing pair {symbol}, defaulting to 0.")
+                    corr = 0.0
+
+                pair['corr'] = corr
+                if pair.get('pair_id'):
+                    self._db.update_pair_correlation(pair['pair_id'], corr)
+
+                if pair['corr'] < self.min_correlation:
+                    short_ma = lag_data.rolling(window=pair['short_ma'], min_periods=1).mean()
+                    long_ma = lag_data.rolling(window=pair['long_ma'], min_periods=1).mean()
+                    pair['action'] = 'sell' if short_ma.iloc[-1] < long_ma.iloc[-1] else 'hold'
+                else:
+                    pair['action'] = stock_evaluator.get_action(
+                        lead_data, lag_data, pair['lag'],
+                        short_ma=pair['short_ma'], long_ma=pair['long_ma']
+                    )
 
         # --- Evaluate watchlist candidates ---
         # Re-check the action signal for pairs that previously passed all discovery
@@ -214,12 +216,20 @@ class BobsBrain(Strategy):
                 stale_watchlist.append(symbol)
                 continue
 
-            action = stock_evaluator.get_action(
-                lead_data, lag_data,
-                lag=candidate['lag'],
-                short_ma=candidate['short_ma'],
-                long_ma=candidate['long_ma'],
-            )
+            if candidate.get('signal_type', 'ma') == 'zscore':
+                action, _ = stock_evaluator.get_zscore_action(
+                    lead_data, lag_data,
+                    window=candidate['zscore_window'],
+                    entry_threshold=candidate['entry_threshold'],
+                    exit_threshold=candidate['exit_threshold'],
+                )
+            else:
+                action = stock_evaluator.get_action(
+                    lead_data, lag_data,
+                    lag=candidate['lag'],
+                    short_ma=candidate['short_ma'],
+                    long_ma=candidate['long_ma'],
+                )
             if action == 'buy':
                 candidate['action'] = 'buy'
                 candidate['pair_id'] = self._db.save_pair(candidate, self._run_id)
@@ -232,7 +242,7 @@ class BobsBrain(Strategy):
 
         # --- Re-evaluate pending buy pairs (queued but not yet positions) ---
         # Pairs promoted from the watchlist or discovered on a prior day may not
-        # have been executed yet (cash ran out). Their MA signal can expire while
+        # have been executed yet (cash ran out). Their signal can expire while
         # they sit in the queue. Re-evaluate here so only pairs with a live buy
         # signal remain as buy candidates; others revert to hold/sell and are
         # cleaned up by on_trading_iteration's normal sell path.
@@ -248,12 +258,20 @@ class BobsBrain(Strategy):
             if lead_data is None:
                 pair['action'] = 'sell'
                 continue
-            pair['action'] = stock_evaluator.get_action(
-                lead_data, lag_data,
-                lag=pair['lag'],
-                short_ma=pair['short_ma'],
-                long_ma=pair['long_ma'],
-            )
+            if pair.get('signal_type', 'ma') == 'zscore':
+                pair['action'], _ = stock_evaluator.get_zscore_action(
+                    lead_data, lag_data,
+                    window=pair['zscore_window'],
+                    entry_threshold=pair['entry_threshold'],
+                    exit_threshold=pair['exit_threshold'],
+                )
+            else:
+                pair['action'] = stock_evaluator.get_action(
+                    lead_data, lag_data,
+                    lag=pair['lag'],
+                    short_ma=pair['short_ma'],
+                    long_ma=pair['long_ma'],
+                )
 
         # --- Discover new pairs ---
         tickers = self._db.get_tickers()
@@ -327,27 +345,24 @@ class BobsBrain(Strategy):
                 gate_counts['cointegration'] += 1
                 continue
 
-            # Optimize lag and MA parameters via mini-backtest simulation.
+            # Optimise Z-score parameters via mini-backtest simulation.
             # Rejects pairs where the strategy wouldn't have been historically
             # profitable, or where the signal never fired more than once.
-            sim_result = simulator.optimize(s1, s2, max_lag=self.max_lag)
+            sim_result = simulator.optimize_zscore(s1, s2)
             if sim_result.total_return <= 0 or sim_result.num_trades < 2:
                 gate_counts['simulation'] += 1
                 continue
 
             candidates_found += 1
 
-            # Compute correlation at the optimized lag here so it is available
-            # for both the watchlist path and the active-pair path below.
-            corr_at_opt_lag = corr_by_lag.get(sim_result.lag, best_corr)
-            if math.isnan(corr_at_opt_lag):
-                corr_at_opt_lag = best_corr
+            # Use the best-corr lag for reporting; z-score doesn't use lag directly.
+            corr_at_opt_lag = best_corr
 
-            action = stock_evaluator.get_action(
+            action, _ = stock_evaluator.get_zscore_action(
                 s1, s2,
-                lag=sim_result.lag,
-                short_ma=sim_result.short_ma,
-                long_ma=sim_result.long_ma,
+                window=sim_result.zscore_window,
+                entry_threshold=sim_result.entry_threshold,
+                exit_threshold=sim_result.exit_threshold,
             )
             if action != 'buy':
                 gate_counts['action'] += 1
@@ -357,13 +372,17 @@ class BobsBrain(Strategy):
                     self._watchlist[stock2] = {
                         'lead_stock':       stock1,
                         'lag_stock':        stock2,
-                        'lag':              sim_result.lag,
-                        'short_ma':         sim_result.short_ma,
-                        'long_ma':          sim_result.long_ma,
+                        'lag':              1,
+                        'short_ma':         2,
+                        'long_ma':          5,
                         'corr':             corr_at_opt_lag,
                         'simulated_return': sim_result.total_return,
                         'watchlist_date':   today,
                         'action':           action,
+                        'signal_type':      'zscore',
+                        'zscore_window':    sim_result.zscore_window,
+                        'entry_threshold':  sim_result.entry_threshold,
+                        'exit_threshold':   sim_result.exit_threshold,
                     }
                 continue
 
@@ -371,19 +390,24 @@ class BobsBrain(Strategy):
 
             print(
                 f"Adding new pair: {stock1} -> {stock2} | corr={corr_at_opt_lag:.4f} "
-                f"lag={sim_result.lag} ma=({sim_result.short_ma},{sim_result.long_ma}) "
+                f"z_window={sim_result.zscore_window} "
+                f"entry={sim_result.entry_threshold} exit={sim_result.exit_threshold} "
                 f"sim_return={sim_result.total_return:.2%}"
             )
 
             new_pair = {
                 'lead_stock':       stock1,
                 'lag_stock':        stock2,
-                'lag':              sim_result.lag,
-                'short_ma':         sim_result.short_ma,
-                'long_ma':          sim_result.long_ma,
+                'lag':              1,
+                'short_ma':         2,
+                'long_ma':          5,
                 'corr':             corr_at_opt_lag,
                 'action':           action,
                 'simulated_return': sim_result.total_return,
+                'signal_type':      'zscore',
+                'zscore_window':    sim_result.zscore_window,
+                'entry_threshold':  sim_result.entry_threshold,
+                'exit_threshold':   sim_result.exit_threshold,
             }
             new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
             self.pairs[stock2] = new_pair
@@ -456,8 +480,9 @@ class BobsBrain(Strategy):
         no_price_symbols: list[str] = []
         daily_new_buys = 0
         if buy_pairs:
-            per_stock_budget = self.portfolio_value * self.max_daily_spend_pct * self.per_pair_allocation
-            remaining_cash = self.get_cash()
+            available_cash = self.get_cash()
+            per_stock_budget = available_cash * self.max_daily_spend_pct * self.per_pair_allocation
+            remaining_cash = available_cash
             for pair in buy_pairs:
                 if remaining_cash < per_stock_budget:
                     break
@@ -468,10 +493,6 @@ class BobsBrain(Strategy):
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
                         remaining_cash -= per_stock_budget
-                        initial_cost = float(quantity * price)
-                        pair['initial_cost'] = initial_cost
-                        if pair.get('pair_id'):
-                            self._db.update_pair_initial_cost(pair['pair_id'], initial_cost)
                         new_buy_symbols.add(pair['lag_stock'])
                         daily_new_buys += 1
                         self._db.log_trade(
@@ -495,55 +516,6 @@ class BobsBrain(Strategy):
             self.pairs.pop(symbol, None)
             self._db.deactivate_pair(symbol, self._run_id)
 
-        # --- Top up existing positions with a buy signal ---
-        daily_topups = 0
-        available_cash = self.get_cash()
-        per_stock_budget = self.portfolio_value * self.max_daily_spend_pct * self.per_pair_allocation
-        for symbol, pair in self.pairs.items():
-            if pair['action'] != 'buy':
-                continue
-            if symbol in new_buy_symbols:
-                continue  # just bought today, skip same-day top-up
-            if available_cash <= 0:
-                break
-
-            position = self.get_position(symbol)
-            if not position or position.quantity <= 0:
-                continue
-
-            initial_cost = pair.get('initial_cost')
-            if not initial_cost:
-                continue
-
-            price = self.get_last_price(symbol)
-            if not price or price <= 0:
-                continue
-
-            max_value = initial_cost * self.max_position_multiplier
-            current_value = float(position.quantity) * price
-            gap = max_value - current_value
-            if gap <= 0:
-                continue
-
-            # Cap top-up at the same per-pair budget used for new positions so
-            # top-ups don't consume disproportionate capital on any single day.
-            top_up_dollars = min(gap * self.top_up_rate, per_stock_budget, available_cash)
-            quantity = round(top_up_dollars / price, 6)
-            if quantity > 0:
-                order = self.create_order(symbol, quantity, 'buy')
-                self.submit_order(order)
-                available_cash -= quantity * price
-                daily_topups += 1
-                self._db.log_trade(
-                    run_id=self._run_id,
-                    symbol=symbol,
-                    side='buy',
-                    quantity=float(quantity),
-                    price=float(price),
-                    filled_at=now,
-                    pair_id=pair.get('pair_id'),
-                )
-
         # --- Log indicators ---
         portfolio_value = self.portfolio_value
         if self._starting_portfolio_value is None:
@@ -563,16 +535,23 @@ class BobsBrain(Strategy):
             if active_pairs else 0.0
         )
 
+        zscore_pairs = [
+            p['current_zscore'] for p in active_pairs
+            if p.get('signal_type') == 'zscore' and p.get('current_zscore') is not None
+        ]
+        avg_zscore = round(sum(zscore_pairs) / len(zscore_pairs), 4) if zscore_pairs else None
+
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
         self.add_line("daily_buys",           float(daily_new_buys))
         self.add_line("daily_sells",          float(len(to_remove)))
-        self.add_line("daily_topups",         float(daily_topups))
         self.add_line("pairs_scanned",        float(self._pairs_scanned))
         self.add_line("candidates_found",     float(self._candidates_found))
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
         self.add_line("watchlist_size",       float(len(self._watchlist)))
+        if avg_zscore is not None:
+            self.add_line("avg_zscore", avg_zscore)
 
         self._db.log_snapshot(
             run_id=self._run_id,
@@ -585,10 +564,11 @@ class BobsBrain(Strategy):
             cash_ratio=round(self.cash / portfolio_value, 4),
             daily_buys=daily_new_buys,
             daily_sells=len(to_remove),
-            daily_topups=daily_topups,
+            daily_topups=0,
             pairs_scanned=self._pairs_scanned,
             candidates_found=self._candidates_found,
             candidates_buy_ready=self._candidates_buy_ready,
+            avg_zscore=avg_zscore,
         )
 
     def on_strategy_end(self):

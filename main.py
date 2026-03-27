@@ -25,8 +25,6 @@ if __name__ == '__main__':
             parameters={
                 'ticker_limit': 100,
                 'min_daily_pairs': 10,
-                'max_position_multiplier': 3.0,
-                'top_up_rate': 0.5,
                 'max_daily_spend_pct': 0.5,
                 'per_pair_allocation': 0.10,
             },
@@ -39,7 +37,7 @@ if __name__ == '__main__':
         from lumibot.backtesting import YahooDataBacktesting
 
         backtesting_start = datetime(2024, 1, 2)
-        backtesting_end = datetime(2024, 3, 28)
+        backtesting_end = datetime(2024, 1, 12)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,
@@ -48,8 +46,6 @@ if __name__ == '__main__':
             parameters={
                 'ticker_limit': 100,
                 'min_daily_pairs': 10,
-                'max_position_multiplier': 3.0,
-                'top_up_rate': 0.5,
                 'max_daily_spend_pct': 0.5,
                 'per_pair_allocation': 0.10,
             },

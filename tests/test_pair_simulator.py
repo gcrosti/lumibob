@@ -15,7 +15,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from PairSimulator import PairSimulator, SimResult
+from PairSimulator import PairSimulator, SimResult, ZScoreSimResult
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +187,76 @@ class TestPairSimulatorOptimize(unittest.TestCase):
         lag = _trending()
         result = self.sim.optimize(lead, lag, max_lag=1)
         self.assertEqual(result.lag, 1)
+
+
+def _cointegrated_pair(n: int = 120, seed: int = 42) -> tuple[pd.Series, pd.Series]:
+    """Cointegrated pair: lag = lead + stationary noise (mean-reverting spread)."""
+    rng = np.random.default_rng(seed)
+    lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+    lag = lead + rng.normal(0, 0.5, n)
+    return lead, lag
+
+
+class TestRunZscore(unittest.TestCase):
+    def setUp(self):
+        self.sim = PairSimulator()
+        self.lead, self.lag = _cointegrated_pair()
+
+    def test_returns_zscore_sim_result(self):
+        result = self.sim.run_zscore(self.lead, self.lag,
+                                     zscore_window=20, entry_threshold=2.0, exit_threshold=0.5)
+        self.assertIsInstance(result, ZScoreSimResult)
+
+    def test_parameters_stored_on_result(self):
+        result = self.sim.run_zscore(self.lead, self.lag,
+                                     zscore_window=20, entry_threshold=1.5, exit_threshold=0.0)
+        self.assertEqual(result.zscore_window, 20)
+        self.assertAlmostEqual(result.entry_threshold, 1.5)
+        self.assertAlmostEqual(result.exit_threshold, 0.0)
+
+    def test_positive_return_on_cointegrated_pair(self):
+        """A genuinely cointegrated pair should produce a positive return."""
+        result = self.sim.run_zscore(self.lead, self.lag,
+                                     zscore_window=20, entry_threshold=1.5, exit_threshold=0.0)
+        self.assertGreater(result.total_return, 0)
+
+    def test_too_short_series_returns_zero_trades(self):
+        short = pd.Series([100.0] * 10)
+        result = self.sim.run_zscore(short, short,
+                                     zscore_window=20, entry_threshold=2.0, exit_threshold=0.5)
+        self.assertEqual(result.num_trades, 0)
+        self.assertAlmostEqual(result.total_return, 0.0)
+
+    def test_win_rate_between_zero_and_one(self):
+        result = self.sim.run_zscore(self.lead, self.lag,
+                                     zscore_window=20, entry_threshold=1.5, exit_threshold=0.0)
+        if result.num_trades > 0:
+            self.assertGreaterEqual(result.win_rate, 0.0)
+            self.assertLessEqual(result.win_rate, 1.0)
+
+
+class TestOptimizeZscore(unittest.TestCase):
+    def setUp(self):
+        self.sim = PairSimulator()
+        self.lead, self.lag = _cointegrated_pair()
+
+    def test_returns_zscore_sim_result(self):
+        result = self.sim.optimize_zscore(self.lead, self.lag)
+        self.assertIsInstance(result, ZScoreSimResult)
+
+    def test_selects_at_least_two_trades(self):
+        result = self.sim.optimize_zscore(self.lead, self.lag)
+        self.assertGreaterEqual(result.num_trades, 2)
+
+    def test_positive_return_on_cointegrated_pair(self):
+        result = self.sim.optimize_zscore(self.lead, self.lag)
+        self.assertGreater(result.total_return, 0)
+
+    def test_short_series_returns_fallback(self):
+        short = pd.Series([100.0] * 15)
+        result = self.sim.optimize_zscore(short, short)
+        self.assertIsInstance(result, ZScoreSimResult)
+        self.assertEqual(result.num_trades, 0)
 
 
 if __name__ == '__main__':
