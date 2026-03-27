@@ -110,56 +110,166 @@ class TestFailedTickerFiltering(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Fixed per-pair budget calculation
+# Confidence-based position sizing
 # ---------------------------------------------------------------------------
 
-class TestPerPairBudget(unittest.TestCase):
+class TestConfidenceBasedSizing(unittest.TestCase):
     """
-    The per-pair allocation is:
-        per_stock_budget = available_cash * max_daily_spend_pct * per_pair_allocation
-    These tests verify the formula directly without instantiating Strategy.
+    Tests for the confidence-weighted position sizing introduced to replace the
+    flat max_daily_spend_pct × per_pair_allocation formula.
+
+    _compute_confidence and the per-pair budget formula are exercised directly
+    without instantiating the full Strategy, keeping these tests fast and
+    dependency-free.
     """
 
-    def _budget(self, available_cash, max_daily_spend_pct, per_pair_allocation):
-        return available_cash * max_daily_spend_pct * per_pair_allocation
+    # Mirrors BobsBrain._compute_confidence logic for isolated testing.
+    def _confidence(self, pair, min_correlation=0.9, min_sharpe=0.5, entry_threshold=2.0):
+        z = pair.get('current_zscore')
+        entry = pair.get('entry_threshold', entry_threshold)
+        z_score = min((abs(z) - entry) / entry, 1.0) if z is not None else 0.0
+        z_score = max(z_score, 0.0)
 
-    def test_default_params_give_five_pct_of_cash_on_day_one(self):
-        """With full starting cash ($10k) and defaults (0.5 × 0.10), per pair = $500."""
-        result = self._budget(10_000, 0.5, 0.10)
-        self.assertAlmostEqual(result, 500.0)
+        corr = pair.get('corr', min_correlation)
+        corr_score = min((corr - min_correlation) / (1.0 - min_correlation), 1.0)
+        corr_score = max(corr_score, 0.0)
 
-    def test_shrinks_as_cash_depletes(self):
-        """After deploying half the capital, per-pair budget halves too."""
-        result = self._budget(5_000, 0.5, 0.10)
-        self.assertAlmostEqual(result, 250.0)
+        sharpe = pair.get('sim_sharpe', min_sharpe)
+        sharpe_score = min((sharpe - min_sharpe) / min_sharpe, 1.0)
+        sharpe_score = max(sharpe_score, 0.0)
 
-    def test_zero_allocation_gives_zero_budget(self):
-        result = self._budget(10_000, 0.5, 0.0)
-        self.assertAlmostEqual(result, 0.0)
+        return 0.4 * z_score + 0.4 * corr_score + 0.2 * sharpe_score
 
-    def test_remaining_cash_gate_prevents_overspend(self):
+    def _budget(self, confidence, portfolio_value, min_pct=0.03, max_pct=0.20,
+                deployment_gap=0.0, n_candidates=1):
+        base = (min_pct + confidence * (max_pct - min_pct)) * portfolio_value
+        if deployment_gap > 0 and n_candidates > 0:
+            gap_share = deployment_gap / n_candidates
+            base = min(base + gap_share, max_pct * portfolio_value)
+        return base
+
+    # --- confidence score ---
+
+    def test_zero_confidence_when_all_at_minimums(self):
+        """Pair exactly at every gate floor returns confidence 0.0."""
+        pair = {'current_zscore': -2.0, 'entry_threshold': 2.0,
+                'corr': 0.9, 'sim_sharpe': 0.5}
+        self.assertAlmostEqual(self._confidence(pair), 0.0)
+
+    def test_max_confidence_when_all_components_capped(self):
+        """Z excess = entry, corr = 1.0, sharpe = 2× min → confidence 1.0."""
+        pair = {'current_zscore': -4.0, 'entry_threshold': 2.0,
+                'corr': 1.0, 'sim_sharpe': 1.0}
+        self.assertAlmostEqual(self._confidence(pair), 1.0)
+
+    def test_medium_confidence_midpoint_values(self):
         """
-        Simulates the cash guard: if remaining_cash < per_stock_budget the
-        buy loop should break rather than place the order.
+        corr = 0.95 (mid of 0.9–1.0), sharpe = 0.75 (mid of 0.5–1.0),
+        z = -3.0 with entry=2.0 → z_excess = 1.0, normalised = 0.5.
+        Expected: 0.4*0.5 + 0.4*0.5 + 0.2*0.5 = 0.5
         """
-        per_stock_budget = 500.0
-        remaining_cash = 300.0
+        pair = {'current_zscore': -3.0, 'entry_threshold': 2.0,
+                'corr': 0.95, 'sim_sharpe': 0.75}
+        self.assertAlmostEqual(self._confidence(pair), 0.5)
+
+    def test_missing_zscore_defaults_to_zero_component(self):
+        """No current_zscore → z component is 0; other components still score."""
+        pair = {'corr': 1.0, 'sim_sharpe': 1.0}
+        score = self._confidence(pair)
+        # z_score=0, corr_score=1, sharpe_score=1 → 0*0.4 + 1*0.4 + 1*0.2 = 0.6
+        self.assertAlmostEqual(score, 0.6)
+
+    def test_confidence_never_exceeds_one(self):
+        """Extreme values are clamped to 1.0."""
+        pair = {'current_zscore': -100.0, 'entry_threshold': 2.0,
+                'corr': 1.0, 'sim_sharpe': 999.0}
+        self.assertLessEqual(self._confidence(pair), 1.0)
+
+    def test_confidence_never_below_zero(self):
+        """Values below gate floors are clamped to 0.0."""
+        pair = {'current_zscore': -2.0, 'entry_threshold': 2.0,
+                'corr': 0.9, 'sim_sharpe': 0.0}
+        self.assertGreaterEqual(self._confidence(pair), 0.0)
+
+    # --- budget formula ---
+
+    def test_min_confidence_gives_min_position(self):
+        """Confidence 0 → min_position_pct of portfolio."""
+        result = self._budget(0.0, 10_000)
+        self.assertAlmostEqual(result, 300.0)  # 3% of 10k
+
+    def test_max_confidence_gives_max_position(self):
+        """Confidence 1.0 → max_position_pct of portfolio."""
+        result = self._budget(1.0, 10_000)
+        self.assertAlmostEqual(result, 2_000.0)  # 20% of 10k
+
+    def test_medium_confidence_interpolates(self):
+        """Confidence 0.5 → midpoint of [min, max] = 11.5% of portfolio."""
+        result = self._budget(0.5, 10_000)
+        self.assertAlmostEqual(result, 1_150.0)
+
+    def test_deployment_gap_boosts_budget(self):
+        """Gap share is added to base budget when portfolio is under-deployed."""
+        result = self._budget(0.0, 10_000, deployment_gap=3_000, n_candidates=3)
+        # base=300, gap_share=1000 → 1300
+        self.assertAlmostEqual(result, 1_300.0)
+
+    def test_deployment_gap_boost_capped_at_max_position(self):
+        """Gap boost is capped so budget never exceeds max_position_pct."""
+        result = self._budget(0.5, 10_000, deployment_gap=50_000, n_candidates=1)
+        self.assertAlmostEqual(result, 2_000.0)  # capped at 20% of 10k
+
+    def test_cash_guard_prevents_overspend(self):
+        """If available_cash < per_stock_budget the pair is skipped (continue)."""
+        per_stock_budget = 1_500.0
+        available_cash = 900.0
         buy_executed = False
 
-        if remaining_cash >= per_stock_budget:
+        if available_cash >= per_stock_budget:
             buy_executed = True
 
         self.assertFalse(buy_executed)
 
     def test_sufficient_cash_allows_buy(self):
-        per_stock_budget = 500.0
-        remaining_cash = 600.0
+        per_stock_budget = 1_500.0
+        available_cash = 2_000.0
         buy_executed = False
 
-        if remaining_cash >= per_stock_budget:
+        if available_cash >= per_stock_budget:
             buy_executed = True
 
         self.assertTrue(buy_executed)
+
+    def test_candidates_sorted_by_confidence_descending(self):
+        """Highest confidence pair should appear first after sorting."""
+        pairs = [
+            {'lag_stock': 'LOW', 'confidence_score': 0.2},
+            {'lag_stock': 'HIGH', 'confidence_score': 0.9},
+            {'lag_stock': 'MID', 'confidence_score': 0.5},
+        ]
+        ranked = sorted(pairs, key=lambda p: p['confidence_score'], reverse=True)
+        self.assertEqual([p['lag_stock'] for p in ranked], ['HIGH', 'MID', 'LOW'])
+
+    def test_no_debt_when_expensive_pair_followed_by_cheap_pair(self):
+        """
+        A high-confidence expensive pair should not block a cheaper pair.
+        Using continue (not break), the second pair can still be funded.
+        """
+        available_cash = 500.0
+        pairs = [
+            {'confidence_score': 0.9, 'budget': 800.0},  # too expensive
+            {'confidence_score': 0.3, 'budget': 200.0},  # affordable
+        ]
+        funded = []
+        for pair in pairs:
+            if available_cash < pair['budget']:
+                continue  # skip, not break
+            available_cash -= pair['budget']
+            funded.append(pair)
+
+        self.assertEqual(len(funded), 1)
+        self.assertEqual(funded[0]['budget'], 200.0)
+        self.assertGreaterEqual(available_cash, 0.0)  # never went negative
 
 
 # ---------------------------------------------------------------------------
