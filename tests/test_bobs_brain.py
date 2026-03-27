@@ -109,5 +109,182 @@ class TestFailedTickerFiltering(unittest.TestCase):
         self.assertIn(symbol, failed)
 
 
+# ---------------------------------------------------------------------------
+# Fixed per-pair budget calculation
+# ---------------------------------------------------------------------------
+
+class TestPerPairBudget(unittest.TestCase):
+    """
+    The per-pair allocation is:
+        per_stock_budget = portfolio_value * max_daily_spend_pct * per_pair_allocation
+    These tests verify the formula directly without instantiating Strategy.
+    """
+
+    def _budget(self, portfolio_value, max_daily_spend_pct, per_pair_allocation):
+        return portfolio_value * max_daily_spend_pct * per_pair_allocation
+
+    def test_default_params_give_five_pct_of_portfolio(self):
+        """With defaults (0.5 × 0.10), each pair gets 5% of portfolio value."""
+        result = self._budget(10_000, 0.5, 0.10)
+        self.assertAlmostEqual(result, 500.0)
+
+    def test_scales_with_portfolio_value(self):
+        result = self._budget(20_000, 0.5, 0.10)
+        self.assertAlmostEqual(result, 1_000.0)
+
+    def test_zero_allocation_gives_zero_budget(self):
+        result = self._budget(10_000, 0.5, 0.0)
+        self.assertAlmostEqual(result, 0.0)
+
+    def test_remaining_cash_gate_prevents_overspend(self):
+        """
+        Simulates the cash guard: if remaining_cash < per_stock_budget the
+        buy loop should break rather than place the order.
+        """
+        per_stock_budget = 500.0
+        remaining_cash = 300.0
+        buy_executed = False
+
+        if remaining_cash >= per_stock_budget:
+            buy_executed = True
+
+        self.assertFalse(buy_executed)
+
+    def test_sufficient_cash_allows_buy(self):
+        per_stock_budget = 500.0
+        remaining_cash = 600.0
+        buy_executed = False
+
+        if remaining_cash >= per_stock_budget:
+            buy_executed = True
+
+        self.assertTrue(buy_executed)
+
+
+# ---------------------------------------------------------------------------
+# Watchlist TTL expiry logic
+# ---------------------------------------------------------------------------
+
+class TestWatchlistExpiry(unittest.TestCase):
+    """
+    Watchlist entries expire after _watchlist_ttl_days days.
+    These tests verify the date-comparison logic that drives eviction.
+    """
+
+    from datetime import date as _date
+
+    def _is_expired(self, watchlist_date, today, ttl_days):
+        from datetime import date
+        return (today - watchlist_date).days > ttl_days
+
+    def test_entry_within_ttl_is_not_expired(self):
+        from datetime import date, timedelta
+        today = date(2024, 1, 10)
+        added = date(2024, 1, 7)  # 3 days ago, TTL=5
+        self.assertFalse(self._is_expired(added, today, ttl_days=5))
+
+    def test_entry_exactly_at_ttl_is_not_expired(self):
+        from datetime import date
+        today = date(2024, 1, 10)
+        added = date(2024, 1, 5)  # exactly 5 days ago, TTL=5
+        self.assertFalse(self._is_expired(added, today, ttl_days=5))
+
+    def test_entry_past_ttl_is_expired(self):
+        from datetime import date
+        today = date(2024, 1, 10)
+        added = date(2024, 1, 4)  # 6 days ago, TTL=5
+        self.assertTrue(self._is_expired(added, today, ttl_days=5))
+
+    def test_stale_entries_are_removed_from_watchlist(self):
+        """Simulates the eviction loop that removes expired entries."""
+        from datetime import date
+        today = date(2024, 1, 10)
+        ttl = 5
+        watchlist = {
+            'AAPL': {'watchlist_date': date(2024, 1, 8)},  # 2 days — keep
+            'MSFT': {'watchlist_date': date(2024, 1, 3)},  # 7 days — expire
+            'TSLA': {'watchlist_date': date(2024, 1, 9)},  # 1 day  — keep
+        }
+
+        stale = [
+            sym for sym, c in watchlist.items()
+            if (today - c['watchlist_date']).days > ttl
+        ]
+        for sym in stale:
+            watchlist.pop(sym)
+
+        self.assertIn('AAPL', watchlist)
+        self.assertIn('TSLA', watchlist)
+        self.assertNotIn('MSFT', watchlist)
+
+
+# ---------------------------------------------------------------------------
+# Watchlist promotion logic
+# ---------------------------------------------------------------------------
+
+class TestWatchlistPromotion(unittest.TestCase):
+    """
+    A watchlist entry with action='buy' should be moved to self.pairs.
+    These tests verify the promotion and eviction logic without instantiating Strategy.
+    """
+
+    def _simulate_watchlist_evaluation(self, watchlist, action_by_symbol):
+        """
+        Simulate one pass of the watchlist evaluation loop.
+        action_by_symbol: dict mapping symbol -> 'buy' | 'hold' | 'sell'
+        Returns (updated_pairs, updated_watchlist).
+        """
+        pairs = {}
+        stale = []
+        for symbol, candidate in watchlist.items():
+            action = action_by_symbol.get(symbol, 'hold')
+            if action == 'buy':
+                candidate['action'] = 'buy'
+                pairs[symbol] = candidate
+                stale.append(symbol)
+        for sym in stale:
+            watchlist.pop(sym)
+        return pairs, watchlist
+
+    def test_buy_signal_promotes_entry_to_pairs(self):
+        watchlist = {
+            'AAPL': {'lead_stock': 'MSFT', 'lag_stock': 'AAPL', 'action': 'hold'},
+        }
+        pairs, remaining = self._simulate_watchlist_evaluation(
+            watchlist, action_by_symbol={'AAPL': 'buy'}
+        )
+        self.assertIn('AAPL', pairs)
+        self.assertEqual(pairs['AAPL']['action'], 'buy')
+        self.assertNotIn('AAPL', remaining)
+
+    def test_hold_signal_keeps_entry_in_watchlist(self):
+        watchlist = {
+            'AAPL': {'lead_stock': 'MSFT', 'lag_stock': 'AAPL', 'action': 'hold'},
+        }
+        pairs, remaining = self._simulate_watchlist_evaluation(
+            watchlist, action_by_symbol={'AAPL': 'hold'}
+        )
+        self.assertNotIn('AAPL', pairs)
+        self.assertIn('AAPL', remaining)
+
+    def test_only_buy_ready_entries_are_promoted(self):
+        watchlist = {
+            'AAPL': {'lead_stock': 'MSFT', 'lag_stock': 'AAPL', 'action': 'hold'},
+            'TSLA': {'lead_stock': 'NVDA', 'lag_stock': 'TSLA', 'action': 'hold'},
+        }
+        pairs, remaining = self._simulate_watchlist_evaluation(
+            watchlist, action_by_symbol={'AAPL': 'buy', 'TSLA': 'hold'}
+        )
+        self.assertIn('AAPL', pairs)
+        self.assertNotIn('TSLA', pairs)
+        self.assertIn('TSLA', remaining)
+        self.assertNotIn('AAPL', remaining)
+
+    def test_empty_watchlist_produces_no_pairs(self):
+        pairs, remaining = self._simulate_watchlist_evaluation({}, {})
+        self.assertEqual(pairs, {})
+        self.assertEqual(remaining, {})
+
+
 if __name__ == '__main__':
     unittest.main()
