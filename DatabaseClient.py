@@ -230,6 +230,7 @@ class DatabaseClient:
             "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS entry_threshold DOUBLE PRECISION",
             "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS exit_threshold DOUBLE PRECISION",
             "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS avg_zscore DOUBLE PRECISION",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS avg_watchlist_ttl DOUBLE PRECISION",
         ]
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -403,7 +404,7 @@ class DatabaseClient:
             portfolio_value, cash, spy_value, active_pairs,
             avg_correlation, cash_ratio, daily_buys, daily_sells,
             daily_topups, pairs_scanned, candidates_found,
-            candidates_buy_ready, avg_zscore
+            candidates_buy_ready, avg_zscore, avg_watchlist_ttl
         """
         sql = """
             INSERT INTO portfolio_snapshots
@@ -411,8 +412,8 @@ class DatabaseClient:
                  active_pairs, avg_correlation, cash_ratio,
                  daily_buys, daily_sells, daily_topups,
                  pairs_scanned, candidates_found, candidates_buy_ready,
-                 avg_zscore)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 avg_zscore, avg_watchlist_ttl)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         def _f(v):
             return float(v) if v is not None else None
@@ -435,6 +436,7 @@ class DatabaseClient:
                     metrics.get("candidates_found"),
                     metrics.get("candidates_buy_ready"),
                     _f(metrics.get("avg_zscore")),
+                    _f(metrics.get("avg_watchlist_ttl")),
                 ))
 
     # ------------------------------------------------------------------

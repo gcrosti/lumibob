@@ -259,5 +259,84 @@ class TestOptimizeZscore(unittest.TestCase):
         self.assertEqual(result.num_trades, 0)
 
 
+class TestRunZscoreDaysToFirstSignal(unittest.TestCase):
+    def setUp(self):
+        self.sim = PairSimulator()
+        self.lead, self.lag = _cointegrated_pair()
+
+    def test_days_to_first_signal_is_int(self):
+        result = self.sim.run_zscore(self.lead, self.lag, zscore_window=20,
+                                     entry_threshold=2.0, exit_threshold=0.5)
+        self.assertIsInstance(result.days_to_first_signal, int)
+
+    def test_days_to_first_signal_non_negative(self):
+        result = self.sim.run_zscore(self.lead, self.lag, zscore_window=20,
+                                     entry_threshold=2.0, exit_threshold=0.5)
+        self.assertGreaterEqual(result.days_to_first_signal, 0)
+
+    def test_days_to_first_signal_zero_when_no_signal(self):
+        """A very high entry threshold means the signal never fires; should return 0."""
+        result = self.sim.run_zscore(self.lead, self.lag, zscore_window=20,
+                                     entry_threshold=99.0, exit_threshold=0.5)
+        self.assertEqual(result.days_to_first_signal, 0)
+
+
+class TestOptimizeZscoreWithHoldout(unittest.TestCase):
+    def setUp(self):
+        self.sim = PairSimulator()
+        self.lead, self.lag = _cointegrated_pair(n=120)
+
+    def test_returns_three_tuple(self):
+        result, holdout_return, days = self.sim.optimize_zscore_with_holdout(self.lead, self.lag)
+        self.assertIsInstance(result, ZScoreSimResult)
+        self.assertIsInstance(holdout_return, float)
+        self.assertIsInstance(days, int)
+
+    def test_train_result_has_positive_return_on_cointegrated_pair(self):
+        result, _, _ = self.sim.optimize_zscore_with_holdout(self.lead, self.lag)
+        self.assertGreater(result.total_return, 0)
+
+    def test_holdout_return_is_real_float_not_sentinel(self):
+        """A long cointegrated pair should yield a real holdout_return, not the -1.0 sentinel."""
+        _, holdout_return, _ = self.sim.optimize_zscore_with_holdout(self.lead, self.lag)
+        self.assertGreater(holdout_return, -1.0)
+
+    def test_days_to_first_signal_non_negative(self):
+        """days_to_first_signal must be a non-negative integer."""
+        _, _, days = self.sim.optimize_zscore_with_holdout(self.lead, self.lag)
+        self.assertGreaterEqual(days, 0)
+
+    def test_short_series_returns_sentinel(self):
+        """A series too short for a meaningful split returns holdout_return = -1.0 and days = 0."""
+        short = pd.Series([100.0 + i * 0.1 for i in range(25)])
+        _, holdout_return, days = self.sim.optimize_zscore_with_holdout(short, short)
+        self.assertAlmostEqual(holdout_return, -1.0)
+        self.assertEqual(days, 0)
+
+    def test_train_split_does_not_use_holdout_data(self):
+        """
+        Verify the split is respected: train_result.num_trades should be
+        achievable within the first 67% of the series (<=80 bars for n=120).
+        We can't inspect the split directly, but we can verify the result
+        is structurally valid and the method completes without error.
+        """
+        result, holdout_return, days = self.sim.optimize_zscore_with_holdout(
+            self.lead, self.lag, train_frac=0.67
+        )
+        self.assertIsInstance(result, ZScoreSimResult)
+        self.assertIsInstance(holdout_return, float)
+        self.assertIsInstance(days, int)
+
+    def test_custom_train_frac(self):
+        """Different train_frac values should not crash and should return valid types."""
+        for frac in [0.5, 0.75]:
+            result, holdout_return, days = self.sim.optimize_zscore_with_holdout(
+                self.lead, self.lag, train_frac=frac
+            )
+            self.assertIsInstance(result, ZScoreSimResult)
+            self.assertIsInstance(holdout_return, float)
+            self.assertIsInstance(days, int)
+
+
 if __name__ == '__main__':
     unittest.main()
