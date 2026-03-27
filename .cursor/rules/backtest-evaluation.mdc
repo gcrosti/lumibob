@@ -9,7 +9,7 @@ Before evaluating, read README.md in the project root to understand the strategy
 
 ## Data Storage
 
-Run data is stored in a **PostgreSQL/TimescaleDB database** (connection string: `$DB_URL`, default `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+Run data is stored in a **PostgreSQL/TimescaleDB database** (connection string env var `DB_URL`, default `postgresql://postgres:lumibob@localhost:5432/lumibob`).
 
 | Need | Primary source | Fallback (older runs only) |
 |---|---|---|

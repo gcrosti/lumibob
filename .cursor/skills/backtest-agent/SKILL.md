@@ -85,11 +85,23 @@ Locate the backtest block (the `backtesting_start` assignment and surrounding `B
 
 **Step 2 — Run the backtest**
 
+Run the backtest immediately backgrounded so the agent does not rely on staying alive for the full duration. The `caffeinate -i` wrapper prevents macOS from sleeping while the process is running and exits automatically when Python finishes.
+
 ```bash
-RUN_MODE=backtest python main.py
+caffeinate -i python main.py
 ```
 
-Wait for completion. If the run crashes or exits non-zero, report the error and stop.
+Set `block_until_ms: 0` so the command backgrounds immediately and returns a terminal file path.
+
+Poll for completion by reading the terminal file at increasing intervals (start at 60 s, back off to 120 s). The terminal file footer will show `exit_code` when the process ends.
+
+Once `exit_code` appears, confirm completion via the DB rather than relying on terminal output alone:
+
+```sql
+SELECT completed_at FROM backtest_runs ORDER BY started_at DESC LIMIT 1;
+```
+
+If `completed_at IS NULL` after the process exits, flag as an anomaly — the run likely crashed. If the exit code is non-zero, report the error and stop.
 
 **Step 3 — Retrieve the run ID**
 

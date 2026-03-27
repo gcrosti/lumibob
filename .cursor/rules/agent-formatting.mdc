@@ -1,0 +1,16 @@
+---
+description: Formatting rules for agent chat output
+alwaysApply: true
+---
+
+# Agent Formatting
+
+## No dollar signs in chat output
+
+Never write a bare `$` character in chat responses. Dollar signs break markdown rendering (they are interpreted as math delimiters).
+
+- Write `DB_URL` not `$DB_URL`
+- Write `RUN_MODE=backtest python main.py` not `$RUN_MODE`
+- Write `env var FOO` or just `FOO` not `$FOO`
+
+This applies to all prose, tables, bullet points, and inline code. Dollar signs inside fenced SQL or shell code blocks are acceptable only when they are genuinely part of the syntax (e.g. a shell variable assignment), but prefer plain names even there when possible.
