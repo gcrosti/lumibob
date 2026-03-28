@@ -42,11 +42,16 @@ class BobsBrain(Strategy):
         self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
         self.max_lag = 5
         self.ticker_limit = self.parameters.get('ticker_limit', None)
-        # max_daily_spend_pct: fraction of portfolio value that can be deployed per day.
-        # per_pair_allocation: fraction of max_daily_spend allocated to each new pair.
-        # With defaults (0.5 × 0.10), each new pair receives ~5% of portfolio value.
-        self.max_daily_spend_pct = self.parameters.get('max_daily_spend_pct', 0.5)
-        self.per_pair_allocation = self.parameters.get('per_pair_allocation', 0.10)
+        # Position sizing parameters.
+        # min_position_pct / max_position_pct define the range of portfolio-value
+        # fraction allocated to a single new position; actual size scales with the
+        # pair's confidence score (Z-score depth, correlation, simulated Sharpe).
+        # target_deployed_pct is the fraction of portfolio value the strategy aims
+        # to have deployed at any time; a deployment gap boosts individual allocations
+        # toward this target when the portfolio is under-invested.
+        self.min_position_pct = self.parameters.get('min_position_pct', 0.03)
+        self.max_position_pct = self.parameters.get('max_position_pct', 0.20)
+        self.target_deployed_pct = self.parameters.get('target_deployed_pct', 0.60)
         self.entry_threshold = self.parameters.get('entry_threshold', 2.0)
         self.exit_threshold = self.parameters.get('exit_threshold', 0.5)
         self.min_sharpe = self.parameters.get('min_sharpe', 0.5)
@@ -82,6 +87,7 @@ class BobsBrain(Strategy):
         self._db = DatabaseClient(db_url)
         self._db.migrate_pairs_simulated_return()
         self._db.migrate_zscore_columns()
+        self._db.migrate_pairs_sim_sharpe()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -101,8 +107,9 @@ class BobsBrain(Strategy):
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
-                'max_daily_spend_pct': self.max_daily_spend_pct,
-                'per_pair_allocation': self.per_pair_allocation,
+                'min_position_pct': self.min_position_pct,
+                'max_position_pct': self.max_position_pct,
+                'target_deployed_pct': self.target_deployed_pct,
                 'entry_threshold': self.entry_threshold,
                 'exit_threshold': self.exit_threshold,
                 'min_sharpe': self.min_sharpe,
@@ -198,7 +205,7 @@ class BobsBrain(Strategy):
                 stale_watchlist.append(symbol)
                 continue
 
-            action, _ = stock_evaluator.get_zscore_action(
+            action, current_z = stock_evaluator.get_zscore_action(
                 lead_data, lag_data,
                 window=candidate['zscore_window'],
                 entry_threshold=candidate['entry_threshold'],
@@ -206,6 +213,7 @@ class BobsBrain(Strategy):
             )
             if action == 'buy':
                 candidate['action'] = 'buy'
+                candidate['current_zscore'] = current_z
                 candidate['pair_id'] = self._db.save_pair(candidate, self._run_id)
                 self.pairs[symbol] = candidate
                 stale_watchlist.append(symbol)
@@ -232,7 +240,7 @@ class BobsBrain(Strategy):
             if lead_data is None:
                 pair['action'] = 'sell'
                 continue
-            pair['action'], _ = stock_evaluator.get_zscore_action(
+            pair['action'], pair['current_zscore'] = stock_evaluator.get_zscore_action(
                 lead_data, lag_data,
                 window=pair['zscore_window'],
                 entry_threshold=pair['entry_threshold'],
@@ -333,7 +341,7 @@ class BobsBrain(Strategy):
             # Use the best-corr lag for reporting; z-score doesn't use lag directly.
             corr_at_opt_lag = best_corr
 
-            action, _ = stock_evaluator.get_zscore_action(
+            action, current_z = stock_evaluator.get_zscore_action(
                 s1, s2,
                 window=sim_result.zscore_window,
                 entry_threshold=sim_result.entry_threshold,
@@ -355,6 +363,7 @@ class BobsBrain(Strategy):
                         'lag_stock':        stock2,
                         'corr':             corr_at_opt_lag,
                         'simulated_return': sim_result.total_return,
+                        'sim_sharpe':       sim_result.sharpe,
                         'watchlist_date':   today,
                         'watchlist_ttl':    ttl,
                         'action':           action,
@@ -380,6 +389,8 @@ class BobsBrain(Strategy):
                 'corr':             corr_at_opt_lag,
                 'action':           action,
                 'simulated_return': sim_result.total_return,
+                'sim_sharpe':       sim_result.sharpe,
+                'current_zscore':   current_z,
                 'signal_type':      'zscore',
                 'zscore_window':    sim_result.zscore_window,
                 'entry_threshold':  sim_result.entry_threshold,
@@ -448,27 +459,49 @@ class BobsBrain(Strategy):
             if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
-        # Fixed per-pair allocation: each new position receives a uniform slice of
-        # portfolio value regardless of how many pairs fire on a given day.
-        # This replaces the previous "half of cash / N pairs" approach which caused
-        # variable and sometimes outsized single-pair allocations on low-activity days.
+        # Confidence-weighted allocation: each new position receives a budget
+        # scaled by a composite signal score (Z-score depth, correlation, Sharpe).
+        # A deployment-gap boost adds extra capital when the portfolio is below
+        # target_deployed_pct, divided evenly across remaining buy candidates.
+        # Pairs are funded in descending confidence order; continue (not break) is
+        # used when a pair's budget exceeds available cash so cheaper candidates
+        # further down the ranked list can still be executed.
         new_buy_symbols: set[str] = set()
         no_price_symbols: list[str] = []
         daily_new_buys = 0
         if buy_pairs:
+            portfolio_value = self.portfolio_value
             available_cash = self.get_cash()
-            per_stock_budget = available_cash * self.max_daily_spend_pct * self.per_pair_allocation
-            remaining_cash = available_cash
+            current_deployed = portfolio_value - available_cash
+            deployment_gap = max(0.0, self.target_deployed_pct * portfolio_value - current_deployed)
+            n_candidates = len(buy_pairs)
+
             for pair in buy_pairs:
-                if remaining_cash < per_stock_budget:
-                    break
+                pair['confidence_score'] = self._compute_confidence(pair)
+            buy_pairs_ranked = sorted(buy_pairs, key=lambda p: p['confidence_score'], reverse=True)
+
+            for pair in buy_pairs_ranked:
+                confidence = pair['confidence_score']
+                base_budget = (
+                    self.min_position_pct + confidence * (self.max_position_pct - self.min_position_pct)
+                ) * portfolio_value
+                if deployment_gap > 0 and n_candidates > 0:
+                    gap_share = deployment_gap / n_candidates
+                    base_budget = min(base_budget + gap_share, self.max_position_pct * portfolio_value)
+                per_stock_budget = base_budget
+
+                if available_cash < per_stock_budget:
+                    continue  # budget exceeds cash; try the next (cheaper) candidate
+
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
                     quantity = round(per_stock_budget / price, 6)
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
-                        remaining_cash -= per_stock_budget
+                        available_cash -= per_stock_budget
+                        deployment_gap = max(0.0, deployment_gap - per_stock_budget)
+                        n_candidates -= 1
                         new_buy_symbols.add(pair['lag_stock'])
                         daily_new_buys += 1
                         self._db.log_trade(
@@ -487,6 +520,7 @@ class BobsBrain(Strategy):
                     self._failed_tickers.add(symbol)
                     self._db.mark_ticker_failed(symbol, 'get_last_price returned None')
                     no_price_symbols.append(symbol)
+                    n_candidates -= 1
 
         for symbol in no_price_symbols:
             self.pairs.pop(symbol, None)
@@ -565,6 +599,38 @@ class BobsBrain(Strategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _compute_confidence(self, pair: dict) -> float:
+        """
+        Returns a [0.0, 1.0] confidence score for a buy signal on *pair*.
+
+        Three components are combined with fixed weights:
+          - Z-score depth  (0.4): how far the spread has exceeded the entry
+            threshold; normalised by the threshold itself so a z of -4.0 with
+            entry=2.0 scores 1.0, while exactly at threshold scores 0.0.
+          - Correlation    (0.4): pair's correlation normalised over the range
+            [min_correlation, 1.0]; pairs just above the minimum gate score 0.0.
+          - Simulated Sharpe (0.2): sim Sharpe normalised over [min_sharpe,
+            2×min_sharpe]; caps at 1.0 when Sharpe reaches twice the minimum.
+
+        Missing values fall back to their respective minimum gates so a pair
+        without a stored z-score or Sharpe receives the lowest possible score
+        for that component rather than an error.
+        """
+        z = pair.get('current_zscore')
+        entry = pair.get('entry_threshold', self.entry_threshold)
+        z_score = min((abs(z) - entry) / entry, 1.0) if z is not None else 0.0
+        z_score = max(z_score, 0.0)
+
+        corr = pair.get('corr', self.min_correlation)
+        corr_score = min((corr - self.min_correlation) / (1.0 - self.min_correlation), 1.0)
+        corr_score = max(corr_score, 0.0)
+
+        sharpe = pair.get('sim_sharpe', self.min_sharpe)
+        sharpe_score = min((sharpe - self.min_sharpe) / self.min_sharpe, 1.0)
+        sharpe_score = max(sharpe_score, 0.0)
+
+        return 0.4 * z_score + 0.4 * corr_score + 0.2 * sharpe_score
 
     @staticmethod
     def _is_penny_stock(series) -> bool:
