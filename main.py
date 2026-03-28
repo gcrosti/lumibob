@@ -38,7 +38,7 @@ if __name__ == '__main__':
         from lumibot.backtesting import YahooDataBacktesting
 
         backtesting_start = datetime(2024, 1, 2)
-        backtesting_end = datetime(2024, 1, 12)
+        backtesting_end = datetime(2024, 3, 27)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,
