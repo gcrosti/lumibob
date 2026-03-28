@@ -87,6 +87,7 @@ class BobsBrain(Strategy):
         self._db = DatabaseClient(db_url)
         self._db.migrate_pairs_simulated_return()
         self._db.migrate_zscore_columns()
+        self._db.migrate_pairs_sim_sharpe()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,

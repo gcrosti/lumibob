@@ -170,10 +170,15 @@ class DatabaseClient:
         Return active pairs for the given run as a dict keyed by lag_symbol —
         the same shape that pair_history.json used — for drop-in compatibility
         with BobsBrain.
+
+        All columns needed by BobsBrain.before_market_opens() are selected so
+        that DB-loaded pairs can be evaluated immediately without missing fields.
         """
         sql = """
             SELECT id, lead_symbol, lag_symbol, lag_days,
-                   short_ma, long_ma, correlation, initial_cost
+                   short_ma, long_ma, correlation, initial_cost,
+                   simulated_return, sim_sharpe, signal_type,
+                   zscore_window, entry_threshold, exit_threshold
             FROM   pairs
             WHERE  active = TRUE
               AND  run_id = %s
@@ -185,17 +190,25 @@ class DatabaseClient:
 
         result: dict = {}
         for row in rows:
-            pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost = row
+            (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
+             sim_ret, sim_sharpe, signal_type, zscore_window,
+             entry_threshold, exit_threshold) = row
             result[lag] = {
-                "pair_id":      pid,
-                "lead_stock":   lead,
-                "lag_stock":    lag,
-                "lag":          lag_days,
-                "short_ma":     short_ma,
-                "long_ma":      long_ma,
-                "corr":         float(corr) if corr is not None else None,
-                "action":       "hold",
-                "initial_cost": float(initial_cost) if initial_cost is not None else None,
+                "pair_id":          pid,
+                "lead_stock":       lead,
+                "lag_stock":        lag,
+                "lag":              lag_days,
+                "short_ma":         short_ma,
+                "long_ma":          long_ma,
+                "corr":             float(corr) if corr is not None else None,
+                "action":           "hold",
+                "initial_cost":     float(initial_cost) if initial_cost is not None else None,
+                "simulated_return": float(sim_ret) if sim_ret is not None else None,
+                "sim_sharpe":       float(sim_sharpe) if sim_sharpe is not None else None,
+                "signal_type":      signal_type,
+                "zscore_window":    zscore_window,
+                "entry_threshold":  float(entry_threshold) if entry_threshold is not None else None,
+                "exit_threshold":   float(exit_threshold) if exit_threshold is not None else None,
             }
         return result
 
@@ -237,6 +250,17 @@ class DatabaseClient:
                 for sql in statements:
                     cur.execute(sql)
 
+    def migrate_pairs_sim_sharpe(self) -> None:
+        """
+        Idempotent migration: add the sim_sharpe column to the pairs table if
+        it does not already exist.  Safe to call on every startup.
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS sim_sharpe DOUBLE PRECISION"
+                )
+
     def save_pair(self, pair: dict, run_id: str) -> int:
         """
         Insert a new pair row scoped to run_id. Returns the new pair id.
@@ -245,6 +269,7 @@ class DatabaseClient:
 
         Optional pair keys:
             simulated_return (float)   -- best historical simulated return
+            sim_sharpe (float)         -- annualised Sharpe of the simulated strategy
             signal_type (str)          -- 'ma' or 'zscore'
             zscore_window (int)        -- rolling window for Z-score spread
             entry_threshold (float)    -- Z-score entry level
@@ -253,10 +278,10 @@ class DatabaseClient:
         sql = """
             INSERT INTO pairs
                 (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
-                 correlation, simulated_return, signal_type, zscore_window,
+                 correlation, simulated_return, sim_sharpe, signal_type, zscore_window,
                  entry_threshold, exit_threshold,
                  discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -267,6 +292,7 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 corr = pair.get("corr")
                 sim_ret = pair.get("simulated_return")
+                sim_sharpe = pair.get("sim_sharpe")
                 signal_type = pair.get("signal_type", "ma")
                 zscore_window = pair.get("zscore_window")
                 entry_threshold = pair.get("entry_threshold")
@@ -280,6 +306,7 @@ class DatabaseClient:
                     pair.get("long_ma", 5),
                     float(corr) if corr is not None else None,
                     float(sim_ret) if sim_ret is not None else None,
+                    float(sim_sharpe) if sim_sharpe is not None else None,
                     signal_type,
                     int(zscore_window) if zscore_window is not None else None,
                     float(entry_threshold) if entry_threshold is not None else None,

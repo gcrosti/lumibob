@@ -158,11 +158,18 @@ class TestTickers:
 # ---------------------------------------------------------------------------
 
 class TestPairs:
+    def _pair_row(self, pid=1, lead="AAPL", lag="MSFT", lag_days=1,
+                  short_ma=2, long_ma=5, corr=0.91, initial_cost=None,
+                  sim_ret=None, sim_sharpe=None, signal_type=None,
+                  zscore_window=None, entry_threshold=None, exit_threshold=None):
+        """Build a 14-column pairs row matching the SELECT in load_active_pairs."""
+        return (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
+                sim_ret, sim_sharpe, signal_type, zscore_window,
+                entry_threshold, exit_threshold)
+
     def test_load_active_pairs_returns_dict_keyed_by_lag(self):
         client, mock_pool = _make_client()
-        _mock_conn(mock_pool, fetchall_return=[
-            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, None),
-        ])
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row()])
 
         result = client.load_active_pairs("run01")
 
@@ -274,6 +281,46 @@ class TestPairs:
         assert any("pairs_scanned" in sql for sql in all_calls)
         assert any("ADD COLUMN" in sql for sql in all_calls)
 
+    def test_migrate_pairs_sim_sharpe_executes_alter(self):
+        """migrate_pairs_sim_sharpe should add sim_sharpe column to pairs table."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_pairs_sim_sharpe()
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "sim_sharpe" in sql
+        assert "ADD COLUMN IF NOT EXISTS" in sql
+
+    def test_save_pair_includes_sim_sharpe_when_provided(self):
+        """sim_sharpe is passed through to the INSERT params."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(9,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5,
+            "corr": 0.92, "sim_sharpe": 1.4,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert 1.4 in params
+
+    def test_save_pair_passes_none_for_missing_sim_sharpe(self):
+        """When sim_sharpe is absent, None is stored rather than raising."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(10,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.91,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert None in params
+
     def test_update_pair_initial_cost_executes_update(self):
         """update_pair_initial_cost should UPDATE pairs SET initial_cost for the given id."""
         client, mock_pool = _make_client()
@@ -291,9 +338,7 @@ class TestPairs:
     def test_load_active_pairs_includes_initial_cost(self):
         """load_active_pairs should return initial_cost in each pair dict."""
         client, mock_pool = _make_client()
-        _mock_conn(mock_pool, fetchall_return=[
-            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, 487.50),
-        ])
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row(initial_cost=487.50)])
 
         result = client.load_active_pairs("run01")
 
@@ -303,13 +348,40 @@ class TestPairs:
     def test_load_active_pairs_initial_cost_none_when_not_set(self):
         """initial_cost should be None when the DB value is NULL."""
         client, mock_pool = _make_client()
-        _mock_conn(mock_pool, fetchall_return=[
-            (1, "AAPL", "MSFT", 1, 2, 5, 0.91, None),
-        ])
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row(initial_cost=None)])
 
         result = client.load_active_pairs("run01")
 
         assert result["MSFT"]["initial_cost"] is None
+
+    def test_load_active_pairs_includes_sim_sharpe_and_zscore_fields(self):
+        """All fields needed by before_market_opens() are present in loaded pairs."""
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[
+            self._pair_row(
+                sim_ret=0.08, sim_sharpe=1.2, signal_type="zscore",
+                zscore_window=20, entry_threshold=2.0, exit_threshold=0.5,
+            )
+        ])
+
+        result = client.load_active_pairs("run01")
+        pair = result["MSFT"]
+
+        assert pair["simulated_return"] == 0.08
+        assert pair["sim_sharpe"] == 1.2
+        assert pair["signal_type"] == "zscore"
+        assert pair["zscore_window"] == 20
+        assert pair["entry_threshold"] == 2.0
+        assert pair["exit_threshold"] == 0.5
+
+    def test_load_active_pairs_sim_sharpe_none_when_not_set(self):
+        """sim_sharpe is None when the DB value is NULL."""
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row(sim_sharpe=None)])
+
+        result = client.load_active_pairs("run01")
+
+        assert result["MSFT"]["sim_sharpe"] is None
 
 
 # ---------------------------------------------------------------------------
