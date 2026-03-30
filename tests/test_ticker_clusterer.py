@@ -87,32 +87,40 @@ class TestGetClusters:
 
     def test_clusters_ranked_by_yield_descending(self):
         """
-        Clusters are sorted by avg_corr × size descending, so the most
-        fertile cluster is first. With our synthetic data each group of 5
-        correlated tickers should form a well-defined cluster; the first
-        returned cluster should have a higher expected yield than the last.
-        """
-        prices = _make_prices(TICKERS, n_days=80)
-        clusterer, _ = _make_clusterer(prices)
-        clusters = clusterer.get_clusters(TICKERS, as_of=AS_OF)
-        # We cannot assert exact cluster membership without pinning HDBSCAN,
-        # but we can assert that size × internal_corr is non-increasing.
-        if len(clusters) < 2:
-            pytest.skip("Only one cluster produced — insufficient signal")
+        Clusters are sorted by avg_corr × size descending.
 
+        HDBSCAN is mocked to assign deterministic labels so the test never
+        skips. Labels are deliberately returned in reverse-yield order to
+        verify that _compute sorts them correctly before returning.
+        """
+        from unittest.mock import patch
+
+        prices = _make_prices(TICKERS)  # group1=TICKERS[:5], group2=TICKERS[5:]
+        clusterer, mock_db = _make_clusterer(prices)
+
+        # HDBSCAN labels: group1 = label 1, group2 = label 0 (insertion order
+        # means label 0 would be returned first by cluster_map.values() if not
+        # sorted — we rely on this to verify the yield-based sort actually fires).
+        mock_labels = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0])
+
+        mock_hdbscan = MagicMock()
+        mock_hdbscan.fit_predict.return_value = mock_labels
+
+        with patch('TickerClusterer.hdbscan.HDBSCAN', return_value=mock_hdbscan):
+            clusters = clusterer.get_clusters(TICKERS, as_of=AS_OF)
+
+        assert len(clusters) == 2
+
+        # Verify the output is ordered by yield (avg_corr × size) descending.
         log_ret = np.log(prices).diff().dropna()
 
-        def expected_yield(members):
-            if len(members) < 2:
-                return 0.0
+        def _yield(members):
             sub = log_ret[members].corr().values
             n = len(members)
-            avg_corr = (sub.sum() - n) / (n * (n - 1))
-            return avg_corr * n
+            return (sub.sum() - n) / (n * (n - 1)) * n
 
-        yields = [expected_yield(c) for c in clusters]
-        # Allow the tail (noise) cluster to break monotonicity — noise is always last.
-        assert yields[0] >= yields[-1] or len(clusters) == 1
+        yields = [_yield(c) for c in clusters]
+        assert yields[0] >= yields[1]
 
 
 # ---------------------------------------------------------------------------
