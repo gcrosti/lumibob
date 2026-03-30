@@ -5,3 +5,5 @@ alpaca-py
 psycopg2-binary
 python-dotenv
 statsmodels
+scikit-learn
+hdbscan

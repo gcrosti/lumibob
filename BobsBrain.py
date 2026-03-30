@@ -14,6 +14,7 @@ from DatabaseClient import DatabaseClient
 from PairSimulator import PairSimulator
 from StockDataCache import StockDataCache
 from StockEvaluator import StockEvaluator
+from TickerClusterer import TickerClusterer
 
 load_dotenv()
 
@@ -42,6 +43,11 @@ class BobsBrain(Strategy):
         self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
         self.max_lag = 5
         self.ticker_limit = self.parameters.get('ticker_limit', None)
+        # cluster_recompute_days: how often to rebuild movement clusters.
+        # None = compute once at strategy start and hold for the full run.
+        # This is the recommended default for backtests; use an integer (e.g. 30)
+        # for live trading so clusters adapt as market regimes shift.
+        self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
         # Position sizing parameters.
         # min_position_pct / max_position_pct define the range of portfolio-value
         # fraction allocated to a single new position; actual size scales with the
@@ -95,6 +101,7 @@ class BobsBrain(Strategy):
             mode=self._run_mode,
         )
         self._cache = StockDataCache(self._db, self._alpaca)
+        self._clusterer = TickerClusterer(db=self._db)
         self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
         self._run_id = secrets.token_hex(3)
@@ -104,6 +111,7 @@ class BobsBrain(Strategy):
             mode=self._run_mode,
             settings={
                 'ticker_limit': self.ticker_limit,
+                'cluster_recompute_days': self.cluster_recompute_days,
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
@@ -259,13 +267,30 @@ class BobsBrain(Strategy):
         # as penny stocks so they cannot form new pairs or consume the ticker_limit.
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
-        # Shuffle before applying ticker_limit so the limit picks a different
-        # random subset of the universe each day rather than always the same
-        # alphabetical head.
-        random.shuffle(tickers)
-
+        # ticker_limit still supported for speed-limited comparison backtests.
+        # When set, a random subset is drawn before clustering so the cluster
+        # structure reflects the same universe that will actually be searched.
         if self.ticker_limit:
+            random.shuffle(tickers)
             tickers = tickers[:self.ticker_limit]
+
+        # Cluster tickers by 6-month return similarity so only pairs within
+        # movement-similar groups are evaluated. Clusters are ranked by expected
+        # yield (avg intra-cluster correlation × size), so the most fertile
+        # clusters are searched first. Shuffling within each cluster copy ensures
+        # different pair orderings are examined on each trading day.
+        clusters = self._clusterer.get_clusters(
+            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
+        )
+        shuffled_clusters = [list(c) for c in clusters]
+        for c in shuffled_clusters:
+            random.shuffle(c)
+
+        pair_iter = (
+            (s1, s2)
+            for cluster in shuffled_clusters
+            for s1, s2 in itertools.combinations(cluster, 2)
+        )
 
         new_candidates = 0
         gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
@@ -274,7 +299,7 @@ class BobsBrain(Strategy):
         candidates_buy_ready = 0
         new_penny_stocks: set[str] = set()
 
-        for stock1, stock2 in itertools.combinations(tickers, 2):
+        for stock1, stock2 in pair_iter:
             if new_candidates >= self.min_daily_pairs:
                 break
 
