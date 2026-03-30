@@ -48,6 +48,9 @@ class BobsBrain(Strategy):
         # This is the recommended default for backtests; use an integer (e.g. 30)
         # for live trading so clusters adapt as market regimes shift.
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
+        # use_clusters: set to False to bypass TickerClusterer and use the original
+        # shuffle+combinations path. Useful for A/B comparison backtests.
+        self.use_clusters = self.parameters.get('use_clusters', True)
         # Position sizing parameters.
         # min_position_pct / max_position_pct define the range of portfolio-value
         # fraction allocated to a single new position; actual size scales with the
@@ -112,6 +115,7 @@ class BobsBrain(Strategy):
             settings={
                 'ticker_limit': self.ticker_limit,
                 'cluster_recompute_days': self.cluster_recompute_days,
+                'use_clusters': self.use_clusters,
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
@@ -268,29 +272,33 @@ class BobsBrain(Strategy):
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
         # ticker_limit still supported for speed-limited comparison backtests.
-        # When set, a random subset is drawn before clustering so the cluster
-        # structure reflects the same universe that will actually be searched.
+        # When set, a random subset is drawn before the pair search begins so
+        # the universe reflects the same N tickers regardless of clustering mode.
         if self.ticker_limit:
             random.shuffle(tickers)
             tickers = tickers[:self.ticker_limit]
 
-        # Cluster tickers by 6-month return similarity so only pairs within
-        # movement-similar groups are evaluated. Clusters are ranked by expected
-        # yield (avg intra-cluster correlation × size), so the most fertile
-        # clusters are searched first. Shuffling within each cluster copy ensures
-        # different pair orderings are examined on each trading day.
-        clusters = self._clusterer.get_clusters(
-            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
-        )
-        shuffled_clusters = [list(c) for c in clusters]
-        for c in shuffled_clusters:
-            random.shuffle(c)
-
-        pair_iter = (
-            (s1, s2)
-            for cluster in shuffled_clusters
-            for s1, s2 in itertools.combinations(cluster, 2)
-        )
+        if self.use_clusters:
+            # Cluster tickers by 6-month return similarity so only pairs within
+            # movement-similar groups are evaluated. Clusters are ranked by expected
+            # yield (avg intra-cluster correlation × size), so the most fertile
+            # clusters are searched first. Shuffling within each cluster copy ensures
+            # different pair orderings are examined on each trading day.
+            clusters = self._clusterer.get_clusters(
+                tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
+            )
+            shuffled_clusters = [list(c) for c in clusters]
+            for c in shuffled_clusters:
+                random.shuffle(c)
+            pair_iter = (
+                (s1, s2)
+                for cluster in shuffled_clusters
+                for s1, s2 in itertools.combinations(cluster, 2)
+            )
+        else:
+            # Original path: shuffle all tickers then iterate all combinations.
+            random.shuffle(tickers)
+            pair_iter = itertools.combinations(tickers, 2)
 
         new_candidates = 0
         gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
