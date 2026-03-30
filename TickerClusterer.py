@@ -129,8 +129,10 @@ class TickerClusterer:
             return [list(tickers)]
 
         # Require ≥50% coverage; forward-fill gaps then drop any column still NaN.
+        # Cast to float64 explicitly — DB values come back as Python floats which
+        # numpy ufuncs (np.log) cannot operate on via the array protocol.
         min_obs = max(2, int(prices.shape[0] * 0.5))
-        prices = prices.dropna(axis=1, thresh=min_obs).ffill()
+        prices = prices.dropna(axis=1, thresh=min_obs).ffill().astype(float)
         log_returns = np.log(prices).diff().dropna()
         log_returns = log_returns.dropna(axis=1)
 

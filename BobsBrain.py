@@ -44,12 +44,13 @@ class BobsBrain(Strategy):
         self.max_lag = 5
         self.ticker_limit = self.parameters.get('ticker_limit', None)
         # cluster_recompute_days: how often to rebuild movement clusters.
-        # None = compute once at strategy start and hold for the full run.
+        # None = compute once on the first trading day and hold for the full run.
         # This is the recommended default for backtests; use an integer (e.g. 30)
         # for live trading so clusters adapt as market regimes shift.
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
-        # use_clusters: set to False to bypass TickerClusterer and use the original
-        # shuffle+combinations path. Useful for A/B comparison backtests.
+        # use_clusters: set to False to bypass TickerClusterer and fall back to the
+        # original shuffle+combinations path. Useful for A/B comparison backtests.
+        # When True, ticker_limit is ignored — clusters are built on the full universe.
         self.use_clusters = self.parameters.get('use_clusters', True)
         # Position sizing parameters.
         # min_position_pct / max_position_pct define the range of portfolio-value
@@ -271,19 +272,14 @@ class BobsBrain(Strategy):
         # as penny stocks so they cannot form new pairs or consume the ticker_limit.
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
-        # ticker_limit still supported for speed-limited comparison backtests.
-        # When set, a random subset is drawn before the pair search begins so
-        # the universe reflects the same N tickers regardless of clustering mode.
-        if self.ticker_limit:
-            random.shuffle(tickers)
-            tickers = tickers[:self.ticker_limit]
-
         if self.use_clusters:
-            # Cluster tickers by 6-month return similarity so only pairs within
-            # movement-similar groups are evaluated. Clusters are ranked by expected
-            # yield (avg intra-cluster correlation × size), so the most fertile
-            # clusters are searched first. Shuffling within each cluster copy ensures
-            # different pair orderings are examined on each trading day.
+            # Cluster the full ticker universe by 6-month return similarity so only
+            # pairs within movement-similar groups are evaluated. Clustering happens
+            # on all tickers before any limit is applied — the cluster structure must
+            # reflect the full universe, not a random daily sample.
+            # Clusters are ranked by expected yield (avg intra-cluster correlation ×
+            # size) so the most fertile clusters are searched first.
+            # Shuffling within each cluster copy gives different pair orderings each day.
             clusters = self._clusterer.get_clusters(
                 tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
             )
@@ -296,8 +292,11 @@ class BobsBrain(Strategy):
                 for s1, s2 in itertools.combinations(cluster, 2)
             )
         else:
-            # Original path: shuffle all tickers then iterate all combinations.
+            # Original path: shuffle all tickers, apply optional ticker_limit, then
+            # iterate all combinations. ticker_limit is only meaningful here.
             random.shuffle(tickers)
+            if self.ticker_limit:
+                tickers = tickers[:self.ticker_limit]
             pair_iter = itertools.combinations(tickers, 2)
 
         new_candidates = 0
