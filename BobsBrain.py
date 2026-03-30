@@ -273,24 +273,42 @@ class BobsBrain(Strategy):
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
         if self.use_clusters:
-            # Cluster the full ticker universe by 6-month return similarity so only
-            # pairs within movement-similar groups are evaluated. Clustering happens
-            # on all tickers before any limit is applied — the cluster structure must
-            # reflect the full universe, not a random daily sample.
+            # Cluster the full ticker universe by 6-month return similarity.
+            # Clustering always runs on all tickers so the structure reflects the
+            # full universe — ticker_limit is never applied before this step.
             # Clusters are ranked by expected yield (avg intra-cluster correlation ×
             # size) so the most fertile clusters are searched first.
-            # Shuffling within each cluster copy gives different pair orderings each day.
             clusters = self._clusterer.get_clusters(
                 tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
             )
-            shuffled_clusters = [list(c) for c in clusters]
-            for c in shuffled_clusters:
-                random.shuffle(c)
-            pair_iter = (
-                (s1, s2)
-                for cluster in shuffled_clusters
-                for s1, s2 in itertools.combinations(cluster, 2)
-            )
+
+            if self.ticker_limit:
+                # Fill a ticker_limit-sized bucket from the top clusters in yield
+                # order. Each cluster is shuffled before sampling so the specific
+                # tickers drawn rotate randomly each day while always coming from
+                # the highest-yield clusters. Dip into subsequent clusters only
+                # when the top cluster has fewer tickers than the remaining quota.
+                bucket: list[str] = []
+                remaining = self.ticker_limit
+                for cluster in clusters:
+                    if remaining <= 0:
+                        break
+                    sample = list(cluster)
+                    random.shuffle(sample)
+                    bucket.extend(sample[:remaining])
+                    remaining -= len(sample[:remaining])
+                pair_iter = itertools.combinations(bucket, 2)
+            else:
+                # Full universe: search within each cluster only, in yield order.
+                # Shuffle within each cluster copy for daily pair-order variety.
+                shuffled_clusters = [list(c) for c in clusters]
+                for c in shuffled_clusters:
+                    random.shuffle(c)
+                pair_iter = (
+                    (s1, s2)
+                    for cluster in shuffled_clusters
+                    for s1, s2 in itertools.combinations(cluster, 2)
+                )
         else:
             # Original path: shuffle all tickers, apply optional ticker_limit, then
             # iterate all combinations. ticker_limit is only meaningful here.
