@@ -50,7 +50,9 @@ class BobsBrain(Strategy):
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
         # use_clusters: set to False to bypass TickerClusterer and fall back to the
         # original shuffle+combinations path. Useful for A/B comparison backtests.
-        # When True, ticker_limit is ignored — clusters are built on the full universe.
+        # When True, clusters are always built on the full ticker universe. If
+        # ticker_limit is also set, it controls how many tickers are sampled from
+        # those clusters each day (filled from the highest-yield cluster first).
         self.use_clusters = self.parameters.get('use_clusters', True)
         # Position sizing parameters.
         # min_position_pct / max_position_pct define the range of portfolio-value

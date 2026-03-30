@@ -397,5 +397,66 @@ class TestWatchlistPromotion(unittest.TestCase):
         self.assertEqual(remaining, {})
 
 
+# ---------------------------------------------------------------------------
+# Cluster-guided bucket sampling logic
+# ---------------------------------------------------------------------------
+
+def _fill_bucket(clusters: list[list[str]], ticker_limit: int) -> list[str]:
+    """
+    Replicate the bucket-filling logic from BobsBrain.before_market_opens.
+    Extracted here so it can be tested without instantiating Strategy.
+    """
+    import random
+    bucket: list[str] = []
+    remaining = ticker_limit
+    for cluster in clusters:
+        if remaining <= 0:
+            break
+        sample = list(cluster)
+        random.shuffle(sample)
+        bucket.extend(sample[:remaining])
+        remaining -= len(sample[:remaining])
+    return bucket
+
+
+class TestClusterBucketSampling(unittest.TestCase):
+    def test_bucket_respects_ticker_limit(self):
+        clusters = [['A', 'B', 'C', 'D', 'E'], ['F', 'G', 'H'], ['I', 'J']]
+        bucket = _fill_bucket(clusters, ticker_limit=4)
+        self.assertEqual(len(bucket), 4)
+
+    def test_bucket_fills_from_top_cluster_first(self):
+        """When the top cluster is large enough, all tickers come from it."""
+        clusters = [list('ABCDEFGHIJ'), list('KLMNO')]
+        bucket = _fill_bucket(clusters, ticker_limit=5)
+        self.assertEqual(len(bucket), 5)
+        self.assertTrue(all(t in 'ABCDEFGHIJ' for t in bucket))
+
+    def test_bucket_dips_into_next_cluster_when_top_exhausted(self):
+        """When top cluster is smaller than limit, next cluster is used."""
+        clusters = [['A', 'B'], ['C', 'D', 'E', 'F']]
+        bucket = _fill_bucket(clusters, ticker_limit=4)
+        self.assertEqual(len(bucket), 4)
+        self.assertIn('A', bucket)
+        self.assertIn('B', bucket)
+        # Two of C/D/E/F fill the remainder
+        from_second = [t for t in bucket if t in 'CDEF']
+        self.assertEqual(len(from_second), 2)
+
+    def test_bucket_capped_at_ticker_limit_when_universe_smaller(self):
+        """If total tickers across all clusters < ticker_limit, return all."""
+        clusters = [['A', 'B'], ['C']]
+        bucket = _fill_bucket(clusters, ticker_limit=10)
+        self.assertEqual(set(bucket), {'A', 'B', 'C'})
+
+    def test_bucket_contains_no_duplicates(self):
+        clusters = [list('ABCDE'), list('FGHIJ')]
+        bucket = _fill_bucket(clusters, ticker_limit=7)
+        self.assertEqual(len(bucket), len(set(bucket)))
+
+    def test_empty_clusters_returns_empty_bucket(self):
+        self.assertEqual(_fill_bucket([], ticker_limit=10), [])
+
+
 if __name__ == '__main__':
     unittest.main()
