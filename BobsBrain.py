@@ -706,7 +706,10 @@ class BobsBrain(Strategy):
                     })
                 if (i + 1) % 100 == 0:
                     print(f"[BobsBrain] Metadata progress: {i + 1}/{len(missing)}")
-            self._db.upsert_ticker_metadata(records)
+                    self._db.upsert_ticker_metadata(records)
+                    records = []
+            if records:
+                self._db.upsert_ticker_metadata(records)
             new_df = pd.DataFrame(records)
             existing_df = (
                 pd.concat([existing_df, new_df], ignore_index=True)
