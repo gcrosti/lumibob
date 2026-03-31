@@ -23,8 +23,9 @@ if __name__ == '__main__':
         strategy = BobsBrain(
             broker=broker,
             parameters={
-                'ticker_limit': 100,
-                'min_daily_pairs': 10,
+                'min_daily_pairs': 5,
+                'max_clusters_per_day': 5,
+                'pair_eval_cooldown_days': 7,
                 'min_position_pct': 0.03,
                 'max_position_pct': 0.20,
                 'target_deployed_pct': 0.60,
@@ -45,8 +46,9 @@ if __name__ == '__main__':
             backtesting_end,
             budget=10000,
             parameters={
-                'ticker_limit': 500,
-                'min_daily_pairs': 10,
+                'min_daily_pairs': 5,
+                'max_clusters_per_day': 5,
+                'pair_eval_cooldown_days': 7,
                 'min_position_pct': 0.03,
                 'max_position_pct': 0.20,
                 'target_deployed_pct': 0.60,

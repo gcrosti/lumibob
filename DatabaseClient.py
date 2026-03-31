@@ -261,6 +261,68 @@ class DatabaseClient:
                     "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS sim_sharpe DOUBLE PRECISION"
                 )
 
+    def migrate_ticker_metadata(self) -> None:
+        """
+        Idempotent migration: create the ticker_metadata table if it does not
+        already exist.  Safe to call on every startup.
+        """
+        sql = """
+            CREATE TABLE IF NOT EXISTS ticker_metadata (
+                symbol      TEXT PRIMARY KEY,
+                sector      TEXT,
+                is_etf      BOOLEAN NOT NULL DEFAULT FALSE,
+                fetched_at  TIMESTAMPTZ NOT NULL
+            )
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+
+    def get_ticker_metadata(self, symbols: list[str]) -> pd.DataFrame:
+        """
+        Return sector/ETF metadata for the given symbols as a DataFrame with
+        columns [symbol, sector, is_etf, fetched_at].  Only rows that already
+        exist in the DB are returned; missing symbols are simply absent.
+        """
+        if not symbols:
+            return pd.DataFrame(columns=['symbol', 'sector', 'is_etf', 'fetched_at'])
+        sql = """
+            SELECT symbol, sector, is_etf, fetched_at
+            FROM   ticker_metadata
+            WHERE  symbol = ANY(%s)
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (symbols,))
+                rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=['symbol', 'sector', 'is_etf', 'fetched_at'])
+        return pd.DataFrame(rows, columns=['symbol', 'sector', 'is_etf', 'fetched_at'])
+
+    def upsert_ticker_metadata(self, records: list[dict]) -> None:
+        """
+        Insert or update ticker metadata rows.  Each record must contain:
+            symbol (str), sector (str | None), is_etf (bool), fetched_at (datetime)
+        Existing rows are overwritten so stale data can be refreshed by clearing
+        the table and re-running the strategy.
+        """
+        if not records:
+            return
+        rows = [
+            (r['symbol'], r.get('sector'), bool(r.get('is_etf', False)), r['fetched_at'])
+            for r in records
+        ]
+        sql = """
+            INSERT INTO ticker_metadata (symbol, sector, is_etf, fetched_at)
+            VALUES %s
+            ON CONFLICT (symbol) DO UPDATE
+                SET sector     = EXCLUDED.sector,
+                    is_etf     = EXCLUDED.is_etf,
+                    fetched_at = EXCLUDED.fetched_at
+        """
+        with self._conn() as conn:
+            psycopg2.extras.execute_values(conn.cursor(), sql, rows)
+
     def save_pair(self, pair: dict, run_id: str) -> int:
         """
         Insert a new pair row scoped to run_id. Returns the new pair id.

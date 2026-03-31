@@ -1,11 +1,13 @@
 import itertools
+import logging
 import math
 import os
 import random
 import secrets
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
+import yfinance as yf
 from dotenv import load_dotenv
 from lumibot.strategies import Strategy
 
@@ -40,20 +42,26 @@ class BobsBrain(Strategy):
         self.sleeptime = '1D'
         self.min_correlation = 0.9
         self.lookback_window = 60
-        self.min_daily_pairs = self.parameters.get('min_daily_pairs', 10)
+        self.min_daily_pairs = self.parameters.get('min_daily_pairs', 5)
         self.max_lag = 5
-        self.ticker_limit = self.parameters.get('ticker_limit', None)
         # cluster_recompute_days: how often to rebuild movement clusters.
         # None = compute once on the first trading day and hold for the full run.
         # This is the recommended default for backtests; use an integer (e.g. 30)
         # for live trading so clusters adapt as market regimes shift.
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
-        # use_clusters: set to False to bypass TickerClusterer and fall back to the
-        # original shuffle+combinations path. Useful for A/B comparison backtests.
-        # When True, clusters are always built on the full ticker universe. If
-        # ticker_limit is also set, it controls how many tickers are sampled from
-        # those clusters each day (filled from the highest-yield cluster first).
-        self.use_clusters = self.parameters.get('use_clusters', True)
+        # max_clusters_per_day: cap the number of clusters searched per day.
+        # Clusters are already ranked by expected pair yield, so this slices the
+        # top N. None = search all clusters (early exit via min_daily_pairs).
+        self.max_clusters_per_day = self.parameters.get('max_clusters_per_day', None)
+        # pair_eval_cooldown_days: skip a pair that was already evaluated within
+        # this many days. Prevents re-scanning identical top-cluster combinations
+        # every day and focuses the pipeline on fresh candidates.
+        self.pair_eval_cooldown_days = self.parameters.get('pair_eval_cooldown_days', 7)
+        self._pair_evaluated_at: dict[frozenset, date] = {}
+        # Sector/ETF metadata for the same-sector gate. Populated once on the
+        # first trading day via _load_ticker_metadata(); keyed by symbol.
+        self._ticker_metadata: dict[str, dict] = {}
+        self._metadata_loaded = False
         # Position sizing parameters.
         # min_position_pct / max_position_pct define the range of portfolio-value
         # fraction allocated to a single new position; actual size scales with the
@@ -100,6 +108,7 @@ class BobsBrain(Strategy):
         self._db.migrate_pairs_simulated_return()
         self._db.migrate_zscore_columns()
         self._db.migrate_pairs_sim_sharpe()
+        self._db.migrate_ticker_metadata()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -116,9 +125,9 @@ class BobsBrain(Strategy):
             run_id=self._run_id,
             mode=self._run_mode,
             settings={
-                'ticker_limit': self.ticker_limit,
                 'cluster_recompute_days': self.cluster_recompute_days,
-                'use_clusters': self.use_clusters,
+                'max_clusters_per_day': self.max_clusters_per_day,
+                'pair_eval_cooldown_days': self.pair_eval_cooldown_days,
                 'lookback_window': self.lookback_window,
                 'min_correlation': self.min_correlation,
                 'min_daily_pairs': self.min_daily_pairs,
@@ -271,56 +280,37 @@ class BobsBrain(Strategy):
             self._db.upsert_tickers(tickers, 'ALPACA')
 
         # Remove tickers that have previously failed price lookups or were identified
-        # as penny stocks so they cannot form new pairs or consume the ticker_limit.
+        # as penny stocks.
         tickers = [t for t in tickers if t not in self._failed_tickers]
 
-        if self.use_clusters:
-            # Cluster the full ticker universe by 6-month return similarity.
-            # Clustering always runs on all tickers so the structure reflects the
-            # full universe — ticker_limit is never applied before this step.
-            # Clusters are ranked by expected yield (avg intra-cluster correlation ×
-            # size) so the most fertile clusters are searched first.
-            clusters = self._clusterer.get_clusters(
-                tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
-            )
+        # Load sector/ETF metadata once on the first trading day.
+        if not self._metadata_loaded:
+            self._load_ticker_metadata(tickers)
+            self._metadata_loaded = True
 
-            if self.ticker_limit:
-                # Fill a ticker_limit-sized bucket from the top clusters in yield
-                # order. Each cluster is shuffled before sampling so the specific
-                # tickers drawn rotate randomly each day while always coming from
-                # the highest-yield clusters. Dip into subsequent clusters only
-                # when the top cluster has fewer tickers than the remaining quota.
-                bucket: list[str] = []
-                remaining = self.ticker_limit
-                for cluster in clusters:
-                    if remaining <= 0:
-                        break
-                    sample = list(cluster)
-                    random.shuffle(sample)
-                    bucket.extend(sample[:remaining])
-                    remaining -= len(sample[:remaining])
-                pair_iter = itertools.combinations(bucket, 2)
-            else:
-                # Full universe: search within each cluster only, in yield order.
-                # Shuffle within each cluster copy for daily pair-order variety.
-                shuffled_clusters = [list(c) for c in clusters]
-                for c in shuffled_clusters:
-                    random.shuffle(c)
-                pair_iter = (
-                    (s1, s2)
-                    for cluster in shuffled_clusters
-                    for s1, s2 in itertools.combinations(cluster, 2)
-                )
-        else:
-            # Original path: shuffle all tickers, apply optional ticker_limit, then
-            # iterate all combinations. ticker_limit is only meaningful here.
-            random.shuffle(tickers)
-            if self.ticker_limit:
-                tickers = tickers[:self.ticker_limit]
-            pair_iter = itertools.combinations(tickers, 2)
+        # Cluster the full ticker universe by 6-month return similarity.
+        # Clusters are ranked by expected yield (avg intra-cluster correlation ×
+        # size) so the most fertile clusters are searched first.
+        clusters = self._clusterer.get_clusters(
+            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
+        )
+        if self.max_clusters_per_day:
+            clusters = clusters[:self.max_clusters_per_day]
+
+        # Shuffle within each cluster copy so pair ordering varies each day
+        # even when the same clusters are searched.
+        shuffled_clusters = [list(c) for c in clusters]
+        for c in shuffled_clusters:
+            random.shuffle(c)
+
+        pair_iter = (
+            (s1, s2)
+            for cluster in shuffled_clusters
+            for s1, s2 in itertools.combinations(cluster, 2)
+        )
 
         new_candidates = 0
-        gate_counts = {'penny': 0, 'correlation': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
+        gate_counts = {'penny': 0, 'correlation': 0, 'sector': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
         pairs_scanned = 0
         candidates_found = 0
         candidates_buy_ready = 0
@@ -332,6 +322,14 @@ class BobsBrain(Strategy):
 
             if stock2 in self.pairs or stock2 in position_symbols:
                 continue
+
+            # Pair evaluation cooldown: skip pairs already evaluated within the
+            # last pair_eval_cooldown_days to avoid re-scanning identical top-
+            # cluster combinations every day.
+            pair_key = frozenset({stock1, stock2})
+            if self.pair_eval_cooldown_days and pair_key in self._pair_evaluated_at:
+                if (today - self._pair_evaluated_at[pair_key]).days < self.pair_eval_cooldown_days:
+                    continue
 
             # Fetch each stock lazily; skip immediately if no data or penny stock.
             # Track penny stocks so they are excluded from future runs.
@@ -351,6 +349,10 @@ class BobsBrain(Strategy):
 
             pairs_scanned += 1
 
+            # Record evaluation date after confirming both legs have valid data.
+            if self.pair_eval_cooldown_days:
+                self._pair_evaluated_at[pair_key] = today
+
             # Check correlation across all candidate lags, take the best.
             # Screening at lag=1 only would silently reject pairs that are
             # correlated at a different lag, discarding candidates before the
@@ -366,6 +368,21 @@ class BobsBrain(Strategy):
             if math.isnan(best_corr) or best_corr < self.min_correlation:
                 gate_counts['correlation'] += 1
                 continue
+
+            # Same-sector / both-ETF gate: only evaluate pairs where both tickers
+            # belong to the same sector, or both are ETFs. When metadata is absent
+            # for either ticker the gate passes by default (safe fallback).
+            meta1 = self._ticker_metadata.get(stock1)
+            meta2 = self._ticker_metadata.get(stock2)
+            if meta1 is not None and meta2 is not None:
+                both_etf = meta1.get('is_etf') and meta2.get('is_etf')
+                same_sector = (
+                    meta1.get('sector') and
+                    meta1.get('sector') == meta2.get('sector')
+                )
+                if not (both_etf or same_sector):
+                    gate_counts['sector'] += 1
+                    continue
 
             if not stock_evaluator.is_cointegrated(s1, s2):
                 gate_counts['cointegration'] += 1
@@ -459,8 +476,8 @@ class BobsBrain(Strategy):
                 f"Scanned {pairs_scanned} pairs. Gates: {gate_counts}"
             )
 
-        # Persist newly discovered penny stocks so future runs exclude them before
-        # applying ticker_limit, making the daily sample cleaner over time.
+        # Persist newly discovered penny stocks so future runs exclude them,
+        # keeping the cluster input cleaner over time.
         for sym in new_penny_stocks:
             self._failed_tickers.add(sym)
             self._db.mark_ticker_failed(sym, 'penny stock')
@@ -651,6 +668,95 @@ class BobsBrain(Strategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _load_ticker_metadata(self, tickers: list[str]) -> None:
+        """
+        Populate self._ticker_metadata with sector and ETF classification for
+        every ticker in the universe.  Data is read from the DB first; only
+        tickers with no existing row are fetched from yfinance and then stored
+        so subsequent runs pay nothing for the lookup.
+
+        Failures for individual tickers (rate limits, missing data) are caught
+        and stored as {sector: None, is_etf: False} so the gate degrades
+        gracefully rather than crashing.
+        """
+        existing_df = self._db.get_ticker_metadata(tickers)
+        known = set(existing_df['symbol'].tolist()) if not existing_df.empty else set()
+        missing = [t for t in tickers if t not in known]
+
+        if missing:
+            print(f"[BobsBrain] Fetching ticker metadata for {len(missing)} symbols via yfinance...")
+            records = []
+            fetched_at = datetime.utcnow()
+            for i, symbol in enumerate(missing):
+                try:
+                    info = yf.Ticker(symbol).info
+                    records.append({
+                        'symbol':     symbol,
+                        'sector':     info.get('sector'),
+                        'is_etf':     info.get('quoteType', '').upper() == 'ETF',
+                        'fetched_at': fetched_at,
+                    })
+                except Exception:
+                    records.append({
+                        'symbol':     symbol,
+                        'sector':     None,
+                        'is_etf':     False,
+                        'fetched_at': fetched_at,
+                    })
+                if (i + 1) % 100 == 0:
+                    print(f"[BobsBrain] Metadata progress: {i + 1}/{len(missing)}")
+            self._db.upsert_ticker_metadata(records)
+            new_df = pd.DataFrame(records)
+            existing_df = (
+                pd.concat([existing_df, new_df], ignore_index=True)
+                if not existing_df.empty else new_df
+            )
+
+        self._ticker_metadata = {}
+        if not existing_df.empty:
+            for _, row in existing_df.iterrows():
+                self._ticker_metadata[row['symbol']] = {
+                    'sector': row['sector'] if pd.notna(row['sector']) else None,
+                    'is_etf': bool(row['is_etf']),
+                }
+
+        self._validate_ticker_metadata(tickers)
+
+    def _validate_ticker_metadata(self, tickers: list[str]) -> None:
+        """
+        Log a coverage summary for the loaded metadata and warn when the
+        sector gate will be partially or fully blind.
+        """
+        total = len(tickers)
+        if total == 0:
+            return
+        with_sector = sum(
+            1 for t in tickers if self._ticker_metadata.get(t, {}).get('sector')
+        )
+        etf_count = sum(
+            1 for t in tickers if self._ticker_metadata.get(t, {}).get('is_etf')
+        )
+        coverage_pct = with_sector / total
+        msg = (
+            f"[BobsBrain] Ticker metadata: {with_sector}/{total} tickers have "
+            f"sector data ({coverage_pct:.0%}), {etf_count} ETFs, "
+            f"{total - etf_count} stocks"
+        )
+        if coverage_pct < 0.30:
+            logging.error(
+                "%s — coverage critically low; sector gate is effectively disabled. "
+                "Clear the ticker_metadata table and re-run to trigger a fresh fetch.",
+                msg,
+            )
+        elif coverage_pct < 0.70:
+            logging.warning(
+                "%s — sector gate has limited effectiveness; many pairs will pass "
+                "the gate by default due to missing metadata.",
+                msg,
+            )
+        else:
+            print(msg)
 
     def _compute_confidence(self, pair: dict) -> float:
         """

@@ -398,64 +398,188 @@ class TestWatchlistPromotion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Cluster-guided bucket sampling logic
+# Pair evaluation cooldown logic
 # ---------------------------------------------------------------------------
 
-def _fill_bucket(clusters: list[list[str]], ticker_limit: int) -> list[str]:
+def _check_cooldown(pair_key, evaluated_at, today, cooldown_days):
+    """Replicate the cooldown gate from BobsBrain.before_market_opens."""
+    if not cooldown_days:
+        return False  # cooldown disabled — never skip
+    if pair_key in evaluated_at:
+        return (today - evaluated_at[pair_key]).days < cooldown_days
+    return False
+
+
+class TestPairEvalCooldown(unittest.TestCase):
+    from datetime import date as _date
+
+    def _today(self):
+        from datetime import date
+        return date(2024, 2, 10)
+
+    def test_pair_not_in_dict_is_not_skipped(self):
+        from datetime import date
+        evaluated = {}
+        key = frozenset({'AAPL', 'MSFT'})
+        self.assertFalse(_check_cooldown(key, evaluated, self._today(), cooldown_days=7))
+
+    def test_pair_within_cooldown_is_skipped(self):
+        from datetime import date
+        today = self._today()
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 2, 6)}  # 4 days ago, cooldown=7
+        self.assertTrue(_check_cooldown(key, evaluated, today, cooldown_days=7))
+
+    def test_pair_exactly_at_cooldown_boundary_is_not_skipped(self):
+        from datetime import date
+        today = self._today()
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 2, 3)}  # exactly 7 days ago
+        self.assertFalse(_check_cooldown(key, evaluated, today, cooldown_days=7))
+
+    def test_pair_past_cooldown_is_not_skipped(self):
+        from datetime import date
+        today = self._today()
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 1, 28)}  # 13 days ago, cooldown=7
+        self.assertFalse(_check_cooldown(key, evaluated, today, cooldown_days=7))
+
+    def test_cooldown_disabled_with_none(self):
+        from datetime import date
+        today = self._today()
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: today}  # evaluated today — but cooldown disabled
+        self.assertFalse(_check_cooldown(key, evaluated, today, cooldown_days=None))
+
+    def test_cooldown_disabled_with_zero(self):
+        from datetime import date
+        today = self._today()
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: today}
+        self.assertFalse(_check_cooldown(key, evaluated, today, cooldown_days=0))
+
+    def test_pair_key_is_order_independent(self):
+        """frozenset ensures (A, B) and (B, A) map to the same cooldown entry."""
+        from datetime import date
+        today = self._today()
+        key_ab = frozenset({'AAPL', 'MSFT'})
+        key_ba = frozenset({'MSFT', 'AAPL'})
+        evaluated = {key_ab: today}
+        self.assertTrue(_check_cooldown(key_ba, evaluated, today, cooldown_days=7))
+
+
+# ---------------------------------------------------------------------------
+# Same-sector / both-ETF gate logic
+# ---------------------------------------------------------------------------
+
+def _passes_sector_gate(meta1, meta2):
+    """Replicate the sector gate from BobsBrain.before_market_opens."""
+    if meta1 is None or meta2 is None:
+        return True  # missing metadata → allow
+    both_etf = meta1.get('is_etf') and meta2.get('is_etf')
+    same_sector = (
+        meta1.get('sector') and
+        meta1.get('sector') == meta2.get('sector')
+    )
+    return bool(both_etf or same_sector)
+
+
+class TestSectorGate(unittest.TestCase):
+    def test_same_sector_passes(self):
+        m1 = {'sector': 'Technology', 'is_etf': False}
+        m2 = {'sector': 'Technology', 'is_etf': False}
+        self.assertTrue(_passes_sector_gate(m1, m2))
+
+    def test_different_sector_fails(self):
+        m1 = {'sector': 'Technology', 'is_etf': False}
+        m2 = {'sector': 'Healthcare', 'is_etf': False}
+        self.assertFalse(_passes_sector_gate(m1, m2))
+
+    def test_both_etf_passes(self):
+        m1 = {'sector': None, 'is_etf': True}
+        m2 = {'sector': None, 'is_etf': True}
+        self.assertTrue(_passes_sector_gate(m1, m2))
+
+    def test_one_etf_one_stock_fails(self):
+        m1 = {'sector': None,         'is_etf': True}
+        m2 = {'sector': 'Technology', 'is_etf': False}
+        self.assertFalse(_passes_sector_gate(m1, m2))
+
+    def test_missing_metadata_for_first_ticker_passes(self):
+        self.assertTrue(_passes_sector_gate(None, {'sector': 'Technology', 'is_etf': False}))
+
+    def test_missing_metadata_for_second_ticker_passes(self):
+        self.assertTrue(_passes_sector_gate({'sector': 'Technology', 'is_etf': False}, None))
+
+    def test_both_missing_metadata_passes(self):
+        self.assertTrue(_passes_sector_gate(None, None))
+
+    def test_both_etf_same_sector_passes(self):
+        """ETF + same sector — both conditions true, should pass."""
+        m1 = {'sector': 'Equity', 'is_etf': True}
+        m2 = {'sector': 'Equity', 'is_etf': True}
+        self.assertTrue(_passes_sector_gate(m1, m2))
+
+    def test_sector_none_on_one_stock_fails(self):
+        """If only one side has sector data it cannot match."""
+        m1 = {'sector': 'Technology', 'is_etf': False}
+        m2 = {'sector': None,         'is_etf': False}
+        self.assertFalse(_passes_sector_gate(m1, m2))
+
+
+# ---------------------------------------------------------------------------
+# Metadata quality validation logic
+# ---------------------------------------------------------------------------
+
+def _validate_coverage(tickers, metadata):
     """
-    Replicate the bucket-filling logic from BobsBrain.before_market_opens.
-    Extracted here so it can be tested without instantiating Strategy.
+    Replicate the coverage classification in BobsBrain._validate_ticker_metadata.
+    Returns 'ok', 'warning', or 'error'.
     """
-    import random
-    bucket: list[str] = []
-    remaining = ticker_limit
-    for cluster in clusters:
-        if remaining <= 0:
-            break
-        sample = list(cluster)
-        random.shuffle(sample)
-        bucket.extend(sample[:remaining])
-        remaining -= len(sample[:remaining])
-    return bucket
+    total = len(tickers)
+    if total == 0:
+        return 'ok'
+    with_sector = sum(1 for t in tickers if metadata.get(t, {}).get('sector'))
+    coverage_pct = with_sector / total
+    if coverage_pct < 0.30:
+        return 'error'
+    if coverage_pct < 0.70:
+        return 'warning'
+    return 'ok'
 
 
-class TestClusterBucketSampling(unittest.TestCase):
-    def test_bucket_respects_ticker_limit(self):
-        clusters = [['A', 'B', 'C', 'D', 'E'], ['F', 'G', 'H'], ['I', 'J']]
-        bucket = _fill_bucket(clusters, ticker_limit=4)
-        self.assertEqual(len(bucket), 4)
+class TestMetadataValidation(unittest.TestCase):
+    def _meta(self, tickers_with_sector, total):
+        """Build a metadata dict where the first N tickers have a sector."""
+        tickers = [f'T{i}' for i in range(total)]
+        metadata = {
+            t: {'sector': 'Technology' if i < tickers_with_sector else None, 'is_etf': False}
+            for i, t in enumerate(tickers)
+        }
+        return tickers, metadata
 
-    def test_bucket_fills_from_top_cluster_first(self):
-        """When the top cluster is large enough, all tickers come from it."""
-        clusters = [list('ABCDEFGHIJ'), list('KLMNO')]
-        bucket = _fill_bucket(clusters, ticker_limit=5)
-        self.assertEqual(len(bucket), 5)
-        self.assertTrue(all(t in 'ABCDEFGHIJ' for t in bucket))
+    def test_high_coverage_returns_ok(self):
+        tickers, meta = self._meta(tickers_with_sector=85, total=100)
+        self.assertEqual(_validate_coverage(tickers, meta), 'ok')
 
-    def test_bucket_dips_into_next_cluster_when_top_exhausted(self):
-        """When top cluster is smaller than limit, next cluster is used."""
-        clusters = [['A', 'B'], ['C', 'D', 'E', 'F']]
-        bucket = _fill_bucket(clusters, ticker_limit=4)
-        self.assertEqual(len(bucket), 4)
-        self.assertIn('A', bucket)
-        self.assertIn('B', bucket)
-        # Two of C/D/E/F fill the remainder
-        from_second = [t for t in bucket if t in 'CDEF']
-        self.assertEqual(len(from_second), 2)
+    def test_exactly_seventy_percent_returns_ok(self):
+        tickers, meta = self._meta(tickers_with_sector=70, total=100)
+        self.assertEqual(_validate_coverage(tickers, meta), 'ok')
 
-    def test_bucket_capped_at_ticker_limit_when_universe_smaller(self):
-        """If total tickers across all clusters < ticker_limit, return all."""
-        clusters = [['A', 'B'], ['C']]
-        bucket = _fill_bucket(clusters, ticker_limit=10)
-        self.assertEqual(set(bucket), {'A', 'B', 'C'})
+    def test_below_seventy_returns_warning(self):
+        tickers, meta = self._meta(tickers_with_sector=50, total=100)
+        self.assertEqual(_validate_coverage(tickers, meta), 'warning')
 
-    def test_bucket_contains_no_duplicates(self):
-        clusters = [list('ABCDE'), list('FGHIJ')]
-        bucket = _fill_bucket(clusters, ticker_limit=7)
-        self.assertEqual(len(bucket), len(set(bucket)))
+    def test_below_thirty_returns_error(self):
+        tickers, meta = self._meta(tickers_with_sector=20, total=100)
+        self.assertEqual(_validate_coverage(tickers, meta), 'error')
 
-    def test_empty_clusters_returns_empty_bucket(self):
-        self.assertEqual(_fill_bucket([], ticker_limit=10), [])
+    def test_zero_tickers_returns_ok(self):
+        self.assertEqual(_validate_coverage([], {}), 'ok')
+
+    def test_no_sector_data_at_all_returns_error(self):
+        tickers, meta = self._meta(tickers_with_sector=0, total=100)
+        self.assertEqual(_validate_coverage(tickers, meta), 'error')
 
 
 if __name__ == '__main__':
