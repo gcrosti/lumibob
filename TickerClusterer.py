@@ -99,8 +99,12 @@ class TickerClusterer:
             present, contains tickers HDBSCAN could not assign to any coherent group.
         """
         ticker_set = set(tickers)
+
+        def _to_naive(dt: datetime) -> datetime:
+            return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
         elapsed = (
-            (as_of - self._last_computed).days
+            (_to_naive(as_of) - _to_naive(self._last_computed)).days
             if self._last_computed is not None
             else math.inf
         )
