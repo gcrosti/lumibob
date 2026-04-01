@@ -1,7 +1,7 @@
 import logging
 import os
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from statistics import median
 
 import numpy as np
@@ -530,10 +530,8 @@ class BobsBrain(Strategy):
             self.add_line("spy_value", spy_value)
 
         active_pairs = list(self.pairs.values())
-        avg_corr = (
-            sum(p['corr'] for p in active_pairs) / len(active_pairs)
-            if active_pairs else 0.0
-        )
+        corr_vals = [p.get('corr') or p.get('corr_long', 0) or 0 for p in active_pairs]
+        avg_corr = sum(corr_vals) / len(corr_vals) if corr_vals else 0.0
 
         zscore_pairs = [
             p['current_zscore'] for p in active_pairs
