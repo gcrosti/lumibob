@@ -65,6 +65,8 @@ class TickerClusterer:
         self._clusters: list[list[str]] = []
         self._last_computed: datetime | None = None
         self._last_tickers: set[str] = set()
+        self._corr_matrix: pd.DataFrame | None = None
+        self._symbols: list[str] = []
 
     def get_clusters(
         self,
@@ -114,6 +116,37 @@ class TickerClusterer:
             self._last_tickers = ticker_set
 
         return self._clusters
+
+    @property
+    def corr_matrix(self) -> pd.DataFrame | None:
+        """
+        The log-return correlation matrix from the most recent clustering run.
+        Indexed and columned by ticker symbol.  Returns None before first compute.
+        """
+        return self._corr_matrix
+
+    def get_top_pairs_by_corr(
+        self,
+        cluster: list[str],
+        n: int = 500,
+    ) -> list[tuple[str, str, float]]:
+        """
+        Return the top-n within-cluster pairs ranked by correlation from the
+        cached matrix.  Falls back to all pairs when n exceeds availability.
+
+        Returns list of (symbol_a, symbol_b, correlation) tuples, descending.
+        """
+        if self._corr_matrix is None:
+            import itertools
+            return [(a, b, float('nan')) for a, b in itertools.combinations(cluster, 2)]
+
+        pairs: list[tuple[str, str, float]] = []
+        available = [s for s in cluster if s in self._corr_matrix.columns]
+        for i, a in enumerate(available):
+            for b in available[i + 1:]:
+                pairs.append((a, b, float(self._corr_matrix.loc[a, b])))
+        pairs.sort(key=lambda x: x[2] if not np.isnan(x[2]) else -1, reverse=True)
+        return pairs[:n]
 
     # ------------------------------------------------------------------
     # Internal
@@ -165,7 +198,10 @@ class TickerClusterer:
             return [symbols]
 
         # Rank each cluster by avg_intra_corr × size.
-        corr_matrix = log_returns[symbols].corr().values
+        corr_df = log_returns[symbols].corr()
+        self._corr_matrix = corr_df
+        self._symbols = symbols
+        corr_matrix = corr_df.values
         idx_map = {s: i for i, s in enumerate(symbols)}
 
         ranked: list[tuple[float, list[str]]] = []

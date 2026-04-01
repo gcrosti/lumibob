@@ -264,19 +264,25 @@ class DatabaseClient:
     def migrate_ticker_metadata(self) -> None:
         """
         Idempotent migration: create the ticker_metadata table if it does not
-        already exist.  Safe to call on every startup.
+        already exist, and add SIC-related columns.  Safe to call on every startup.
         """
-        sql = """
+        statements = [
+            """
             CREATE TABLE IF NOT EXISTS ticker_metadata (
                 symbol      TEXT PRIMARY KEY,
                 sector      TEXT,
                 is_etf      BOOLEAN NOT NULL DEFAULT FALSE,
                 fetched_at  TIMESTAMPTZ NOT NULL
             )
-        """
+            """,
+            "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS sic_code INT",
+            "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS sic_sector TEXT",
+            "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'yfinance'",
+        ]
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql)
+                for sql in statements:
+                    cur.execute(sql)
 
     def get_ticker_metadata(self, symbols: list[str]) -> pd.DataFrame:
         """
@@ -319,6 +325,40 @@ class DatabaseClient:
                 SET sector     = EXCLUDED.sector,
                     is_etf     = EXCLUDED.is_etf,
                     fetched_at = EXCLUDED.fetched_at
+        """
+        with self._conn() as conn:
+            psycopg2.extras.execute_values(conn.cursor(), sql, rows)
+
+    def upsert_sec_metadata(self, records: list[dict]) -> None:
+        """
+        Insert or update ticker metadata from SEC EDGAR SIC data.
+        Each record must have: symbol, sic_code, sic_sector, is_etf, fetched_at.
+        Overwrites sector with sic_sector so SEC data takes precedence.
+        """
+        if not records:
+            return
+        rows = [
+            (
+                r['symbol'],
+                r.get('sic_sector'),
+                bool(r.get('is_etf', False)),
+                r['fetched_at'],
+                r.get('sic_code'),
+                r.get('sic_sector'),
+                'sec_edgar',
+            )
+            for r in records
+        ]
+        sql = """
+            INSERT INTO ticker_metadata (symbol, sector, is_etf, fetched_at, sic_code, sic_sector, source)
+            VALUES %s
+            ON CONFLICT (symbol) DO UPDATE
+                SET sector     = EXCLUDED.sector,
+                    is_etf     = EXCLUDED.is_etf,
+                    fetched_at = EXCLUDED.fetched_at,
+                    sic_code   = EXCLUDED.sic_code,
+                    sic_sector = EXCLUDED.sic_sector,
+                    source     = EXCLUDED.source
         """
         with self._conn() as conn:
             psycopg2.extras.execute_values(conn.cursor(), sql, rows)

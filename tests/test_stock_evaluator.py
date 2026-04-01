@@ -258,5 +258,70 @@ class TestGetZscoreAction(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
 
+class TestGetCorrelationDual(unittest.TestCase):
+    def setUp(self):
+        self.evaluator = StockEvaluator()
+        rng = np.random.default_rng(42)
+        n = 120
+        base = np.cumsum(rng.normal(0, 1, n)) + 100
+        self.lead = pd.Series(base)
+        self.lag = pd.Series(base + rng.normal(0, 0.3, n))
+
+    def test_returns_two_floats(self):
+        cl, cs = self.evaluator.get_correlation_dual(self.lead, self.lag, 90, 20)
+        self.assertIsInstance(cl, float)
+        self.assertIsInstance(cs, float)
+
+    def test_cointegrated_pair_has_positive_correlations(self):
+        cl, cs = self.evaluator.get_correlation_dual(self.lead, self.lag, 90, 20)
+        self.assertGreater(cl, 0.0)
+        self.assertGreater(cs, 0.0)
+
+    def test_short_series_returns_nan(self):
+        short = pd.Series([100.0, 101.0, 102.0])
+        cl, cs = self.evaluator.get_correlation_dual(short, short, 90, 20)
+        self.assertTrue(math.isnan(cl))
+        self.assertTrue(math.isnan(cs))
+
+    def test_identical_series_near_one(self):
+        cl, cs = self.evaluator.get_correlation_dual(self.lead, self.lead, 90, 20)
+        self.assertAlmostEqual(cl, 1.0, places=3)
+        self.assertAlmostEqual(cs, 1.0, places=3)
+
+
+class TestComputeZDepth(unittest.TestCase):
+    def setUp(self):
+        self.evaluator = StockEvaluator()
+
+    def test_returns_tuple(self):
+        rng = np.random.default_rng(42)
+        n = 80
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        lag = lead + rng.normal(0, 0.5, n)
+        result = self.evaluator.compute_z_depth(lead, lag)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+    def test_z_depth_between_zero_and_one(self):
+        rng = np.random.default_rng(42)
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, 80)) + 100)
+        lag = lead + rng.normal(0, 0.5, 80)
+        z_depth, _ = self.evaluator.compute_z_depth(lead, lag)
+        self.assertGreaterEqual(z_depth, 0.0)
+        self.assertLessEqual(z_depth, 1.0)
+
+    def test_short_series_returns_zero(self):
+        short = pd.Series([100.0, 101.0])
+        z_depth, raw_z = self.evaluator.compute_z_depth(short, short)
+        self.assertEqual(z_depth, 0.0)
+        self.assertIsNone(raw_z)
+
+    def test_identical_series_returns_zero_depth(self):
+        rng = np.random.default_rng(7)
+        s = pd.Series(np.cumsum(rng.normal(0, 1, 80)) + 100)
+        z_depth, _ = self.evaluator.compute_z_depth(s, s)
+        self.assertAlmostEqual(z_depth, 0.0, places=1)
+
+
 if __name__ == '__main__':
     unittest.main()

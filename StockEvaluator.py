@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from statsmodels.tsa.stattools import coint
 
 
@@ -6,6 +7,66 @@ class StockEvaluator:
     """
     Evaluates the relationship between two stocks
     """
+
+    def get_correlation_dual(
+        self,
+        lead: pd.Series,
+        lag: pd.Series,
+        long_window: int = 90,
+        short_window: int = 20,
+    ) -> tuple[float, float]:
+        """
+        Return trailing Pearson correlations at two horizons computed on
+        **log-returns** (not raw prices), which is regime-appropriate for
+        detecting current co-movement.
+
+        Returns (corr_long, corr_short).  Either value may be NaN when
+        there are insufficient overlapping observations.
+        """
+        log_lead = np.log(lead.astype(float).clip(lower=1e-9))
+        log_lag = np.log(lag.astype(float).clip(lower=1e-9))
+        lr_lead = log_lead.diff().dropna()
+        lr_lag = log_lag.diff().dropna()
+        common = lr_lead.index.intersection(lr_lag.index)
+        ll = lr_lead.loc[common]
+        lg = lr_lag.loc[common]
+
+        corr_long = (
+            ll.iloc[-long_window:].corr(lg.iloc[-long_window:])
+            if len(common) >= long_window else float('nan')
+        )
+        corr_short = (
+            ll.iloc[-short_window:].corr(lg.iloc[-short_window:])
+            if len(common) >= short_window else float('nan')
+        )
+        return corr_long, corr_short
+
+    def compute_z_depth(
+        self,
+        lead: pd.Series,
+        lag: pd.Series,
+        window: int = 20,
+        entry_threshold: float = 2.0,
+        exit_threshold: float = 0.5,
+    ) -> tuple[float, float | None]:
+        """
+        Continuous [0, 1] score measuring how far the spread has diverged.
+
+        Returns (z_depth, raw_z).  z_depth is 0.0 when the spread has not
+        diverged past exit_threshold, scales linearly to 1.0 at entry_threshold,
+        and is clamped at 1.0 beyond that.
+        """
+        zscore = self.compute_zscore(lead, lag, window)
+        if zscore.empty:
+            return 0.0, None
+        z = float(zscore.iloc[-1])
+        if np.isnan(z):
+            return 0.0, None
+        if z >= -exit_threshold:
+            return 0.0, z
+        depth = min((-z - exit_threshold) / (entry_threshold - exit_threshold), 1.0)
+        return max(depth, 0.0), z
+
     def get_correlation(self, lead_stock, lag_stock, lag):
         """
         Evaluates the Pearson correlation between two stocks after applying a

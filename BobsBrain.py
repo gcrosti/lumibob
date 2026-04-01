@@ -1,38 +1,59 @@
-import itertools
 import logging
-import math
 import os
-import random
 import secrets
 from datetime import date, datetime, timedelta
+from statistics import median
 
+import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
 from dotenv import load_dotenv
 from lumibot.strategies import Strategy
 
 from AlpacaClient import AlpacaClient
 from DatabaseClient import DatabaseClient
-from PairSimulator import PairSimulator
 from StockDataCache import StockDataCache
 from StockEvaluator import StockEvaluator
 from TickerClusterer import TickerClusterer
 
 load_dotenv()
 
+SIC_SECTORS = {
+    range(100, 1000):   'Agriculture, Forestry & Fishing',
+    range(1000, 1500):  'Mining',
+    range(1500, 1800):  'Construction',
+    range(2000, 4000):  'Manufacturing',
+    range(4000, 5000):  'Transportation & Utilities',
+    range(5000, 5200):  'Wholesale Trade',
+    range(5200, 6000):  'Retail Trade',
+    range(6000, 6800):  'Finance, Insurance & Real Estate',
+    range(7000, 9000):  'Services',
+    range(9100, 9730):  'Public Administration',
+}
+
+
+def _sic_to_sector(sic_code) -> str | None:
+    if sic_code is None:
+        return None
+    try:
+        sic = int(sic_code)
+    except (ValueError, TypeError):
+        return None
+    for sic_range, sector in SIC_SECTORS.items():
+        if sic in sic_range:
+            return sector
+    return 'Other'
+
 
 class BobsBrain(Strategy):
     """
-    Executes the day's trades using a lead/lag correlation strategy.
+    Score-and-rank pairs trading strategy.
 
     Lifecycle per trading day:
-    - before_market_opens(): evaluate all pairs once — update correlations,
-      determine actions, discover new candidate pairs. Results are stored in
-      self.pairs so that on_trading_iteration() can act on them.
-    - on_trading_iteration(): execute the queued sells and buys. Keeping
-      execution here (separate from evaluation) allows sleeptime to be reduced
-      below '1D' in future so orders can be spread across multiple intraday
-      iterations without re-running the expensive evaluation step.
+    - before_market_opens(): score all candidate pairs and existing positions,
+      build a unified ranked list, and determine the target portfolio (top K).
+    - on_trading_iteration(): execute sells (positions displaced from the target
+      portfolio) then buys (new pairs entering the target portfolio).
 
     Requires DB_URL, ALPACA_API_KEY, and ALPACA_API_SECRET to be set (via .env
     or environment). Raises EnvironmentError on startup if any are missing.
@@ -40,54 +61,35 @@ class BobsBrain(Strategy):
 
     def initialize(self):
         self.sleeptime = '1D'
-        self.min_correlation = 0.9
-        self.lookback_window = 60
-        self.min_daily_pairs = self.parameters.get('min_daily_pairs', 5)
-        self.max_lag = 5
-        # cluster_recompute_days: how often to rebuild movement clusters.
-        # None = compute once on the first trading day and hold for the full run.
-        # This is the recommended default for backtests; use an integer (e.g. 30)
-        # for live trading so clusters adapt as market regimes shift.
+        self.lookback_window = 90
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
-        # max_clusters_per_day: cap the number of clusters searched per day.
-        # Clusters are already ranked by expected pair yield, so this slices the
-        # top N. None = search all clusters (early exit via min_daily_pairs).
-        self.max_clusters_per_day = self.parameters.get('max_clusters_per_day', None)
-        # pair_eval_cooldown_days: skip a pair that was already evaluated within
-        # this many days. Prevents re-scanning identical top-cluster combinations
-        # every day and focuses the pipeline on fresh candidates.
-        self.pair_eval_cooldown_days = self.parameters.get('pair_eval_cooldown_days', 7)
-        self._pair_evaluated_at: dict[frozenset, date] = {}
-        # Sector/ETF metadata for the same-sector gate. Populated once on the
-        # first trading day via _load_ticker_metadata(); keyed by symbol.
+
         self._ticker_metadata: dict[str, dict] = {}
         self._metadata_loaded = False
-        # Position sizing parameters.
-        # min_position_pct / max_position_pct define the range of portfolio-value
-        # fraction allocated to a single new position; actual size scales with the
-        # pair's confidence score (Z-score depth, correlation, simulated Sharpe).
-        # target_deployed_pct is the fraction of portfolio value the strategy aims
-        # to have deployed at any time; a deployment gap boosts individual allocations
-        # toward this target when the portfolio is under-invested.
+
         self.min_position_pct = self.parameters.get('min_position_pct', 0.03)
         self.max_position_pct = self.parameters.get('max_position_pct', 0.20)
         self.target_deployed_pct = self.parameters.get('target_deployed_pct', 0.60)
+
         self.entry_threshold = self.parameters.get('entry_threshold', 2.0)
         self.exit_threshold = self.parameters.get('exit_threshold', 0.5)
-        self.min_sharpe = self.parameters.get('min_sharpe', 0.5)
-        self._run_mode = os.getenv('RUN_MODE', 'backtest')
+        self.zscore_window = self.parameters.get('zscore_window', 20)
 
+        self.corr_long_window = self.parameters.get('corr_long_window', 90)
+        self.corr_short_window = self.parameters.get('corr_short_window', 20)
+        self.w_corr_long = self.parameters.get('w_corr_long', 0.3)
+        self.w_corr_short = self.parameters.get('w_corr_short', 0.5)
+        self.w_z_depth = self.parameters.get('w_z_depth', 0.2)
+
+        self.max_candidates_to_score = self.parameters.get('max_candidates_to_score', 500)
+        self.replacement_threshold = self.parameters.get('replacement_threshold', 0.05)
+
+        self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
         self._starting_portfolio_value = None
         self._pairs_scanned = 0
         self._candidates_found = 0
         self._candidates_buy_ready = 0
-
-        # Watchlist: pairs that passed all discovery gates but lacked a buy signal.
-        # Keyed by lag_symbol. Re-evaluated cheaply each day (action check only —
-        # no cointegration or simulation re-runs). Entries expire after _watchlist_ttl_days.
-        self._watchlist: dict[str, dict] = {}
-        self._watchlist_ttl_days: int = 5
 
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
@@ -109,6 +111,7 @@ class BobsBrain(Strategy):
         self._db.migrate_zscore_columns()
         self._db.migrate_pairs_sim_sharpe()
         self._db.migrate_ticker_metadata()
+        self._db.migrate_failed_tickers()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -120,53 +123,62 @@ class BobsBrain(Strategy):
         self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
         self._run_id = secrets.token_hex(3)
-        self.pairs = self._db.load_active_pairs(self._run_id)
+        self.pairs: dict[str, dict] = self._db.load_active_pairs(self._run_id)
+
+        tickers = self._db.get_tickers()
+        if not tickers:
+            print("[BobsBrain] Tickers table empty, fetching tradeable assets from Alpaca...")
+            tickers = self._alpaca.get_tradeable_assets()
+            self._db.upsert_tickers(tickers, 'ALPACA')
+        tickers = [t for t in tickers if t not in self._failed_tickers]
+
+        self._load_ticker_metadata(tickers)
+        self._metadata_loaded = True
+
+        print("[BobsBrain] Warming up cluster model...")
+        self._clusterer.get_clusters(
+            tickers, as_of=datetime.utcnow(), recompute_days=self.cluster_recompute_days,
+        )
+
         self._db.create_run(
             run_id=self._run_id,
             mode=self._run_mode,
             settings={
                 'cluster_recompute_days': self.cluster_recompute_days,
-                'max_clusters_per_day': self.max_clusters_per_day,
-                'pair_eval_cooldown_days': self.pair_eval_cooldown_days,
                 'lookback_window': self.lookback_window,
-                'min_correlation': self.min_correlation,
-                'min_daily_pairs': self.min_daily_pairs,
                 'min_position_pct': self.min_position_pct,
                 'max_position_pct': self.max_position_pct,
                 'target_deployed_pct': self.target_deployed_pct,
                 'entry_threshold': self.entry_threshold,
                 'exit_threshold': self.exit_threshold,
-                'min_sharpe': self.min_sharpe,
+                'zscore_window': self.zscore_window,
+                'corr_long_window': self.corr_long_window,
+                'corr_short_window': self.corr_short_window,
+                'w_corr_long': self.w_corr_long,
+                'w_corr_short': self.w_corr_short,
+                'w_z_depth': self.w_z_depth,
+                'max_candidates_to_score': self.max_candidates_to_score,
+                'replacement_threshold': self.replacement_threshold,
             },
         )
 
     def before_market_opens(self):
         """
-        Runs once per trading day before any iterations.
-        Updates correlations and actions for existing positions, then
-        discovers new candidate pairs up to max_daily_candidates.
+        Score-and-rank pipeline. Runs once per trading day.
 
-        Price data is fetched lazily: each symbol is pulled from StockDataCache
-        the first time it is needed and stored in a per-call cache so that the
-        same symbol is never fetched twice within a single execution. This
-        avoids the previous approach of bulk-fetching the entire ticker universe
-        upfront regardless of how many pairs are ultimately needed.
-
-        Both the existing-positions update and the discovery loop share the
-        same cache, so symbols used in open pairs are free for any subsequent
-        discovery combination that happens to include them.
+        Phase 1: Hard gates (penny, sector) reduce the within-cluster universe.
+        Phase 2: Score all eligible new candidates AND existing positions with a
+                 composite score (corr_long, corr_short, z_depth).
+        Phase 3: Build unified ranked list, determine target portfolio of top K,
+                 and set actions (buy/sell) for on_trading_iteration().
         """
-        stock_evaluator = StockEvaluator()
-        simulator = PairSimulator()
-
+        evaluator = StockEvaluator()
         end_date = self.get_datetime()
         start_date = end_date - timedelta(days=self.lookback_window)
 
-        # Per-call price series cache shared across the whole method.
         _series_cache: dict[str, pd.Series | None] = {}
 
         def _get_series(symbol: str) -> pd.Series | None:
-            """Return the close-price series for symbol, fetching once if needed."""
             if symbol not in _series_cache:
                 df = self._cache.get_prices([symbol], start_date, end_date)
                 if df.empty or symbol not in df.columns:
@@ -176,311 +188,227 @@ class BobsBrain(Strategy):
                     _series_cache[symbol] = series if not series.empty else None
             return _series_cache[symbol]
 
-        # --- Update actions for existing positions ---
-        for position in self.get_positions():
-            symbol = position.symbol
-            if symbol not in self.pairs:
-                print(f"Warning: open position {symbol} not found in pairs dict, skipping.")
-                continue
-
-            pair = self.pairs[symbol]
-
-            # Fetch price history for both legs. If either is unavailable (data
-            # gap, delisting, API error) we cannot compute a Z-score, so force a
-            # sell rather than hold a position we can no longer evaluate.
-            lag_data = _get_series(pair['lag_stock'])
-            if lag_data is None:
-                pair['action'] = 'sell'
-                continue
-
-            lead_data = _get_series(pair['lead_stock'])
-            if lead_data is None:
-                pair['action'] = 'sell'
-                continue
-
-            action, current_z = stock_evaluator.get_zscore_action(
-                lead_data, lag_data,
-                window=pair['zscore_window'],
-                entry_threshold=pair['entry_threshold'],
-                exit_threshold=pair['exit_threshold'],
-            )
-            pair['current_zscore'] = current_z
-            pair['action'] = action
-
-        # --- Evaluate watchlist candidates ---
-        # Re-check the action signal for pairs that previously passed all discovery
-        # gates but didn't have a buy signal. This is cheap (no cointegration or
-        # simulation re-runs) and converts idle-cash days into buy opportunities.
-        today = end_date.date()
         position_symbols = {p.symbol for p in self.get_positions()}
-        stale_watchlist = []
-        for symbol, candidate in self._watchlist.items():
-            ttl = candidate.get('watchlist_ttl', self._watchlist_ttl_days)
-            if (today - candidate['watchlist_date']).days > ttl:
-                stale_watchlist.append(symbol)
-                continue
-            if symbol in self.pairs or symbol in position_symbols:
-                stale_watchlist.append(symbol)
-                continue
 
-            lead_data = _get_series(candidate['lead_stock'])
-            lag_data = _get_series(candidate['lag_stock'])
-            if lead_data is None or lag_data is None:
-                stale_watchlist.append(symbol)
-                continue
-
-            action, current_z = stock_evaluator.get_zscore_action(
-                lead_data, lag_data,
-                window=candidate['zscore_window'],
-                entry_threshold=candidate['entry_threshold'],
-                exit_threshold=candidate['exit_threshold'],
-            )
-            if action == 'buy':
-                candidate['action'] = 'buy'
-                candidate['current_zscore'] = current_z
-                candidate['pair_id'] = self._db.save_pair(candidate, self._run_id)
-                self.pairs[symbol] = candidate
-                stale_watchlist.append(symbol)
-                print(f"Watchlist promotion: {candidate['lead_stock']} -> {symbol}")
-
-        for symbol in stale_watchlist:
-            self._watchlist.pop(symbol, None)
-
-        # --- Re-evaluate pending buy pairs (queued but not yet positions) ---
-        # Pairs promoted from the watchlist or discovered on a prior day may not
-        # have been executed yet (cash ran out). Their signal can expire while
-        # they sit in the queue. Re-evaluate here so only pairs with a live buy
-        # signal remain as buy candidates; others revert to hold/sell and are
-        # cleaned up by on_trading_iteration's normal sell path.
+        # --- Phase 2a: Re-score existing positions ---
         for symbol in list(self.pairs.keys()):
-            if symbol in position_symbols:
-                continue  # already handled in the existing positions loop above
             pair = self.pairs[symbol]
             lag_data = _get_series(pair['lag_stock'])
-            if lag_data is None:
-                pair['action'] = 'sell'
-                continue
             lead_data = _get_series(pair['lead_stock'])
-            if lead_data is None:
+            if lag_data is None or lead_data is None:
                 pair['action'] = 'sell'
+                pair['composite_score'] = -1.0
                 continue
-            pair['action'], pair['current_zscore'] = stock_evaluator.get_zscore_action(
-                lead_data, lag_data,
-                window=pair['zscore_window'],
-                entry_threshold=pair['entry_threshold'],
-                exit_threshold=pair['exit_threshold'],
+
+            corr_long, corr_short = evaluator.get_correlation_dual(
+                lead_data, lag_data, self.corr_long_window, self.corr_short_window,
+            )
+            z_depth, z_raw = evaluator.compute_z_depth(
+                lead_data, lag_data, self.zscore_window,
+                self.entry_threshold, self.exit_threshold,
             )
 
-        # --- Discover new pairs ---
-        tickers = self._db.get_tickers()
-        if not tickers:
-            # First run or after a nightly refresh — populate tickers from Alpaca
-            print("Tickers table empty, fetching tradeable assets from Alpaca...")
-            tickers = self._alpaca.get_tradeable_assets()
-            self._db.upsert_tickers(tickers, 'ALPACA')
+            action, current_z = evaluator.get_zscore_action(
+                lead_data, lag_data,
+                window=self.zscore_window,
+                entry_threshold=self.entry_threshold,
+                exit_threshold=self.exit_threshold,
+            )
 
-        # Remove tickers that have previously failed price lookups or were identified
-        # as penny stocks.
-        tickers = [t for t in tickers if t not in self._failed_tickers]
+            pair['corr_long'] = corr_long
+            pair['corr_short'] = corr_short
+            pair['z_depth'] = z_depth
+            pair['current_zscore'] = current_z if current_z is not None else z_raw
+            pair['composite_score'] = self._composite_score(corr_long, corr_short, z_depth)
 
-        # Load sector/ETF metadata once on the first trading day.
-        if not self._metadata_loaded:
-            self._load_ticker_metadata(tickers)
-            self._metadata_loaded = True
+            if symbol in position_symbols and action == 'sell':
+                pair['action'] = 'sell'
+            else:
+                pair['action'] = 'hold'
 
-        # Cluster the full ticker universe by 6-month return similarity.
-        # Clusters are ranked by expected yield (avg intra-cluster correlation ×
-        # size) so the most fertile clusters are searched first.
+        # --- Phase 1 + Phase 2b: Discover and score new candidates ---
+        tickers = [
+            t for t in self._db.get_tickers() if t not in self._failed_tickers
+        ]
+
         clusters = self._clusterer.get_clusters(
-            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days
-        )
-        if self.max_clusters_per_day:
-            clusters = clusters[:self.max_clusters_per_day]
-
-        # Shuffle within each cluster copy so pair ordering varies each day
-        # even when the same clusters are searched.
-        shuffled_clusters = [list(c) for c in clusters]
-        for c in shuffled_clusters:
-            random.shuffle(c)
-
-        pair_iter = (
-            (s1, s2)
-            for cluster in shuffled_clusters
-            for s1, s2 in itertools.combinations(cluster, 2)
+            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days,
         )
 
-        new_candidates = 0
-        gate_counts = {'penny': 0, 'correlation': 0, 'sector': 0, 'cointegration': 0, 'simulation': 0, 'sharpe': 0, 'holdout': 0, 'action': 0}
         pairs_scanned = 0
         candidates_found = 0
-        candidates_buy_ready = 0
+        gate_counts = {'penny': 0, 'sector': 0}
         new_penny_stocks: set[str] = set()
+        scored_candidates: list[dict] = []
 
-        for stock1, stock2 in pair_iter:
-            if new_candidates >= self.min_daily_pairs:
-                break
+        for cluster in clusters:
+            top_pairs = self._clusterer.get_top_pairs_by_corr(
+                cluster, n=self.max_candidates_to_score,
+            )
 
-            if stock2 in self.pairs or stock2 in position_symbols:
-                continue
-
-            # Pair evaluation cooldown: skip pairs already evaluated within the
-            # last pair_eval_cooldown_days to avoid re-scanning identical top-
-            # cluster combinations every day.
-            pair_key = frozenset({stock1, stock2})
-            if self.pair_eval_cooldown_days and pair_key in self._pair_evaluated_at:
-                if (today - self._pair_evaluated_at[pair_key]).days < self.pair_eval_cooldown_days:
+            for stock1, stock2, cluster_corr in top_pairs:
+                if stock2 in self.pairs or stock2 in position_symbols:
+                    continue
+                if stock1 in self.pairs or stock1 in position_symbols:
                     continue
 
-            # Fetch each stock lazily; skip immediately if no data or penny stock.
-            # Track penny stocks so they are excluded from future runs.
-            s1 = _get_series(stock1)
-            if s1 is None or s1.iloc[-1] < 5:
-                gate_counts['penny'] += 1
-                if s1 is not None:
-                    new_penny_stocks.add(stock1)
-                continue
+                s1 = _get_series(stock1)
+                if s1 is None or float(s1.iloc[-1]) < 5:
+                    gate_counts['penny'] += 1
+                    if s1 is not None:
+                        new_penny_stocks.add(stock1)
+                    continue
 
-            s2 = _get_series(stock2)
-            if s2 is None or s2.iloc[-1] < 5:
-                gate_counts['penny'] += 1
-                if s2 is not None:
-                    new_penny_stocks.add(stock2)
-                continue
+                s2 = _get_series(stock2)
+                if s2 is None or float(s2.iloc[-1]) < 5:
+                    gate_counts['penny'] += 1
+                    if s2 is not None:
+                        new_penny_stocks.add(stock2)
+                    continue
 
-            pairs_scanned += 1
+                meta1 = self._ticker_metadata.get(stock1)
+                meta2 = self._ticker_metadata.get(stock2)
+                if meta1 is not None and meta2 is not None:
+                    both_etf = meta1.get('is_etf') and meta2.get('is_etf')
+                    same_sector = (
+                        meta1.get('sector') and
+                        meta1.get('sector') == meta2.get('sector')
+                    )
+                    if not (both_etf or same_sector):
+                        gate_counts['sector'] += 1
+                        continue
 
-            # Record evaluation date after confirming both legs have valid data.
-            if self.pair_eval_cooldown_days:
-                self._pair_evaluated_at[pair_key] = today
+                pairs_scanned += 1
 
-            # Check correlation across all candidate lags, take the best.
-            # Screening at lag=1 only would silently reject pairs that are
-            # correlated at a different lag, discarding candidates before the
-            # optimizer can find the best offset.
-            corr_by_lag = {
-                lag: stock_evaluator.get_correlation(s1, s2, lag)
-                for lag in range(1, self.max_lag + 1)
-            }
-            best_corr = max(
-                (c for c in corr_by_lag.values() if not math.isnan(c)),
-                default=float('nan'),
-            )
-            if math.isnan(best_corr) or best_corr < self.min_correlation:
-                gate_counts['correlation'] += 1
-                continue
-
-            # Same-sector / both-ETF gate: only evaluate pairs where both tickers
-            # belong to the same sector, or both are ETFs. When metadata is absent
-            # for either ticker the gate passes by default (safe fallback).
-            meta1 = self._ticker_metadata.get(stock1)
-            meta2 = self._ticker_metadata.get(stock2)
-            if meta1 is not None and meta2 is not None:
-                both_etf = meta1.get('is_etf') and meta2.get('is_etf')
-                same_sector = (
-                    meta1.get('sector') and
-                    meta1.get('sector') == meta2.get('sector')
+                corr_long, corr_short = evaluator.get_correlation_dual(
+                    s1, s2, self.corr_long_window, self.corr_short_window,
                 )
-                if not (both_etf or same_sector):
-                    gate_counts['sector'] += 1
-                    continue
+                z_depth, z_raw = evaluator.compute_z_depth(
+                    s1, s2, self.zscore_window,
+                    self.entry_threshold, self.exit_threshold,
+                )
+                score = self._composite_score(corr_long, corr_short, z_depth)
 
-            if not stock_evaluator.is_cointegrated(s1, s2):
-                gate_counts['cointegration'] += 1
-                continue
+                candidates_found += 1
+                scored_candidates.append({
+                    'lead_stock': stock1,
+                    'lag_stock': stock2,
+                    'corr_long': corr_long,
+                    'corr_short': corr_short,
+                    'z_depth': z_depth,
+                    'z_raw': z_raw,
+                    'composite_score': score,
+                })
 
-            # Walk-forward holdout: optimise Z-score params on the train split
-            # (first ~67% of lookback) and validate on the holdout split (last
-            # ~33%). Rejects pairs that overfit to recent history by requiring
-            # profitable performance on data the optimiser never saw.
-            sim_result, holdout_return, holdout_days_to_first_signal = simulator.optimize_zscore_with_holdout(s1, s2)
-            if sim_result.total_return <= 0 or sim_result.num_trades < 2:
-                gate_counts['simulation'] += 1
-                continue
-
-            if sim_result.sharpe < self.min_sharpe:
-                gate_counts['sharpe'] += 1
-                continue
-
-            if holdout_return <= 0:
-                gate_counts['holdout'] += 1
-                continue
-
-            candidates_found += 1
-
-            # Use the best-corr lag for reporting; z-score doesn't use lag directly.
-            corr_at_opt_lag = best_corr
-
-            action, current_z = stock_evaluator.get_zscore_action(
-                s1, s2,
-                window=sim_result.zscore_window,
-                entry_threshold=sim_result.entry_threshold,
-                exit_threshold=sim_result.exit_threshold,
-            )
-            if action != 'buy':
-                gate_counts['action'] += 1
-                # Park in watchlist rather than discard — re-check action signal
-                # cheaply each day until buy-ready or TTL expires.
-                # TTL is derived from the holdout simulation: how many days did
-                # the signal take to fire on unseen data? Add 1 day of buffer.
-                # Fall back to the global default when the signal never fired.
-                if stock2 not in self._watchlist and stock2 not in self.pairs:
-                    ttl = (holdout_days_to_first_signal + 1
-                           if holdout_days_to_first_signal > 0
-                           else self._watchlist_ttl_days)
-                    self._watchlist[stock2] = {
-                        'lead_stock':       stock1,
-                        'lag_stock':        stock2,
-                        'corr':             corr_at_opt_lag,
-                        'simulated_return': sim_result.total_return,
-                        'sim_sharpe':       sim_result.sharpe,
-                        'watchlist_date':   today,
-                        'watchlist_ttl':    ttl,
-                        'action':           action,
-                        'signal_type':      'zscore',
-                        'zscore_window':    sim_result.zscore_window,
-                        'entry_threshold':  sim_result.entry_threshold,
-                        'exit_threshold':   sim_result.exit_threshold,
-                    }
-                continue
-
-            candidates_buy_ready += 1
-
-            print(
-                f"Adding new pair: {stock1} -> {stock2} | corr={corr_at_opt_lag:.4f} "
-                f"z_window={sim_result.zscore_window} "
-                f"entry={sim_result.entry_threshold} exit={sim_result.exit_threshold} "
-                f"sim_return={sim_result.total_return:.2%}"
-            )
-
-            new_pair = {
-                'lead_stock':       stock1,
-                'lag_stock':        stock2,
-                'corr':             corr_at_opt_lag,
-                'action':           action,
-                'simulated_return': sim_result.total_return,
-                'sim_sharpe':       sim_result.sharpe,
-                'current_zscore':   current_z,
-                'signal_type':      'zscore',
-                'zscore_window':    sim_result.zscore_window,
-                'entry_threshold':  sim_result.entry_threshold,
-                'exit_threshold':   sim_result.exit_threshold,
-            }
-            new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
-            self.pairs[stock2] = new_pair
-            new_candidates += 1
-
-        if new_candidates < self.min_daily_pairs:
-            print(
-                f"Warning: only {new_candidates} new pairs found "
-                f"(target: {self.min_daily_pairs}). "
-                f"Scanned {pairs_scanned} pairs. Gates: {gate_counts}"
-            )
-
-        # Persist newly discovered penny stocks so future runs exclude them,
-        # keeping the cluster input cleaner over time.
         for sym in new_penny_stocks:
             self._failed_tickers.add(sym)
             self._db.mark_ticker_failed(sym, 'penny stock')
+
+        # --- Phase 3: Unified portfolio construction ---
+        existing_scored = [
+            (symbol, pair)
+            for symbol, pair in self.pairs.items()
+            if pair.get('composite_score', -1) >= 0 and pair.get('action') != 'sell'
+        ]
+
+        all_scored: list[tuple[str, float, dict | None, str | None]] = []
+
+        for symbol, pair in existing_scored:
+            all_scored.append((symbol, pair['composite_score'], None, 'existing'))
+
+        for cand in scored_candidates:
+            all_scored.append((
+                cand['lag_stock'],
+                cand['composite_score'],
+                cand,
+                'candidate',
+            ))
+
+        all_scored.sort(key=lambda x: x[1], reverse=True)
+
+        corr_short_values = [
+            c['corr_short'] for c in scored_candidates
+            if c['z_depth'] > 0 and not np.isnan(c['corr_short'])
+        ]
+        for symbol, pair in existing_scored:
+            cs = pair.get('corr_short')
+            if cs is not None and not np.isnan(cs) and pair.get('z_depth', 0) > 0:
+                corr_short_values.append(cs)
+
+        pool_corr = median(corr_short_values) if corr_short_values else 0.0
+
+        portfolio_value = self.portfolio_value
+        available_cash = self.get_cash()
+        target_pos_pct = (self.min_position_pct + self.max_position_pct) / 2
+        k_base = max(1, int(available_cash / (target_pos_pct * portfolio_value))) if portfolio_value > 0 else 1
+        quality_scale = max(0.5, min(pool_corr / 0.7, 1.5))
+        k_target = max(1, round(k_base * quality_scale))
+
+        k_target = max(k_target, len(existing_scored))
+
+        target_portfolio: dict[str, dict] = {}
+        candidates_buy_ready = 0
+
+        for symbol, score, cand_data, source in all_scored:
+            if len(target_portfolio) >= k_target:
+                break
+            if source == 'existing':
+                target_portfolio[symbol] = self.pairs[symbol]
+            elif source == 'candidate' and cand_data is not None:
+                if symbol in target_portfolio:
+                    continue
+
+                existing_min_score = min(
+                    (p['composite_score'] for p in target_portfolio.values()),
+                    default=-1.0,
+                )
+                if (len(target_portfolio) >= k_target
+                        and score - existing_min_score < self.replacement_threshold):
+                    continue
+
+                new_pair = {
+                    'lead_stock': cand_data['lead_stock'],
+                    'lag_stock': cand_data['lag_stock'],
+                    'corr': cand_data.get('corr_long', 0.0),
+                    'corr_long': cand_data['corr_long'],
+                    'corr_short': cand_data['corr_short'],
+                    'z_depth': cand_data['z_depth'],
+                    'composite_score': cand_data['composite_score'],
+                    'current_zscore': cand_data.get('z_raw'),
+                    'action': 'buy',
+                    'signal_type': 'zscore',
+                    'zscore_window': self.zscore_window,
+                    'entry_threshold': self.entry_threshold,
+                    'exit_threshold': self.exit_threshold,
+                }
+                new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
+                self.pairs[symbol] = new_pair
+                target_portfolio[symbol] = new_pair
+                candidates_buy_ready += 1
+                print(
+                    f"New candidate: {cand_data['lead_stock']} -> {symbol} | "
+                    f"score={score:.3f} corr_s={cand_data['corr_short']:.3f} "
+                    f"z_depth={cand_data['z_depth']:.2f}"
+                )
+
+        for symbol in list(self.pairs.keys()):
+            pair = self.pairs[symbol]
+            if pair.get('action') == 'sell':
+                continue
+            if symbol not in target_portfolio and symbol in position_symbols:
+                pair['action'] = 'sell'
+                print(f"Displaced from target portfolio: {symbol} (score={pair.get('composite_score', 0):.3f})")
+            elif symbol in target_portfolio and symbol not in position_symbols:
+                pair['action'] = 'buy'
+
+        print(
+            f"Scanned {pairs_scanned} pairs. "
+            f"Gates: {gate_counts}. "
+            f"Candidates scored: {candidates_found}. "
+            f"Target K: {k_target}. "
+            f"Pool quality (median corr_short): {pool_corr:.3f}. "
+            f"New buys queued: {candidates_buy_ready}."
+        )
 
         self._pairs_scanned = pairs_scanned
         self._candidates_found = candidates_found
@@ -528,13 +456,6 @@ class BobsBrain(Strategy):
             if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
-        # Confidence-weighted allocation: each new position receives a budget
-        # scaled by a composite signal score (Z-score depth, correlation, Sharpe).
-        # A deployment-gap boost adds extra capital when the portfolio is below
-        # target_deployed_pct, divided evenly across remaining buy candidates.
-        # Pairs are funded in descending confidence order; continue (not break) is
-        # used when a pair's budget exceeds available cash so cheaper candidates
-        # further down the ranked list can still be executed.
         new_buy_symbols: set[str] = set()
         no_price_symbols: list[str] = []
         daily_new_buys = 0
@@ -545,14 +466,14 @@ class BobsBrain(Strategy):
             deployment_gap = max(0.0, self.target_deployed_pct * portfolio_value - current_deployed)
             n_candidates = len(buy_pairs)
 
-            for pair in buy_pairs:
-                pair['confidence_score'] = self._compute_confidence(pair)
-            buy_pairs_ranked = sorted(buy_pairs, key=lambda p: p['confidence_score'], reverse=True)
+            buy_pairs_ranked = sorted(
+                buy_pairs, key=lambda p: p.get('composite_score', 0), reverse=True,
+            )
 
             for pair in buy_pairs_ranked:
-                confidence = pair['confidence_score']
+                score = pair.get('composite_score', 0.0)
                 base_budget = (
-                    self.min_position_pct + confidence * (self.max_position_pct - self.min_position_pct)
+                    self.min_position_pct + score * (self.max_position_pct - self.min_position_pct)
                 ) * portfolio_value
                 if deployment_gap > 0 and n_candidates > 0:
                     gap_share = deployment_gap / n_candidates
@@ -620,15 +541,6 @@ class BobsBrain(Strategy):
         ]
         avg_zscore = round(sum(zscore_pairs) / len(zscore_pairs), 4) if zscore_pairs else None
 
-        watchlist_ttls = [
-            c.get('watchlist_ttl', self._watchlist_ttl_days)
-            for c in self._watchlist.values()
-        ]
-        avg_watchlist_ttl = (
-            round(sum(watchlist_ttls) / len(watchlist_ttls), 1)
-            if watchlist_ttls else None
-        )
-
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
@@ -637,11 +549,8 @@ class BobsBrain(Strategy):
         self.add_line("pairs_scanned",        float(self._pairs_scanned))
         self.add_line("candidates_found",     float(self._candidates_found))
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
-        self.add_line("watchlist_size",       float(len(self._watchlist)))
         if avg_zscore is not None:
             self.add_line("avg_zscore", avg_zscore)
-        if avg_watchlist_ttl is not None:
-            self.add_line("avg_watchlist_ttl", avg_watchlist_ttl)
 
         self._db.log_snapshot(
             run_id=self._run_id,
@@ -659,7 +568,7 @@ class BobsBrain(Strategy):
             candidates_found=self._candidates_found,
             candidates_buy_ready=self._candidates_buy_ready,
             avg_zscore=avg_zscore,
-            avg_watchlist_ttl=avg_watchlist_ttl,
+            avg_watchlist_ttl=None,
         )
 
     def on_strategy_end(self):
@@ -671,46 +580,19 @@ class BobsBrain(Strategy):
 
     def _load_ticker_metadata(self, tickers: list[str]) -> None:
         """
-        Populate self._ticker_metadata with sector and ETF classification for
-        every ticker in the universe.  Data is read from the DB first; only
-        tickers with no existing row are fetched from yfinance and then stored
-        so subsequent runs pay nothing for the lookup.
+        Populate self._ticker_metadata with sector and ETF classification.
 
-        Failures for individual tickers (rate limits, missing data) are caught
-        and stored as {sector: None, is_etf: False} so the gate degrades
-        gracefully rather than crashing.
+        Data is read from the DB first.  Tickers with no existing row are
+        looked up via SEC EDGAR (CIK mapping + submissions API for SIC codes).
+        Results are stored in the DB so subsequent runs pay nothing.
         """
         existing_df = self._db.get_ticker_metadata(tickers)
         known = set(existing_df['symbol'].tolist()) if not existing_df.empty else set()
         missing = [t for t in tickers if t not in known]
 
         if missing:
-            print(f"[BobsBrain] Fetching ticker metadata for {len(missing)} symbols via yfinance...")
-            records = []
-            fetched_at = datetime.utcnow()
-            for i, symbol in enumerate(missing):
-                try:
-                    info = yf.Ticker(symbol).info
-                    records.append({
-                        'symbol':     symbol,
-                        'sector':     info.get('sector'),
-                        'is_etf':     info.get('quoteType', '').upper() == 'ETF',
-                        'fetched_at': fetched_at,
-                    })
-                except Exception:
-                    records.append({
-                        'symbol':     symbol,
-                        'sector':     None,
-                        'is_etf':     False,
-                        'fetched_at': fetched_at,
-                    })
-                if (i + 1) % 100 == 0:
-                    print(f"[BobsBrain] Metadata progress: {i + 1}/{len(missing)}")
-                    self._db.upsert_ticker_metadata(records)
-                    records = []
-            if records:
-                self._db.upsert_ticker_metadata(records)
-            new_df = pd.DataFrame(records)
+            self._fetch_sec_metadata(missing)
+            new_df = self._db.get_ticker_metadata(missing)
             existing_df = (
                 pd.concat([existing_df, new_df], ignore_index=True)
                 if not existing_df.empty else new_df
@@ -725,6 +607,95 @@ class BobsBrain(Strategy):
                 }
 
         self._validate_ticker_metadata(tickers)
+
+    def _fetch_sec_metadata(self, tickers: list[str]) -> None:
+        """
+        Fetch sector metadata from SEC EDGAR for tickers missing from the DB.
+
+        1. Download the bulk CIK-to-ticker mapping from SEC.
+        2. For matched tickers, batch-fetch SIC codes from the submissions API
+           (rate-limited to ~9 req/s to comply with SEC fair-access policy).
+        3. Store results via DatabaseClient.upsert_sec_metadata.
+        """
+        import time as _time
+
+        headers = {'User-Agent': 'LumiBob research@lumibob.local'}
+        print(f"[BobsBrain] Fetching SEC EDGAR metadata for {len(tickers)} symbols...")
+
+        try:
+            resp = requests.get(
+                'https://www.sec.gov/files/company_tickers_exchange.json',
+                headers=headers, timeout=15,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"[BobsBrain] SEC EDGAR bulk download failed: {exc}")
+            self._store_empty_metadata(tickers)
+            return
+
+        sec_data = resp.json()
+        fields = sec_data['fields']
+        sec_df = pd.DataFrame(sec_data['data'], columns=fields)
+        sec_df.columns = [c.lower() for c in sec_df.columns]
+        cik_map = sec_df.drop_duplicates(subset='ticker').set_index(
+            sec_df['ticker'].str.upper()
+        )['cik'].to_dict()
+
+        fetched_at = datetime.utcnow()
+        records: list[dict] = []
+        unmatched: list[str] = []
+
+        for i, symbol in enumerate(tickers):
+            cik = cik_map.get(symbol.upper())
+            if cik is None:
+                unmatched.append(symbol)
+                continue
+
+            cik_padded = str(int(cik)).zfill(10)
+            url = f'https://data.sec.gov/submissions/CIK{cik_padded}.json'
+            try:
+                r = requests.get(url, headers=headers, timeout=5)
+                if r.status_code == 200:
+                    meta = r.json()
+                    sic = meta.get('sic')
+                    sic_sector = _sic_to_sector(sic)
+                    records.append({
+                        'symbol': symbol,
+                        'sic_code': int(sic) if sic else None,
+                        'sic_sector': sic_sector,
+                        'is_etf': False,
+                        'fetched_at': fetched_at,
+                    })
+            except Exception:
+                unmatched.append(symbol)
+
+            if (i + 1) % 100 == 0:
+                print(f"[BobsBrain] SEC metadata progress: {i + 1}/{len(tickers)}")
+                if records:
+                    self._db.upsert_sec_metadata(records)
+                    records = []
+            _time.sleep(0.11)
+
+        if records:
+            self._db.upsert_sec_metadata(records)
+
+        if unmatched:
+            self._store_empty_metadata(unmatched)
+
+        total_with_sector = len(tickers) - len(unmatched)
+        print(
+            f"[BobsBrain] SEC EDGAR: {total_with_sector}/{len(tickers)} tickers "
+            f"matched, {len(unmatched)} unmatched"
+        )
+
+    def _store_empty_metadata(self, tickers: list[str]) -> None:
+        """Store placeholder rows for tickers with no SEC data so we don't re-fetch."""
+        fetched_at = datetime.utcnow()
+        records = [
+            {'symbol': t, 'sector': None, 'is_etf': False, 'fetched_at': fetched_at}
+            for t in tickers
+        ]
+        self._db.upsert_ticker_metadata(records)
 
     def _validate_ticker_metadata(self, tickers: list[str]) -> None:
         """
@@ -761,39 +732,21 @@ class BobsBrain(Strategy):
         else:
             print(msg)
 
-    def _compute_confidence(self, pair: dict) -> float:
+    def _composite_score(
+        self,
+        corr_long: float,
+        corr_short: float,
+        z_depth: float,
+    ) -> float:
         """
-        Returns a [0.0, 1.0] confidence score for a buy signal on *pair*.
-
-        Three components are combined with fixed weights:
-          - Z-score depth  (0.4): how far the spread has exceeded the entry
-            threshold; normalised by the threshold itself so a z of -4.0 with
-            entry=2.0 scores 1.0, while exactly at threshold scores 0.0.
-          - Correlation    (0.4): pair's correlation normalised over the range
-            [min_correlation, 1.0]; pairs just above the minimum gate score 0.0.
-          - Simulated Sharpe (0.2): sim Sharpe normalised over [min_sharpe,
-            2×min_sharpe]; caps at 1.0 when Sharpe reaches twice the minimum.
-
-        Missing values fall back to their respective minimum gates so a pair
-        without a stored z-score or Sharpe receives the lowest possible score
-        for that component rather than an error.
+        Weighted composite of the three scoring components.  Each correlation
+        value is clamped to [0, 1] before weighting; z_depth is already in
+        that range by construction.
         """
-        z = pair.get('current_zscore')
-        entry = pair.get('entry_threshold', self.entry_threshold)
-        z_score = min((abs(z) - entry) / entry, 1.0) if z is not None else 0.0
-        z_score = max(z_score, 0.0)
-
-        corr = pair.get('corr', self.min_correlation)
-        corr_score = min((corr - self.min_correlation) / (1.0 - self.min_correlation), 1.0)
-        corr_score = max(corr_score, 0.0)
-
-        sharpe = pair.get('sim_sharpe', self.min_sharpe)
-        sharpe_score = min((sharpe - self.min_sharpe) / self.min_sharpe, 1.0)
-        sharpe_score = max(sharpe_score, 0.0)
-
-        return 0.4 * z_score + 0.4 * corr_score + 0.2 * sharpe_score
-
-    @staticmethod
-    def _is_penny_stock(series) -> bool:
-        """Return True if the most recent close price in *series* is below $5."""
-        return not series.empty and float(series.iloc[-1]) < 5
+        cl = max(corr_long, 0.0) if not np.isnan(corr_long) else 0.0
+        cs = max(corr_short, 0.0) if not np.isnan(corr_short) else 0.0
+        return (
+            self.w_corr_long * min(cl, 1.0)
+            + self.w_corr_short * min(cs, 1.0)
+            + self.w_z_depth * z_depth
+        )

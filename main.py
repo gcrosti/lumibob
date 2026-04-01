@@ -23,12 +23,15 @@ if __name__ == '__main__':
         strategy = BobsBrain(
             broker=broker,
             parameters={
-                'min_daily_pairs': 5,
-                'max_clusters_per_day': 5,
-                'pair_eval_cooldown_days': 7,
                 'min_position_pct': 0.03,
                 'max_position_pct': 0.20,
                 'target_deployed_pct': 0.60,
+                'corr_long_window': 90,
+                'corr_short_window': 20,
+                'w_corr_long': 0.3,
+                'w_corr_short': 0.5,
+                'w_z_depth': 0.2,
+                'replacement_threshold': 0.05,
             },
         )
         trader = Trader()
@@ -46,12 +49,15 @@ if __name__ == '__main__':
             backtesting_end,
             budget=10000,
             parameters={
-                'min_daily_pairs': 5,
-                'max_clusters_per_day': 5,
-                'pair_eval_cooldown_days': 7,
                 'min_position_pct': 0.03,
                 'max_position_pct': 0.20,
                 'target_deployed_pct': 0.60,
+                'corr_long_window': 90,
+                'corr_short_window': 20,
+                'w_corr_long': 0.3,
+                'w_corr_short': 0.5,
+                'w_z_depth': 0.2,
+                'replacement_threshold': 0.05,
             },
             show_plot=False,
             show_tearsheet=False,
