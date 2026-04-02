@@ -138,10 +138,10 @@ class BobsBrain(Strategy):
         self._load_ticker_metadata(tickers)
         self._metadata_loaded = True
 
-        print("[BobsBrain] Warming up cluster model...")
-        self._clusterer.get_clusters(
-            tickers, as_of=datetime.utcnow(), recompute_days=self.cluster_recompute_days,
-        )
+        # Cluster warm-up deferred to the first before_market_opens() call,
+        # which has access to the simulated backtest date via get_datetime().
+        # Calling here with datetime.utcnow() would use real-world prices
+        # instead of backtest-window prices, producing garbage clusters.
 
         self._db.create_run(
             run_id=self._run_id,
