@@ -31,6 +31,8 @@ if __name__ == '__main__':
                 'w_corr_long': 0.3,
                 'w_corr_short': 0.5,
                 'w_z_depth': 0.2,
+                'max_daily_candidates': 200,
+                'cooldown_days': 7,
                 'replacement_threshold': 0.05,
             },
         )
@@ -57,6 +59,8 @@ if __name__ == '__main__':
                 'w_corr_long': 0.3,
                 'w_corr_short': 0.5,
                 'w_z_depth': 0.2,
+                'max_daily_candidates': 200,
+                'cooldown_days': 7,
                 'replacement_threshold': 0.05,
             },
             show_plot=False,

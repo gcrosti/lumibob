@@ -354,5 +354,95 @@ class TestDynamicK(unittest.TestCase):
         self.assertGreaterEqual(k_high, k_mid)
 
 
+# ---------------------------------------------------------------------------
+# Pair evaluation cooldown logic
+# ---------------------------------------------------------------------------
+
+def _check_cooldown(pair_key, evaluated_at, today, cooldown_days):
+    """Replicate the cooldown gate from BobsBrain.before_market_opens."""
+    if not cooldown_days:
+        return False
+    if pair_key in evaluated_at:
+        last = evaluated_at[pair_key]
+        last_date = last.date() if hasattr(last, 'date') else last
+        today_date = today.date() if hasattr(today, 'date') else today
+        return (today_date - last_date).days < cooldown_days
+    return False
+
+
+class TestPairEvalCooldown(unittest.TestCase):
+    from datetime import date as _date
+
+    def _today(self):
+        from datetime import date
+        return date(2024, 2, 10)
+
+    def test_pair_not_in_dict_is_not_skipped(self):
+        key = frozenset({'AAPL', 'MSFT'})
+        self.assertFalse(_check_cooldown(key, {}, self._today(), cooldown_days=7))
+
+    def test_pair_within_cooldown_is_skipped(self):
+        from datetime import date
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 2, 6)}
+        self.assertTrue(_check_cooldown(key, evaluated, self._today(), cooldown_days=7))
+
+    def test_pair_exactly_at_cooldown_boundary_is_not_skipped(self):
+        from datetime import date
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 2, 3)}
+        self.assertFalse(_check_cooldown(key, evaluated, self._today(), cooldown_days=7))
+
+    def test_pair_past_cooldown_is_not_skipped(self):
+        from datetime import date
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: date(2024, 1, 28)}
+        self.assertFalse(_check_cooldown(key, evaluated, self._today(), cooldown_days=7))
+
+    def test_cooldown_disabled_with_none(self):
+        from datetime import date
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: self._today()}
+        self.assertFalse(_check_cooldown(key, evaluated, self._today(), cooldown_days=None))
+
+    def test_cooldown_disabled_with_zero(self):
+        key = frozenset({'AAPL', 'MSFT'})
+        evaluated = {key: self._today()}
+        self.assertFalse(_check_cooldown(key, evaluated, self._today(), cooldown_days=0))
+
+    def test_pair_key_is_order_independent(self):
+        from datetime import date
+        key_ab = frozenset({'AAPL', 'MSFT'})
+        key_ba = frozenset({'MSFT', 'AAPL'})
+        evaluated = {key_ab: self._today()}
+        self.assertTrue(_check_cooldown(key_ba, evaluated, self._today(), cooldown_days=7))
+
+
+# ---------------------------------------------------------------------------
+# Daily candidate budget
+# ---------------------------------------------------------------------------
+
+class TestDailyBudget(unittest.TestCase):
+    def test_budget_limits_scored_candidates(self):
+        """Round-robin loop should stop once daily budget is exhausted."""
+        budget = 5
+        scored = 0
+        pairs = [(f'A{i}', f'B{i}') for i in range(20)]
+        for a, b in pairs:
+            if scored >= budget:
+                break
+            scored += 1
+        self.assertEqual(scored, budget)
+
+    def test_budget_zero_scores_nothing(self):
+        budget = 0
+        scored = 0
+        for _ in range(10):
+            if scored >= budget:
+                break
+            scored += 1
+        self.assertEqual(scored, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

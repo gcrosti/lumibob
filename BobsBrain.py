@@ -81,7 +81,8 @@ class BobsBrain(Strategy):
         self.w_corr_short = self.parameters.get('w_corr_short', 0.5)
         self.w_z_depth = self.parameters.get('w_z_depth', 0.2)
 
-        self.max_candidates_to_score = self.parameters.get('max_candidates_to_score', 500)
+        self.max_daily_candidates = self.parameters.get('max_daily_candidates', 200)
+        self.cooldown_days = self.parameters.get('cooldown_days', 7)
         self.replacement_threshold = self.parameters.get('replacement_threshold', 0.05)
 
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
@@ -90,6 +91,8 @@ class BobsBrain(Strategy):
         self._pairs_scanned = 0
         self._candidates_found = 0
         self._candidates_buy_ready = 0
+        self._pair_evaluated_at: dict[frozenset, datetime] = {}
+        self._next_cluster_idx: int = 0
 
         db_url = os.getenv('DB_URL')
         api_key = os.getenv('ALPACA_API_KEY')
@@ -157,7 +160,8 @@ class BobsBrain(Strategy):
                 'w_corr_long': self.w_corr_long,
                 'w_corr_short': self.w_corr_short,
                 'w_z_depth': self.w_z_depth,
-                'max_candidates_to_score': self.max_candidates_to_score,
+                'max_daily_candidates': self.max_daily_candidates,
+                'cooldown_days': self.cooldown_days,
                 'replacement_threshold': self.replacement_threshold,
             },
         )
@@ -235,70 +239,98 @@ class BobsBrain(Strategy):
             tickers, as_of=end_date, recompute_days=self.cluster_recompute_days,
         )
 
+        today = end_date.date() if hasattr(end_date, 'date') else end_date
+
         pairs_scanned = 0
         candidates_found = 0
-        gate_counts = {'penny': 0, 'sector': 0}
+        gate_counts = {'penny': 0, 'sector': 0, 'cooldown': 0}
         new_penny_stocks: set[str] = set()
         scored_candidates: list[dict] = []
+        budget_remaining = self.max_daily_candidates
 
-        for cluster in clusters:
-            top_pairs = self._clusterer.get_top_pairs_by_corr(
-                cluster, n=self.max_candidates_to_score,
-            )
+        n_clusters = len(clusters)
+        start_idx = 0
+        clusters_tried = 0
+        if n_clusters > 0:
+            start_idx = self._next_cluster_idx % n_clusters
 
-            for stock1, stock2, cluster_corr in top_pairs:
-                if stock2 in self.pairs or stock2 in position_symbols:
-                    continue
-                if stock1 in self.pairs or stock1 in position_symbols:
-                    continue
+            while budget_remaining > 0 and clusters_tried < n_clusters:
+                ci = (start_idx + clusters_tried) % n_clusters
+                cluster = clusters[ci]
+                top_pairs = self._clusterer.get_top_pairs_by_corr(
+                    cluster, n=len(cluster) * (len(cluster) - 1) // 2,
+                )
 
-                s1 = _get_series(stock1)
-                if s1 is None or float(s1.iloc[-1]) < 5:
-                    gate_counts['penny'] += 1
-                    if s1 is not None:
-                        new_penny_stocks.add(stock1)
-                    continue
+                for stock1, stock2, cluster_corr in top_pairs:
+                    if budget_remaining <= 0:
+                        break
 
-                s2 = _get_series(stock2)
-                if s2 is None or float(s2.iloc[-1]) < 5:
-                    gate_counts['penny'] += 1
-                    if s2 is not None:
-                        new_penny_stocks.add(stock2)
-                    continue
-
-                meta1 = self._ticker_metadata.get(stock1)
-                meta2 = self._ticker_metadata.get(stock2)
-                if meta1 is not None and meta2 is not None:
-                    both_etf = meta1.get('is_etf') and meta2.get('is_etf')
-                    same_sector = (
-                        meta1.get('sector') and
-                        meta1.get('sector') == meta2.get('sector')
-                    )
-                    if not (both_etf or same_sector):
-                        gate_counts['sector'] += 1
+                    if stock2 in self.pairs or stock2 in position_symbols:
+                        continue
+                    if stock1 in self.pairs or stock1 in position_symbols:
                         continue
 
-                pairs_scanned += 1
+                    pair_key = frozenset((stock1, stock2))
+                    if self.cooldown_days and pair_key in self._pair_evaluated_at:
+                        last_eval = self._pair_evaluated_at[pair_key]
+                        last_date = last_eval.date() if hasattr(last_eval, 'date') else last_eval
+                        if (today - last_date).days < self.cooldown_days:
+                            gate_counts['cooldown'] += 1
+                            continue
 
-                corr_long, corr_short = evaluator.get_correlation_dual(
-                    s1, s2, self.corr_long_window, self.corr_short_window,
-                )
-                z_depth, z_raw = evaluator.compute_z_depth(
-                    s1, s2, self.zscore_window,
-                    self.entry_threshold, self.exit_threshold,
-                )
-                score = self._composite_score(corr_long, corr_short, z_depth)
+                    s1 = _get_series(stock1)
+                    if s1 is None or float(s1.iloc[-1]) < 5:
+                        gate_counts['penny'] += 1
+                        if s1 is not None:
+                            new_penny_stocks.add(stock1)
+                        continue
 
-                candidates_found += 1
-                scored_candidates.append({
-                    'lead_stock': stock1,
-                    'lag_stock': stock2,
-                    'corr_long': corr_long,
-                    'corr_short': corr_short,
-                    'z_depth': z_depth,
-                    'z_raw': z_raw,
-                    'composite_score': score,
-                })
+                    s2 = _get_series(stock2)
+                    if s2 is None or float(s2.iloc[-1]) < 5:
+                        gate_counts['penny'] += 1
+                        if s2 is not None:
+                            new_penny_stocks.add(stock2)
+                        continue
+
+                    meta1 = self._ticker_metadata.get(stock1)
+                    meta2 = self._ticker_metadata.get(stock2)
+                    if meta1 is not None and meta2 is not None:
+                        both_etf = meta1.get('is_etf') and meta2.get('is_etf')
+                        same_sector = (
+                            meta1.get('sector') and
+                            meta1.get('sector') == meta2.get('sector')
+                        )
+                        if not (both_etf or same_sector):
+                            gate_counts['sector'] += 1
+                            continue
+
+                    pairs_scanned += 1
+                    self._pair_evaluated_at[pair_key] = end_date
+
+                    corr_long, corr_short = evaluator.get_correlation_dual(
+                        s1, s2, self.corr_long_window, self.corr_short_window,
+                    )
+                    z_depth, z_raw = evaluator.compute_z_depth(
+                        s1, s2, self.zscore_window,
+                        self.entry_threshold, self.exit_threshold,
+                    )
+                    score = self._composite_score(corr_long, corr_short, z_depth)
+
+                    candidates_found += 1
+                    budget_remaining -= 1
+                    scored_candidates.append({
+                        'lead_stock': stock1,
+                        'lag_stock': stock2,
+                        'corr_long': corr_long,
+                        'corr_short': corr_short,
+                        'z_depth': z_depth,
+                        'z_raw': z_raw,
+                        'composite_score': score,
+                    })
+
+                clusters_tried += 1
+
+            self._next_cluster_idx = (start_idx + 1) % n_clusters
 
         for sym in new_penny_stocks:
             self._failed_tickers.add(sym)
@@ -402,6 +434,8 @@ class BobsBrain(Strategy):
                 pair['action'] = 'buy'
 
         print(
+            f"Cluster {start_idx}/{n_clusters} "
+            f"({clusters_tried} tried). "
             f"Scanned {pairs_scanned} pairs. "
             f"Gates: {gate_counts}. "
             f"Candidates scored: {candidates_found}. "
