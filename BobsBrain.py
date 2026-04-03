@@ -122,7 +122,10 @@ class BobsBrain(Strategy):
             mode=self._run_mode,
         )
         self._cache = StockDataCache(self._db, self._alpaca)
-        self._clusterer = TickerClusterer(db=self._db)
+        self._clusterer = TickerClusterer(
+            db=self._db,
+            get_prices=self._cache.get_prices,
+        )
         self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
         self._run_id = secrets.token_hex(3)

@@ -6,15 +6,20 @@ similarly-moving tickers. Clusters are ranked by expected pair yield
 (avg_intra_cluster_corr × cluster_size) so BobsBrain searches the most fertile
 clusters first.
 
-Data is read entirely from the local stock_prices table — no API calls are made.
+Price history is loaded via an injectable ``get_prices`` callable; in BobsBrain
+this is ``StockDataCache.get_prices`` so clustering matches the strategy's
+DB + gap-fill path. Using ``DatabaseClient.get_prices`` alone skips backfill and
+often yields an empty frame on a cold DB (degenerate single cluster, fast day 1).
 """
 
 import math
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import hdbscan
 import numpy as np
 import pandas as pd
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
@@ -43,12 +48,13 @@ class TickerClusterer:
         lookback_days: int = 126,
         min_cluster_size: int = 5,
         pca_variance: float = 0.95,
+        get_prices: Callable[[list[str], datetime, datetime], pd.DataFrame] | None = None,
     ):
         """
         Parameters
         ----------
         db : DatabaseClient
-            Source for historical close prices.
+            Used when ``get_prices`` is omitted (tests, DB-only workflows).
         lookback_days : int
             Calendar days of price history used to build clusters (~6 trading months).
         min_cluster_size : int
@@ -56,8 +62,12 @@ class TickerClusterer:
             Smaller values produce more, tighter clusters.
         pca_variance : float
             Fraction of variance to retain after PCA dimensionality reduction.
+        get_prices : callable, optional
+            ``(symbols, start, end) -> DataFrame`` — e.g. ``StockDataCache.get_prices``.
+            When None, uses ``db.get_prices`` (no API backfill).
         """
         self._db = db
+        self._get_prices = get_prices if get_prices is not None else db.get_prices
         self.lookback_days = lookback_days
         self.min_cluster_size = min_cluster_size
         self.pca_variance = pca_variance
@@ -146,10 +156,20 @@ class TickerClusterer:
 
         pairs: list[tuple[str, str, float]] = []
         available = [s for s in cluster if s in self._corr_matrix.columns]
-        for i, a in enumerate(available):
-            for b in available[i + 1:]:
+        order = list(available)
+        seed = hash(('pairgen', tuple(sorted(cluster)))) % (2**32 - 1)
+        np.random.default_rng(seed if seed > 0 else 1).shuffle(order)
+        for i, a in enumerate(order):
+            for b in order[i + 1:]:
                 pairs.append((a, b, float(self._corr_matrix.loc[a, b])))
-        pairs.sort(key=lambda x: x[2] if not np.isnan(x[2]) else -1, reverse=True)
+
+        def _sort_key(t: tuple[str, str, float]) -> tuple:
+            c = t[2]
+            corr = float(c) if not np.isnan(c) else -1.0
+            tie = hash(t[0]) ^ hash(t[1])
+            return (-corr, tie)
+
+        pairs.sort(key=_sort_key)
         return pairs[:n]
 
     # ------------------------------------------------------------------
@@ -161,8 +181,13 @@ class TickerClusterer:
         end = as_of
         start = end - timedelta(days=self.lookback_days)
 
-        prices = self._db.get_prices(tickers, start, end)
+        prices = self._get_prices(tickers, start, end)
         if prices.empty:
+            print(
+                '[TickerClusterer] No prices in clustering window '
+                f'({start.date()} .. {end.date()}); '
+                'falling back to single cluster (HDBSCAN skipped).',
+            )
             return [list(tickers)]
 
         # Require ≥50% coverage; forward-fill gaps then drop any column still NaN.
@@ -183,12 +208,15 @@ class TickerClusterer:
         X = StandardScaler().fit_transform(log_returns.values.T)  # (n_tickers, n_days)
         X_reduced = self._pca_reduce(X)
 
-        labels = hdbscan.HDBSCAN(
-            min_cluster_size=self.min_cluster_size,
-            min_samples=2,
-            metric='euclidean',
-            cluster_selection_method='eom',
-        ).fit_predict(X_reduced)
+        def _run_hdbscan(mcs: int, ms: int) -> np.ndarray:
+            return hdbscan.HDBSCAN(
+                min_cluster_size=mcs,
+                min_samples=ms,
+                metric='euclidean',
+                cluster_selection_method='eom',
+            ).fit_predict(X_reduced)
+
+        labels = _run_hdbscan(self.min_cluster_size, 2)
 
         cluster_map: dict[int, list[str]] = {}
         noise: list[str] = []
@@ -199,7 +227,35 @@ class TickerClusterer:
                 cluster_map.setdefault(label, []).append(symbol)
 
         if not cluster_map:
-            return [symbols]
+            print(
+                'TickerClusterer: HDBSCAN assigned all tickers to noise; '
+                'retrying with min_cluster_size=3, min_samples=1',
+            )
+            labels = _run_hdbscan(3, 1)
+            cluster_map.clear()
+            noise.clear()
+            for symbol, label in zip(symbols, labels):
+                if label == -1:
+                    noise.append(symbol)
+                else:
+                    cluster_map.setdefault(label, []).append(symbol)
+
+        if not cluster_map:
+            n_sym = len(symbols)
+            k = min(min(100, max(8, n_sym // 25)), n_sym)
+            k = max(2, k) if n_sym >= 2 else n_sym
+            print(
+                f'TickerClusterer: HDBSCAN still all-noise; '
+                f'Ward agglomerative fallback with n_clusters={k}',
+            )
+            labels = AgglomerativeClustering(
+                n_clusters=k,
+                linkage='ward',
+            ).fit_predict(X_reduced)
+            cluster_map.clear()
+            noise.clear()
+            for symbol, label in zip(symbols, labels):
+                cluster_map.setdefault(int(label), []).append(symbol)
 
         # Rank each cluster by avg_intra_corr × size.
         corr_df = log_returns[symbols].corr()
