@@ -43,7 +43,7 @@ Query `portfolio_snapshots` for the run. Compute and report:
 ```sql
 SELECT time, portfolio_value, cash, spy_value,
        active_pairs, avg_correlation, cash_ratio,
-       daily_buys, daily_sells, daily_topups,
+       daily_buys, daily_sells,
        pairs_scanned, candidates_found, candidates_buy_ready
 FROM portfolio_snapshots
 WHERE run_id = '<run_id>'
@@ -76,26 +76,7 @@ To compute **win rate and avg P&L per pair**: match each `sell` to its correspon
 
 Fallback: read `logs/*_trade_events.csv`, filter to `status=fill`.
 
-**Step 5 — Evaluate watchlist effectiveness**
-Query `portfolio_snapshots` for `watchlist_size` and `avg_watchlist_ttl` (present in runs using Wave 3+ code). Also join with `pairs` to find promoted pairs:
-```sql
-SELECT p.lag_stock, p.created_at,
-       MIN(t.filled_at) AS first_buy,
-       DATE_PART('day', MIN(t.filled_at) - p.created_at) AS days_on_watchlist
-FROM pairs p
-JOIN trades t ON t.pair_id = p.pair_id AND t.side = 'buy'
-WHERE p.run_id = '<run_id>'
-GROUP BY p.lag_stock, p.created_at
-ORDER BY days_on_watchlist DESC;
-```
-Compute and report:
-- **Avg watchlist size**: mean of `watchlist_size` across snapshots
-- **Avg watchlist TTL**: mean of `avg_watchlist_ttl` (simulator-derived, reflects how long signals are predicted to take)
-- **Promotion rate**: pairs that were bought / total pairs that passed all hard gates (`candidates_found`)
-- **Avg days on watchlist before buy**: from the query above — compares predicted TTL to actual time-to-signal
-- Flag if `avg_watchlist_ttl` is much shorter than `avg days on watchlist` (TTL may be expiring pairs too early)
-
-**Step 6 — Flag anomalies**
+**Step 5 — Flag anomalies**
 Raise these as warnings if present:
 - Zero or very few trades despite a multi-week backtest (pair discovery may be too restrictive)
 - Portfolio value unchanged despite filled trades (pricing data issue)
@@ -103,7 +84,6 @@ Raise these as warnings if present:
 - Avg slippage unusually high relative to trade cost
 - Sells without matching buys (position tracking bug)
 - `completed_at IS NULL` in `backtest_runs` — run may have crashed before finishing
-- `avg_watchlist_ttl` consistently at the default (5) — simulator may not be producing valid `days_to_first_signal` values
 
 ## Proposing Code Improvements
 
