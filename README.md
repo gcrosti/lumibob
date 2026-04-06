@@ -96,9 +96,10 @@ Strategy parameters are passed in **`main.py`** via `parameters={...}` (same key
 | `w_z_depth` | Composite weight on Z-score depth | `0.2` |
 | `max_daily_candidates` | Max new candidate pairs scored per day (global budget) | `200` |
 | `cooldown_days` | Days before the same unordered pair is scored again | `7` |
-| `replacement_threshold` | Min composite-score edge for a candidate to displace a held name | `0.05` |
 
-These are persisted on each run in **`backtest_runs.settings`** (JSONB). The default **`main.py`** backtest passes position sizing, correlation windows, weights, and discovery budgets; keys such as **`lookback_window`**, **`entry_threshold`**, **`exit_threshold`**, **`zscore_window`**, and **`cluster_recompute_days`** are omitted there and therefore use the defaults in the table above.
+These are persisted on each run in **`backtest_runs.settings`** (JSONB). The default **`main.py`** backtest passes position sizing, correlation windows, weights, and discovery budgets via **`STRATEGY_PARAMETERS`**; keys such as **`lookback_window`**, **`entry_threshold`**, **`exit_threshold`**, **`zscore_window`**, and **`cluster_recompute_days`** are omitted there and therefore use the defaults in the table above.
+
+Older runs may still include **`replacement_threshold`** in persisted settings; it was removed from the strategy (it was unused).
 
 ## Execution Modes
 

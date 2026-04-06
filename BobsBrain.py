@@ -61,29 +61,38 @@ class BobsBrain(Strategy):
 
     def initialize(self):
         self.sleeptime = '1D'
+        # Calendar days of price history for scoring (must span corr windows in bars).
         self.lookback_window = self.parameters.get('lookback_window', 130)
+        # Min days between cluster recomputes; None = recompute only when cache cold.
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
 
         self._ticker_metadata: dict[str, dict] = {}
         self._metadata_loaded = False
 
+        # Position size bounds as a fraction of portfolio (from composite score).
         self.min_position_pct = self.parameters.get('min_position_pct', 0.03)
         self.max_position_pct = self.parameters.get('max_position_pct', 0.20)
+        # Target fraction deployed; shortfall increases per-buy allocation.
         self.target_deployed_pct = self.parameters.get('target_deployed_pct', 0.60)
 
+        # Spread z-score bands for entry signal vs exit / shallow regime.
         self.entry_threshold = self.parameters.get('entry_threshold', 2.0)
         self.exit_threshold = self.parameters.get('exit_threshold', 0.5)
+        # Rolling bars for spread z-score.
         self.zscore_window = self.parameters.get('zscore_window', 20)
 
+        # Log-return correlation windows (bars); long vs short horizon.
         self.corr_long_window = self.parameters.get('corr_long_window', 90)
         self.corr_short_window = self.parameters.get('corr_short_window', 20)
+        # Composite score weights (corr_long, corr_short, z_depth); should sum to 1.
         self.w_corr_long = self.parameters.get('w_corr_long', 0.3)
         self.w_corr_short = self.parameters.get('w_corr_short', 0.5)
         self.w_z_depth = self.parameters.get('w_z_depth', 0.2)
 
+        # Max new pairs scored per day (global budget).
         self.max_daily_candidates = self.parameters.get('max_daily_candidates', 200)
+        # Days before the same unordered pair can be scored again.
         self.cooldown_days = self.parameters.get('cooldown_days', 7)
-        self.replacement_threshold = self.parameters.get('replacement_threshold', 0.05)
 
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
@@ -165,7 +174,6 @@ class BobsBrain(Strategy):
                 'w_z_depth': self.w_z_depth,
                 'max_daily_candidates': self.max_daily_candidates,
                 'cooldown_days': self.cooldown_days,
-                'replacement_threshold': self.replacement_threshold,
             },
         )
 
@@ -395,14 +403,6 @@ class BobsBrain(Strategy):
                 target_portfolio[symbol] = self.pairs[symbol]
             elif source == 'candidate' and cand_data is not None:
                 if symbol in target_portfolio:
-                    continue
-
-                existing_min_score = min(
-                    (p['composite_score'] for p in target_portfolio.values()),
-                    default=-1.0,
-                )
-                if (len(target_portfolio) >= k_target
-                        and score - existing_min_score < self.replacement_threshold):
                     continue
 
                 new_pair = {
