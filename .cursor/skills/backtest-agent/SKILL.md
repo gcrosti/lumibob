@@ -22,7 +22,7 @@ Classify the change (drives all Phase 2 choices):
 
 | Category | Examples |
 |---|---|
-| **Pair discovery** | `TickerClusterer` / HDBSCAN, `max_daily_candidates`, `cooldown_days`, sector gate, `corr_long_window` / `corr_short_window`, composite weights, `replacement_threshold` |
+| **Pair discovery** | `TickerClusterer` / HDBSCAN, `max_daily_candidates`, `cooldown_days`, sector gate, `corr_long_window` / `corr_short_window`, composite weights |
 | **Signal generation** | `zscore_window`, `entry_threshold`, `exit_threshold`, Z-score depth in scoring |
 | **Position sizing / risk** | `min_position_pct`, `max_position_pct`, `target_deployed_pct`, dynamic K / portfolio construction |
 | **Bug fix / data fix** | Correctness change; output should now differ from (or match) a baseline |

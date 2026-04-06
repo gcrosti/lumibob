@@ -9,6 +9,26 @@ load_dotenv()
 
 RUN_MODE = os.getenv('RUN_MODE', 'backtest')
 
+# Strategy parameters (same keys as BobsBrain.initialize() defaults; omitted keys use those defaults).
+STRATEGY_PARAMETERS = {
+    # Position size bounds as a fraction of portfolio (tied to composite score).
+    'min_position_pct': 0.03,
+    'max_position_pct': 0.20,
+    # Target fraction of capital deployed; gap boosts each buy size.
+    'target_deployed_pct': 0.60,
+    # Long- vs short-horizon correlation windows in bars (log returns).
+    'corr_long_window': 90,
+    'corr_short_window': 20,
+    # Weights for composite score: long corr, short corr, z-depth (typically sum to 1).
+    'w_corr_long': 0.3,
+    'w_corr_short': 0.5,
+    'w_z_depth': 0.2,
+    # Cap on new candidate pairs scored per trading day.
+    'max_daily_candidates': 200,
+    # Minimum days before re-scoring the same unordered pair.
+    'cooldown_days': 7,
+}
+
 if __name__ == '__main__':
     if RUN_MODE == 'paper':
         from lumibot.brokers import Alpaca
@@ -22,19 +42,7 @@ if __name__ == '__main__':
         broker = Alpaca(ALPACA_CONFIG)
         strategy = BobsBrain(
             broker=broker,
-            parameters={
-                'min_position_pct': 0.03,
-                'max_position_pct': 0.20,
-                'target_deployed_pct': 0.60,
-                'corr_long_window': 90,
-                'corr_short_window': 20,
-                'w_corr_long': 0.3,
-                'w_corr_short': 0.5,
-                'w_z_depth': 0.2,
-                'max_daily_candidates': 200,
-                'cooldown_days': 7,
-                'replacement_threshold': 0.05,
-            },
+            parameters=STRATEGY_PARAMETERS,
         )
         trader = Trader()
         trader.add_strategy(strategy)
@@ -50,19 +58,7 @@ if __name__ == '__main__':
             backtesting_start,
             backtesting_end,
             budget=10000,
-            parameters={
-                'min_position_pct': 0.03,
-                'max_position_pct': 0.20,
-                'target_deployed_pct': 0.60,
-                'corr_long_window': 90,
-                'corr_short_window': 20,
-                'w_corr_long': 0.3,
-                'w_corr_short': 0.5,
-                'w_z_depth': 0.2,
-                'max_daily_candidates': 200,
-                'cooldown_days': 7,
-                'replacement_threshold': 0.05,
-            },
+            parameters=STRATEGY_PARAMETERS,
             show_plot=False,
             show_tearsheet=False,
             save_tearsheet=False,

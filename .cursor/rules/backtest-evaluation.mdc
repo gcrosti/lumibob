@@ -36,7 +36,7 @@ LIMIT 1;
 As a fallback for runs that pre-date the DB, list files in `logs/` and find all files sharing the target `<6-char-id>`.
 
 **Step 2 — Load configuration**
-Read the `settings` JSONB field from `backtest_runs`. Report **all keys present**; typical current keys include: `lookback_window`, `cluster_recompute_days`, `min_position_pct`, `max_position_pct`, `target_deployed_pct`, `entry_threshold`, `exit_threshold`, `zscore_window`, `corr_long_window`, `corr_short_window`, `w_corr_long`, `w_corr_short`, `w_z_depth`, `max_daily_candidates`, `cooldown_days`, `replacement_threshold`. Older runs may still show `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `min_correlation`, etc. Include budget and date range from the backtest invocation or logs if stored. Fallback: read `logs/*_settings.json`.
+Read the `settings` JSONB field from `backtest_runs`. Report **all keys present**; typical current keys include: `lookback_window`, `cluster_recompute_days`, `min_position_pct`, `max_position_pct`, `target_deployed_pct`, `entry_threshold`, `exit_threshold`, `zscore_window`, `corr_long_window`, `corr_short_window`, `w_corr_long`, `w_corr_short`, `w_z_depth`, `max_daily_candidates`, `cooldown_days`. Older runs may still show `replacement_threshold`, `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `min_correlation`, etc. Include budget and date range from the backtest invocation or logs if stored. Fallback: read `logs/*_settings.json`.
 
 **Step 3 — Evaluate portfolio performance**
 Query `portfolio_snapshots` for the run. Compute and report:
