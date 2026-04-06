@@ -85,13 +85,18 @@ class StockDataCache:
 
         return cached
 
-    def warm_cache(self, symbols: list[str], days: int = 60) -> None:
+    def warm_cache(self, symbols: list[str], days: int = 126) -> None:
         """
         Pre-load the last N days of price data for a list of symbols.
 
         Intended to be called from a nightly cron job so before_market_opens()
         always finds a warm cache and never needs to call Alpaca at runtime.
         Fetches full OHLCV records (not just close) via get_ohlcv_records().
+
+        The default of 126 days (~6 trading months) covers TickerClusterer’s
+        clustering window. Strategy scoring uses lookback_window (default 130
+        calendar days in BobsBrain); use warm_cache(days=...) ≥ max(126, 130)
+        if you want one cron job to cover both.
         """
         if not symbols:
             return

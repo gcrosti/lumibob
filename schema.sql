@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS pairs (
     lag_days      INT         NOT NULL DEFAULT 1,
     short_ma      INT         NOT NULL DEFAULT 2,
     long_ma       INT         NOT NULL DEFAULT 5,
+    -- Long-horizon Pearson correlation (BobsBrain ``corr_long``)
     correlation   NUMERIC,
     simulated_return DOUBLE PRECISION,
     initial_cost  NUMERIC,

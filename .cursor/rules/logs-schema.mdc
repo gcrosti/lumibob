@@ -9,8 +9,8 @@ alwaysApply: false
 ## Primary Store — PostgreSQL / TimescaleDB
 
 All run data, price history, and pair state are stored in a TimescaleDB database.
-Connection string: `$DB_URL` (default: `postgresql://postgres:lumibob@localhost:5432/lumibob`).
-Schema is defined in `schema.sql`. Apply once via: `psql $DB_URL -f schema.sql`.
+Connection string: env var `DB_URL` (default: `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+Schema is defined in `schema.sql`. Apply once via: `psql` with `DB_URL` set, e.g. `psql "postgresql://..." -f schema.sql`.
 
 ### `backtest_runs`
 One row per backtest or paper trading run. Replaces `_settings.json`.
@@ -21,7 +21,7 @@ One row per backtest or paper trading run. Replaces `_settings.json`.
 | `mode` | VARCHAR(10) | `backtest` or `paper` |
 | `started_at` | TIMESTAMPTZ | Strategy startup time |
 | `completed_at` | TIMESTAMPTZ | Strategy finish time (`NULL` if crashed) |
-| `settings` | JSONB | Full settings dict (budget, date range, ticker_limit, etc.) |
+| `settings` | JSONB | Full settings dict (see `backtest-evaluation` rule for typical keys; may include legacy `ticker_limit` on old runs) |
 
 ### `portfolio_snapshots`
 One row per trading day per run. Replaces `_stats.csv` and `_indicators.csv`. TimescaleDB hypertable.
@@ -34,14 +34,14 @@ One row per trading day per run. Replaces `_stats.csv` and `_indicators.csv`. Ti
 | `cash` | NUMERIC | Uninvested cash |
 | `spy_value` | NUMERIC | SPY normalised to starting portfolio value |
 | `active_pairs` | INT | Number of pairs being monitored |
-| `avg_correlation` | NUMERIC | Mean Pearson correlation across active pairs |
+| `avg_correlation` | NUMERIC | Mean of **finite** long-horizon correlations (`corr_long` / `pairs.correlation`) across active pairs |
 | `cash_ratio` | NUMERIC | `cash / portfolio_value` |
 | `daily_buys` | INT | New pair entry buy orders submitted that day (excludes top-ups) |
 | `daily_sells` | INT | Sell orders submitted that day |
-| `daily_topups` | INT | Top-up buy orders submitted that day |
-| `pairs_scanned` | INT | Combinations evaluated through quality gates |
-| `candidates_found` | INT | Passed all quality gates (penny/corr/coint/sim) |
-| `candidates_buy_ready` | INT | Subset of candidates_found with a buy signal |
+| `daily_topups` | INT | Legacy column; strategy currently passes 0 (no top-up loop) |
+| `pairs_scanned` | INT | Pair evaluations that cleared hard gates (e.g. penny, sector, cooldown) and were scored |
+| `candidates_found` | INT | Candidate pairs scored (composite) that day |
+| `candidates_buy_ready` | INT | New buy slots queued into the target portfolio that day |
 
 ### `trades`
 One row per filled order. Replaces `_trade_events.csv`. All rows are fills — no status filtering needed.
@@ -69,9 +69,9 @@ Discovered lead/lag pairs. Replaces `pairs/pair_history.json` (that file is no l
 | `lag_days` | INT | Offset in days (default 1) |
 | `short_ma` | INT | Short MA window (default 2) |
 | `long_ma` | INT | Long MA window (default 5) |
-| `correlation` | NUMERIC | Pearson correlation at last update |
-| `simulated_return` | DOUBLE PRECISION | Best historical return from PairSimulator.optimize() |
-| `initial_cost` | NUMERIC | Cost of the initial buy (quantity × price); used for gap-fill top-ups |
+| `correlation` | NUMERIC | Long-horizon Pearson correlation (`corr_long`); updated on save and on daily re-score |
+| `simulated_return` | DOUBLE PRECISION | Legacy; often NULL for score-and-rank runs (no `PairSimulator` gate) |
+| `initial_cost` | NUMERIC | Cost of the initial buy (quantity × price); legacy top-up fields may reference this |
 | `discovered_at` | DATE | Date first discovered |
 | `last_updated` | DATE | Date correlation was last recomputed |
 | `active` | BOOLEAN | Whether pair is currently being monitored |
