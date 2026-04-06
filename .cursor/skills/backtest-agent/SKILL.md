@@ -22,9 +22,9 @@ Classify the change (drives all Phase 2 choices):
 
 | Category | Examples |
 |---|---|
-| **Pair discovery** | Correlation logic, `min_correlation`, `lookback_window`, `min_daily_pairs`, `max_lag` |
-| **Signal generation** | Z-score windows, entry/exit thresholds, holdout gate logic |
-| **Position sizing / risk** | Cash allocation fraction, max positions, stop-loss logic |
+| **Pair discovery** | `TickerClusterer` / HDBSCAN, `max_daily_candidates`, `cooldown_days`, sector gate, `corr_long_window` / `corr_short_window`, composite weights, `replacement_threshold` |
+| **Signal generation** | `zscore_window`, `entry_threshold`, `exit_threshold`, Z-score depth in scoring |
+| **Position sizing / risk** | `min_position_pct`, `max_position_pct`, `target_deployed_pct`, dynamic K / portfolio construction |
 | **Bug fix / data fix** | Correctness change; output should now differ from (or match) a baseline |
 | **Infrastructure** | No behavioural change expected; timing or DB/cache layer only |
 
@@ -45,11 +45,12 @@ Present the plan as structured text. Do not edit files yet.
 | Full validation | ~6 months, spanning volatile + calm | Pair discovery or position sizing changes |
 | Comparative | Two separate runs | Expected return profile change; want before/after |
 
-### `ticker_limit` tier
+### Run size (no `ticker_limit` in current code)
 
-- `50` — smoke test; fastest, least representative
-- `100` — standard (default); good speed/coverage balance
-- none — full universe; only for pair discovery changes needing broad coverage
+- **Shorter calendar window** (~2 weeks) — smoke / infrastructure
+- **~3 months** — standard validation for most changes
+- **Longer or multiple windows** — pair-discovery or regime-sensitive changes
+- Tune **`max_daily_candidates`** (and dates) if you need heavier or lighter scoring load per day — there is no separate ticker cap in `main.py` today
 
 ### Signals to watch by category
 
@@ -63,7 +64,7 @@ Present the plan as structured text. Do not edit files yet.
 
 1. **Change summary** — what the PR does and why a backtest is warranted
 2. **Classification** — category/categories
-3. **Run configuration(s)** — exact dates, budget, `ticker_limit`, number of runs
+3. **Run configuration(s)** — exact dates, budget, relevant `parameters` keys (`max_daily_candidates`, correlation windows, weights, etc.), number of runs
 4. **Signals to watch** — metrics and anomaly flags most relevant to this change
 5. **Justification** — 1–2 sentences explaining the parameter choices
 
@@ -81,7 +82,7 @@ For each run in the approved plan:
 
 **Step 1 — Update `main.py`**
 
-Locate the backtest block (the `backtesting_start` assignment and surrounding `BobsBrain.backtest(...)` call). Update `backtesting_start`, `backtesting_end`, `budget`, and `ticker_limit`. Do not change anything else.
+Locate the backtest block (the `backtesting_start` assignment and surrounding `BobsBrain.backtest(...)` call). Update `backtesting_start`, `backtesting_end`, `budget`, and the `parameters={...}` dict as needed for the experiment (e.g. `max_daily_candidates`, `corr_long_window`, weights). Do not change unrelated code.
 
 **Step 2 — Run the backtest**
 

@@ -8,6 +8,7 @@ across the strategy lifecycle.
 """
 
 import json
+import math
 from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any
@@ -16,6 +17,24 @@ import pandas as pd
 import psycopg2
 import psycopg2.extras
 from psycopg2 import pool
+
+
+def _float_correlation_value(value: Any) -> float | None:
+    """Normalize a correlation scalar; None if missing, NaN, or non-finite."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def _pair_corr_long_for_db(pair: dict) -> float | None:
+    """Long-horizon correlation persisted in ``pairs.correlation``."""
+    return _float_correlation_value(pair.get("corr_long"))
 
 
 class DatabaseClient:
@@ -173,6 +192,7 @@ class DatabaseClient:
 
         All columns needed by BobsBrain.before_market_opens() are selected so
         that DB-loaded pairs can be evaluated immediately without missing fields.
+        The ``correlation`` column is exposed in-memory as ``corr_long``.
         """
         sql = """
             SELECT id, lead_symbol, lag_symbol, lag_days,
@@ -190,7 +210,7 @@ class DatabaseClient:
 
         result: dict = {}
         for row in rows:
-            (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
+            (pid, lead, lag, lag_days, short_ma, long_ma, correlation, initial_cost,
              sim_ret, sim_sharpe, signal_type, zscore_window,
              entry_threshold, exit_threshold) = row
             result[lag] = {
@@ -200,7 +220,7 @@ class DatabaseClient:
                 "lag":              lag_days,
                 "short_ma":         short_ma,
                 "long_ma":          long_ma,
-                "corr":             float(corr) if corr is not None else None,
+                "corr_long":        _float_correlation_value(correlation),
                 "action":           "hold",
                 "initial_cost":     float(initial_cost) if initial_cost is not None else None,
                 "simulated_return": float(sim_ret) if sim_ret is not None else None,
@@ -370,6 +390,7 @@ class DatabaseClient:
         and returns the existing id instead.
 
         Optional pair keys:
+            corr_long (float)          -- long-horizon correlation → pairs.correlation
             simulated_return (float)   -- best historical simulated return
             sim_sharpe (float)         -- annualised Sharpe of the simulated strategy
             signal_type (str)          -- 'ma' or 'zscore'
@@ -392,7 +413,7 @@ class DatabaseClient:
         today = date.today()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                corr = pair.get("corr")
+                correlation = _pair_corr_long_for_db(pair)
                 sim_ret = pair.get("simulated_return")
                 sim_sharpe = pair.get("sim_sharpe")
                 signal_type = pair.get("signal_type", "ma")
@@ -406,7 +427,7 @@ class DatabaseClient:
                     pair.get("lag", 1),
                     pair.get("short_ma", 2),
                     pair.get("long_ma", 5),
-                    float(corr) if corr is not None else None,
+                    correlation,
                     float(sim_ret) if sim_ret is not None else None,
                     float(sim_sharpe) if sim_sharpe is not None else None,
                     signal_type,

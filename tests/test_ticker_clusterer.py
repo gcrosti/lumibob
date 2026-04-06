@@ -36,16 +36,17 @@ def _make_prices(symbols: list[str], n_days: int = 80, seed: int = 42) -> pd.Dat
     """
     rng = np.random.default_rng(seed)
     dates = pd.date_range(end=AS_OF, periods=n_days, freq='B')
+    n_bars = len(dates)
     mid = len(symbols) // 2
 
     data = {}
     for i, sym in enumerate(symbols):
         if i < mid:
             # Group 1: mild upward drift
-            noise = rng.normal(0.001, 0.01, n_days)
+            noise = rng.normal(0.001, 0.01, n_bars)
         else:
             # Group 2: mild downward drift with different variance
-            noise = rng.normal(-0.001, 0.015, n_days)
+            noise = rng.normal(-0.001, 0.015, n_bars)
         prices = 100 * np.exp(np.cumsum(noise))
         data[sym] = prices
 

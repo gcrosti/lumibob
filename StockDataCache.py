@@ -93,9 +93,10 @@ class StockDataCache:
         always finds a warm cache and never needs to call Alpaca at runtime.
         Fetches full OHLCV records (not just close) via get_ohlcv_records().
 
-        The default of 126 days (~6 trading months) covers both the 60-day
-        lookback_window used for pair discovery and the 126-day window used
-        by TickerClusterer to build movement-similarity clusters.
+        The default of 126 days (~6 trading months) covers TickerClusterer’s
+        clustering window. Strategy scoring uses lookback_window (default 130
+        calendar days in BobsBrain); use warm_cache(days=...) ≥ max(126, 130)
+        if you want one cron job to cover both.
         """
         if not symbols:
             return

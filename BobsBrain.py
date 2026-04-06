@@ -61,7 +61,7 @@ class BobsBrain(Strategy):
 
     def initialize(self):
         self.sleeptime = '1D'
-        self.lookback_window = 90
+        self.lookback_window = self.parameters.get('lookback_window', 130)
         self.cluster_recompute_days = self.parameters.get('cluster_recompute_days', None)
 
         self._ticker_metadata: dict[str, dict] = {}
@@ -227,6 +227,10 @@ class BobsBrain(Strategy):
             pair['z_depth'] = z_depth
             pair['current_zscore'] = current_z if current_z is not None else z_raw
             pair['composite_score'] = self._composite_score(corr_long, corr_short, z_depth)
+
+            pid = pair.get('pair_id')
+            if pid is not None and np.isfinite(corr_long):
+                self._db.update_pair_correlation(int(pid), float(corr_long))
 
             if symbol in position_symbols and action == 'sell':
                 pair['action'] = 'sell'
@@ -404,7 +408,6 @@ class BobsBrain(Strategy):
                 new_pair = {
                     'lead_stock': cand_data['lead_stock'],
                     'lag_stock': cand_data['lag_stock'],
-                    'corr': cand_data.get('corr_long', 0.0),
                     'corr_long': cand_data['corr_long'],
                     'corr_short': cand_data['corr_short'],
                     'z_depth': cand_data['z_depth'],
@@ -567,8 +570,15 @@ class BobsBrain(Strategy):
             self.add_line("spy_value", spy_value)
 
         active_pairs = list(self.pairs.values())
-        corr_vals = [p.get('corr') or p.get('corr_long', 0) or 0 for p in active_pairs]
-        avg_corr = sum(corr_vals) / len(corr_vals) if corr_vals else 0.0
+        long_corrs: list[float] = []
+        for p in active_pairs:
+            v = p.get('corr_long')
+            if v is None:
+                continue
+            fv = float(v)
+            if np.isfinite(fv):
+                long_corrs.append(fv)
+        avg_corr = float(np.mean(long_corrs)) if long_corrs else 0.0
 
         zscore_pairs = [
             p['current_zscore'] for p in active_pairs

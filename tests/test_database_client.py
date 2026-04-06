@@ -177,6 +177,7 @@ class TestPairs:
         assert result["MSFT"]["lead_stock"] == "AAPL"
         assert result["MSFT"]["pair_id"] == 1
         assert result["MSFT"]["action"] == "hold"
+        assert result["MSFT"]["corr_long"] == 0.91
 
     def test_load_active_pairs_filters_by_run_id(self):
         client, mock_pool = _make_client()
@@ -200,7 +201,7 @@ class TestPairs:
 
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
-            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.88,
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr_long": 0.88,
         }
         result = client.save_pair(pair, "run01")
 
@@ -212,7 +213,7 @@ class TestPairs:
 
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
-            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.88,
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr_long": 0.88,
         }
         client.save_pair(pair, "run01")
 
@@ -246,7 +247,7 @@ class TestPairs:
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
             "lag": 2, "short_ma": 1, "long_ma": 3,
-            "corr": 0.92, "simulated_return": 0.07,
+            "corr_long": 0.92, "simulated_return": 0.07,
         }
         client.save_pair(pair, "run01")
 
@@ -260,7 +261,7 @@ class TestPairs:
 
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
-            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.91,
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr_long": 0.91,
         }
         client.save_pair(pair, "run01")
 
@@ -300,7 +301,7 @@ class TestPairs:
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
             "lag": 1, "short_ma": 2, "long_ma": 5,
-            "corr": 0.92, "sim_sharpe": 1.4,
+            "corr_long": 0.92, "sim_sharpe": 1.4,
         }
         client.save_pair(pair, "run01")
 
@@ -314,12 +315,26 @@ class TestPairs:
 
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
-            "lag": 1, "short_ma": 2, "long_ma": 5, "corr": 0.91,
+            "lag": 1, "short_ma": 2, "long_ma": 5, "corr_long": 0.91,
         }
         client.save_pair(pair, "run01")
 
         _sql, params = mock_cur.execute.call_args[0]
         assert None in params
+
+    def test_save_pair_passes_none_when_corr_long_absent(self):
+        """pairs.correlation is NULL when corr_long is not on the pair dict."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(11,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        assert params[6] is None
 
     def test_update_pair_initial_cost_executes_update(self):
         """update_pair_initial_cost should UPDATE pairs SET initial_cost for the given id."""

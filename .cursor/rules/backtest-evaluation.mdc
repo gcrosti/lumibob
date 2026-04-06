@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Backtest Evaluation Agent
 
-Before evaluating, read README.md in the project root to understand the strategy's parameters (correlation thresholds, MA windows, position sizing, pair discovery limits). This context should be used when evaluating a backtest.
+Before evaluating, read README.md in the project root for high-level context, but prefer **`backtest_runs.settings`** as the source of truth for the run (README may lag the code). The live strategy uses **clustering + composite score-and-rank** discovery, **dual-horizon** correlations (`corr_long_window` / `corr_short_window`), **Z-score depth**, and **position sizing** parameters — not the legacy sequential gates (`min_correlation`, `PairSimulator`, `min_daily_pairs`) unless evaluating an old run.
 
 ## Data Storage
 
@@ -36,7 +36,7 @@ LIMIT 1;
 As a fallback for runs that pre-date the DB, list files in `logs/` and find all files sharing the target `<6-char-id>`.
 
 **Step 2 — Load configuration**
-Read the `settings` JSONB field from `backtest_runs`. Report: date range, budget, `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `entry_threshold`, `exit_threshold`, and `backtest_time_seconds`. Fallback: read `logs/*_settings.json`.
+Read the `settings` JSONB field from `backtest_runs`. Report **all keys present**; typical current keys include: `lookback_window`, `cluster_recompute_days`, `min_position_pct`, `max_position_pct`, `target_deployed_pct`, `entry_threshold`, `exit_threshold`, `zscore_window`, `corr_long_window`, `corr_short_window`, `w_corr_long`, `w_corr_short`, `w_z_depth`, `max_daily_candidates`, `cooldown_days`, `replacement_threshold`. Older runs may still show `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `min_correlation`, etc. Include budget and date range from the backtest invocation or logs if stored. Fallback: read `logs/*_settings.json`.
 
 **Step 3 — Evaluate portfolio performance**
 Query `portfolio_snapshots` for the run. Compute and report:
@@ -54,7 +54,7 @@ ORDER BY time;
 - **Portfolio curve**: describe the shape (flat, steady growth, volatile, sharp drawdown, etc.)
 - **Cash utilization**: average `cash_ratio` — high values mean capital was idle
 - **SPY comparison**: compare `portfolio_value` trajectory vs `spy_value` (both normalised to starting budget)
-- **Avg active pairs / avg correlation**: from `active_pairs` and `avg_correlation` columns
+- **Avg active pairs / avg correlation**: from `active_pairs` and `avg_correlation` (mean of **finite** long-horizon correlations — `corr_long` in code, persisted as `pairs.correlation`). If `avg_correlation` is NULL or NaN for every row, treat as a data/aggregation issue for that run rather than “no correlation.”
 
 Fallback: read `logs/*_stats.csv`.
 
@@ -80,7 +80,8 @@ Fallback: read `logs/*_trade_events.csv`, filter to `status=fill`.
 Raise these as warnings if present:
 - Zero or very few trades despite a multi-week backtest (pair discovery may be too restrictive)
 - Portfolio value unchanged despite filled trades (pricing data issue)
-- Cash utilization > 80% throughout (strategy rarely investing) — use `candidates_found` and `candidates_buy_ready` to distinguish discovery failure (low `candidates_found`) from signal timing (low `candidates_buy_ready` despite reasonable `candidates_found`)
+- Cash utilization > 80% throughout (strategy rarely investing) — use `candidates_found` (pairs scored that day) and `candidates_buy_ready` (buys queued) to distinguish thin discovery from weak entry signals
+- `avg_correlation` all NULL/NaN while `active_pairs` > 0 — snapshot aggregation or missing `corr_long` on pairs; do not infer correlation drift from that column for that run
 - Avg slippage unusually high relative to trade cost
 - Sells without matching buys (position tracking bug)
 - `completed_at IS NULL` in `backtest_runs` — run may have crashed before finishing
