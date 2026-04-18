@@ -796,7 +796,13 @@ class BobsBrain(Strategy):
     def _validate_ticker_metadata(self, tickers: list[str]) -> None:
         """
         Log a coverage summary for the loaded metadata and warn when the
-        sector gate will be partially or fully blind.
+        unknown-sector partition is unexpectedly large.
+
+        Thresholds (sector coverage fraction):
+          < 20%  → ERROR  — sector partitioning is effectively useless; all
+                             tickers land in the unknown bucket.
+          20–50% → WARNING — notable unknown partition; quality may be degraded.
+          >= 50% → INFO    — coverage sufficient for meaningful partitioning.
         """
         total = len(tickers)
         if total == 0:
@@ -808,19 +814,29 @@ class BobsBrain(Strategy):
             1 for t in tickers if self._ticker_metadata.get(t, {}).get('is_etf')
         )
         coverage_pct = with_sector / total
+        unknown_count = total - with_sector
         msg = (
             f"[BobsBrain] Ticker metadata: {with_sector}/{total} tickers have "
             f"sector data ({coverage_pct:.0%}), {etf_count} ETFs, "
             f"{total - etf_count} stocks"
         )
-        if coverage_pct < 0.50:
+        if coverage_pct < 0.20:
+            logging.error(
+                "%s — coverage critically low; %d tickers will land in the "
+                "unknown partition, making sector pre-partition ineffective. "
+                "Clear the ticker_metadata table and re-run to trigger a fresh "
+                "SEC EDGAR fetch.",
+                msg,
+                unknown_count,
+            )
+        elif coverage_pct < 0.50:
             logging.warning(
                 "%s — coverage low; %d tickers will be clustered in the unknown "
                 "partition, which may have poor intra-cluster correlation. "
                 "Clear the ticker_metadata table and re-run to trigger a fresh "
                 "SEC EDGAR fetch if this number is unexpectedly high.",
                 msg,
-                total - with_sector,
+                unknown_count,
             )
         else:
             print(msg)

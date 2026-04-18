@@ -28,26 +28,28 @@ TICKERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
 
 def _make_prices(symbols: list[str], n_days: int = 80, seed: int = 42) -> pd.DataFrame:
     """
-    Build a synthetic price DataFrame with two distinct movement groups
-    so HDBSCAN has a clear clustering signal to work with.
+    Build a synthetic price DataFrame with two genuinely correlated groups.
 
-    Symbols in the first half move together (correlated); symbols in the
-    second half form a second correlated group with a different drift.
+    Each ticker's return is a weighted mix of a group-specific common factor
+    (high weight) and idiosyncratic noise (low weight).  This produces
+    strong intra-group correlation (r ~ 0.85) while keeping inter-group
+    correlation near zero, giving HDBSCAN a clear clustering signal.
     """
     rng = np.random.default_rng(seed)
     dates = pd.date_range(end=AS_OF, periods=n_days, freq='B')
     n_bars = len(dates)
     mid = len(symbols) // 2
 
+    # Two independent group factors.
+    factor1 = rng.normal(0.001, 0.015, n_bars)
+    factor2 = rng.normal(-0.001, 0.015, n_bars)
+
     data = {}
     for i, sym in enumerate(symbols):
-        if i < mid:
-            # Group 1: mild upward drift
-            noise = rng.normal(0.001, 0.01, n_bars)
-        else:
-            # Group 2: mild downward drift with different variance
-            noise = rng.normal(-0.001, 0.015, n_bars)
-        prices = 100 * np.exp(np.cumsum(noise))
+        factor = factor1 if i < mid else factor2
+        # 85% common factor, 15% idiosyncratic noise → high intra-group corr.
+        returns = 0.85 * factor + 0.15 * rng.normal(0, 0.005, n_bars)
+        prices = 100 * np.exp(np.cumsum(returns))
         data[sym] = prices
 
     return pd.DataFrame(data, index=dates)
@@ -97,7 +99,11 @@ class TestGetClusters:
         from unittest.mock import patch
 
         prices = _make_prices(TICKERS)  # group1=TICKERS[:5], group2=TICKERS[5:]
-        clusterer, mock_db = _make_clusterer(prices)
+        mock_db = MagicMock()
+        mock_db.get_prices.return_value = prices
+        # Disable the sanity gate so the test focuses purely on ranking logic,
+        # not on whether the synthetic data meets the correlation threshold.
+        clusterer = TickerClusterer(db=mock_db, min_cluster_size=2, min_intra_cluster_corr=0.0)
 
         # HDBSCAN labels: group1 = label 1, group2 = label 0 (insertion order
         # means label 0 would be returned first by cluster_map.values() if not
