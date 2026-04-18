@@ -94,6 +94,34 @@ class BobsBrain(Strategy):
         # Days before the same unordered pair can be scored again.
         self.cooldown_days = self.parameters.get('cooldown_days', 7)
 
+        # Minimum price for a ticker to pass the penny-stock filter.
+        self.penny_threshold = self.parameters.get('penny_threshold', 5.0)
+
+        # Hard ceiling on target portfolio size (Tier 2 tunable).
+        # K floats between max_k * quality_scale_min and max_k based on daily
+        # pool quality.  The buy loop's cash check enforces affordability; K
+        # itself is purely a quality / concentration target.
+        self.max_k = self.parameters.get('max_k', 20)
+
+        # Quality-scale curve for dynamic-K: pool_corr is divided by the pivot
+        # and the result is clamped to [min, max], then multiplied by max_k.
+        self.quality_scale_pivot = self.parameters.get('quality_scale_pivot', 0.7)
+        self.quality_scale_min = self.parameters.get('quality_scale_min', 0.5)
+        self.quality_scale_max = self.parameters.get('quality_scale_max', 1.5)
+
+        # TickerClusterer parameters (passed through at construction time).
+        self.cluster_lookback_days = self.parameters.get('cluster_lookback_days', 126)
+        self.hdbscan_min_cluster_size = self.parameters.get('hdbscan_min_cluster_size', 5)
+        self.hdbscan_min_samples = self.parameters.get('hdbscan_min_samples', 2)
+        self.pca_variance = self.parameters.get('pca_variance', 0.95)
+        self.min_coverage = self.parameters.get('min_coverage', 0.5)
+        self.hdbscan_metric = self.parameters.get('hdbscan_metric', 'precomputed')
+        self.hdbscan_selection_method = self.parameters.get('hdbscan_selection_method', 'eom')
+        self.hdbscan_cluster_selection_epsilon = self.parameters.get(
+            'hdbscan_cluster_selection_epsilon', 0.0,
+        )
+        self.min_intra_cluster_corr = self.parameters.get('min_intra_cluster_corr', 0.3)
+
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
         self._starting_portfolio_value = None
@@ -134,6 +162,15 @@ class BobsBrain(Strategy):
         self._clusterer = TickerClusterer(
             db=self._db,
             get_prices=self._cache.get_prices,
+            lookback_days=self.cluster_lookback_days,
+            min_cluster_size=self.hdbscan_min_cluster_size,
+            pca_variance=self.pca_variance,
+            min_coverage=self.min_coverage,
+            hdbscan_min_samples=self.hdbscan_min_samples,
+            hdbscan_metric=self.hdbscan_metric,
+            hdbscan_selection_method=self.hdbscan_selection_method,
+            hdbscan_cluster_selection_epsilon=self.hdbscan_cluster_selection_epsilon,
+            min_intra_cluster_corr=self.min_intra_cluster_corr,
         )
         self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
 
@@ -159,21 +196,43 @@ class BobsBrain(Strategy):
             run_id=self._run_id,
             mode=self._run_mode,
             settings={
-                'cluster_recompute_days': self.cluster_recompute_days,
+                # Data windows
                 'lookback_window': self.lookback_window,
+                'cluster_recompute_days': self.cluster_recompute_days,
+                # Position sizing
+                'max_k': self.max_k,
                 'min_position_pct': self.min_position_pct,
                 'max_position_pct': self.max_position_pct,
                 'target_deployed_pct': self.target_deployed_pct,
+                # Signal
                 'entry_threshold': self.entry_threshold,
                 'exit_threshold': self.exit_threshold,
                 'zscore_window': self.zscore_window,
+                # Scoring
                 'corr_long_window': self.corr_long_window,
                 'corr_short_window': self.corr_short_window,
                 'w_corr_long': self.w_corr_long,
                 'w_corr_short': self.w_corr_short,
                 'w_z_depth': self.w_z_depth,
+                # Discovery
                 'max_daily_candidates': self.max_daily_candidates,
                 'cooldown_days': self.cooldown_days,
+                # Filters
+                'penny_threshold': self.penny_threshold,
+                # Dynamic-K quality scale
+                'quality_scale_pivot': self.quality_scale_pivot,
+                'quality_scale_min': self.quality_scale_min,
+                'quality_scale_max': self.quality_scale_max,
+                # Clustering / HDBSCAN
+                'cluster_lookback_days': self.cluster_lookback_days,
+                'hdbscan_min_cluster_size': self.hdbscan_min_cluster_size,
+                'hdbscan_min_samples': self.hdbscan_min_samples,
+                'pca_variance': self.pca_variance,
+                'min_coverage': self.min_coverage,
+                'hdbscan_metric': self.hdbscan_metric,
+                'hdbscan_selection_method': self.hdbscan_selection_method,
+                'hdbscan_cluster_selection_epsilon': self.hdbscan_cluster_selection_epsilon,
+                'min_intra_cluster_corr': self.min_intra_cluster_corr,
             },
         )
 
@@ -251,14 +310,17 @@ class BobsBrain(Strategy):
         ]
 
         clusters = self._clusterer.get_clusters(
-            tickers, as_of=end_date, recompute_days=self.cluster_recompute_days,
+            tickers,
+            as_of=end_date,
+            recompute_days=self.cluster_recompute_days,
+            ticker_metadata=self._ticker_metadata,
         )
 
         today = end_date.date() if hasattr(end_date, 'date') else end_date
 
         pairs_scanned = 0
         candidates_found = 0
-        gate_counts = {'penny': 0, 'sector': 0, 'cooldown': 0}
+        gate_counts = {'penny': 0, 'cooldown': 0}
         new_penny_stocks: set[str] = set()
         scored_candidates: list[dict] = []
         budget_remaining = self.max_daily_candidates
@@ -294,30 +356,18 @@ class BobsBrain(Strategy):
                             continue
 
                     s1 = _get_series(stock1)
-                    if s1 is None or float(s1.iloc[-1]) < 5:
+                    if s1 is None or float(s1.iloc[-1]) < self.penny_threshold:
                         gate_counts['penny'] += 1
                         if s1 is not None:
                             new_penny_stocks.add(stock1)
                         continue
 
                     s2 = _get_series(stock2)
-                    if s2 is None or float(s2.iloc[-1]) < 5:
+                    if s2 is None or float(s2.iloc[-1]) < self.penny_threshold:
                         gate_counts['penny'] += 1
                         if s2 is not None:
                             new_penny_stocks.add(stock2)
                         continue
-
-                    meta1 = self._ticker_metadata.get(stock1)
-                    meta2 = self._ticker_metadata.get(stock2)
-                    if meta1 is not None and meta2 is not None:
-                        both_etf = meta1.get('is_etf') and meta2.get('is_etf')
-                        same_sector = (
-                            meta1.get('sector') and
-                            meta1.get('sector') == meta2.get('sector')
-                        )
-                        if not (both_etf or same_sector):
-                            gate_counts['sector'] += 1
-                            continue
 
                     pairs_scanned += 1
                     self._pair_evaluated_at[pair_key] = end_date
@@ -384,14 +434,15 @@ class BobsBrain(Strategy):
 
         pool_corr = median(corr_short_values) if corr_short_values else 0.0
 
-        portfolio_value = self.portfolio_value
-        available_cash = self.get_cash()
-        target_pos_pct = (self.min_position_pct + self.max_position_pct) / 2
-        k_base = max(1, int(available_cash / (target_pos_pct * portfolio_value))) if portfolio_value > 0 else 1
-        quality_scale = max(0.5, min(pool_corr / 0.7, 1.5))
-        k_target = max(1, round(k_base * quality_scale))
-
-        k_target = max(k_target, len(existing_scored))
+        # K is a quality-scaled fraction of max_k.  pool_corr / pivot gives the
+        # raw scale; clamped to [quality_scale_min, quality_scale_max] so K
+        # stays between max_k×min and max_k regardless of pool quality extremes.
+        # Affordability is not encoded here — the buy loop's cash check handles it.
+        quality_scale = max(
+            self.quality_scale_min,
+            min(pool_corr / self.quality_scale_pivot, self.quality_scale_max),
+        )
+        k_target = max(1, round(self.max_k * quality_scale))
 
         target_portfolio: dict[str, dict] = {}
         candidates_buy_ready = 0
@@ -762,17 +813,14 @@ class BobsBrain(Strategy):
             f"sector data ({coverage_pct:.0%}), {etf_count} ETFs, "
             f"{total - etf_count} stocks"
         )
-        if coverage_pct < 0.30:
-            logging.error(
-                "%s — coverage critically low; sector gate is effectively disabled. "
-                "Clear the ticker_metadata table and re-run to trigger a fresh fetch.",
-                msg,
-            )
-        elif coverage_pct < 0.70:
+        if coverage_pct < 0.50:
             logging.warning(
-                "%s — sector gate has limited effectiveness; many pairs will pass "
-                "the gate by default due to missing metadata.",
+                "%s — coverage low; %d tickers will be clustered in the unknown "
+                "partition, which may have poor intra-cluster correlation. "
+                "Clear the ticker_metadata table and re-run to trigger a fresh "
+                "SEC EDGAR fetch if this number is unexpectedly high.",
                 msg,
+                total - with_sector,
             )
         else:
             print(msg)
