@@ -158,3 +158,41 @@ CREATE TABLE IF NOT EXISTS failed_tickers (
     reason     TEXT,
     failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Tuning engine tables (Phase 1+)
+-- ---------------------------------------------------------------------------
+
+-- One row per Optuna study run.  The compute receipt columns let us plot
+-- marginal Sharpe gain per trial and make data-driven scaling decisions.
+CREATE TABLE IF NOT EXISTS tuning_studies (
+    study_id            SERIAL PRIMARY KEY,
+    study_name          VARCHAR(100) NOT NULL,
+    tier                INT NOT NULL,           -- 1, 2, or 3
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    train_start         DATE NOT NULL,
+    train_end           DATE NOT NULL,
+    holdout_start       DATE,                   -- NULL for single-window proof studies
+    holdout_end         DATE,
+    best_params         JSONB,
+    best_objective      NUMERIC,
+    holdout_metrics     JSONB,                  -- scored after study completes
+    -- compute receipt
+    n_trials_completed  INT,
+    n_trials_pruned     INT,
+    wall_clock_seconds  INT,
+    parallel_jobs       INT DEFAULT 1,
+    machine             VARCHAR(100)
+);
+
+-- Active parameter set for live / paper trading.
+-- BobsBrain.initialize() will add one line to read from here when Phase 5
+-- is implemented.  For now this table is populated manually or by the
+-- tuner after a study completes.
+CREATE TABLE IF NOT EXISTS active_parameters (
+    effective_date      DATE PRIMARY KEY,
+    regime_label        INT,                    -- NULL until Phase 4 regime detector
+    params              JSONB NOT NULL,
+    source_study_id     INT REFERENCES tuning_studies(study_id)
+);

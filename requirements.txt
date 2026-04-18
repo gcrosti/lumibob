@@ -7,3 +7,4 @@ python-dotenv
 statsmodels
 scikit-learn
 hdbscan
+optuna
