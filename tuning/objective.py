@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -95,7 +95,6 @@ class BacktestObjective:
 
         logger.info('Trial %d starting — suggested: %s', trial.number, trial_params)
 
-        start_ts = datetime.utcnow()
         run_id = self._run_backtest(full_params)
 
         if run_id is None:
@@ -118,7 +117,7 @@ class BacktestObjective:
         from lumibot.backtesting import YahooDataBacktesting
         from BobsBrain import BobsBrain
 
-        start_ts = datetime.utcnow()
+        start_ts = datetime.now(timezone.utc)
         try:
             BobsBrain.backtest(
                 YahooDataBacktesting,
@@ -174,22 +173,25 @@ class BacktestObjective:
         Returns -999.0 if the run produced no usable portfolio data.
         """
         with psycopg2.connect(_DB_URL) as conn:
-            snapshots = pd.read_sql(
-                """
-                SELECT time, portfolio_value, spy_value
-                FROM portfolio_snapshots
-                WHERE run_id = %s
-                ORDER BY time
-                """,
-                conn,
-                params=(run_id,),
-            )
             with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT time, portfolio_value, spy_value
+                    FROM portfolio_snapshots
+                    WHERE run_id = %s
+                    ORDER BY time
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
                 cur.execute(
                     "SELECT COUNT(*) FROM trades WHERE run_id = %s",
                     (run_id,),
                 )
                 n_trades: int = cur.fetchone()[0]
+
+        snapshots = pd.DataFrame(rows, columns=cols)
 
         if snapshots.empty or len(snapshots) < 3:
             logger.warning('run_id=%s: too few snapshots (%d)', run_id, len(snapshots))

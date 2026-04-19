@@ -61,7 +61,7 @@ TRAIN_END = date(2024, 3, 25)
 BUDGET = float(os.getenv('TUNE_BUDGET', '10000'))
 N_TRIALS = int(os.getenv('TUNE_N_TRIALS', '50'))
 TIMEOUT_HOURS = float(os.getenv('TUNE_TIMEOUT_HOURS', '4'))
-STUDY_NAME = os.getenv('TUNE_STUDY_NAME', 'tier2_proof_v1')
+STUDY_NAME = os.getenv('TUNE_STUDY_NAME', 'tier2_proof_v2')
 DB_URL = os.getenv('DB_URL', 'postgresql://postgres:lumibob@localhost:5432/lumibob')
 
 
