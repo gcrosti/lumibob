@@ -157,6 +157,28 @@ def defaults_for_tiers(*tiers: int) -> dict[str, Any]:
     }
 
 
+def normalize_weights(params: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a copy of *params* with the composite score weights normalised to
+    sum to 1.0.
+
+    Optuna stores the raw (pre-normalisation) weight values in ``best_params``
+    and ``trial.params``.  Call this before applying params to BobsBrain or
+    writing them to ``active_parameters``.
+    """
+    params = dict(params)
+    present = _WEIGHT_NAMES & set(params)
+    if not present:
+        return params
+    all_weights = {w: params.get(w, PARAMETER_SPACE[w].default) for w in _WEIGHT_NAMES}
+    total = sum(all_weights.values())
+    if total > 0:
+        for w in _WEIGHT_NAMES:
+            if w in params:
+                params[w] = all_weights[w] / total
+    return params
+
+
 def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
     """
     Ask an Optuna trial to suggest values for parameters in *tiers*.
