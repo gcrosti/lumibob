@@ -133,15 +133,16 @@ CREATE INDEX IF NOT EXISTS portfolio_snapshots_run_id_idx
 -- per-pair P&L can be computed across all runs. Replaces _trade_events.csv.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS trades (
-    id         SERIAL PRIMARY KEY,
-    run_id     VARCHAR(10) NOT NULL REFERENCES backtest_runs(run_id),
-    pair_id    INT         REFERENCES pairs(id),
-    symbol     VARCHAR(20) NOT NULL,
-    side       VARCHAR(4)  NOT NULL CHECK (side IN ('buy', 'sell')),
-    quantity   NUMERIC     NOT NULL,
-    price      NUMERIC     NOT NULL,
-    slippage   NUMERIC     NOT NULL DEFAULT 0,
-    filled_at  TIMESTAMPTZ NOT NULL
+    id          SERIAL PRIMARY KEY,
+    run_id      VARCHAR(10) NOT NULL REFERENCES backtest_runs(run_id),
+    pair_id     INT         REFERENCES pairs(id),
+    symbol      VARCHAR(20) NOT NULL,
+    side        VARCHAR(4)  NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity    NUMERIC     NOT NULL,
+    price       NUMERIC     NOT NULL,
+    slippage    NUMERIC     NOT NULL DEFAULT 0,
+    filled_at   TIMESTAMPTZ NOT NULL,
+    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing'))
 );
 
 CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx

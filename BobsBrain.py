@@ -271,6 +271,7 @@ class BobsBrain(Strategy):
             lead_data = _get_series(pair['lead_stock'])
             if lag_data is None or lead_data is None:
                 pair['action'] = 'sell'
+                pair['exit_reason'] = 'data_missing'
                 pair['composite_score'] = -1.0
                 continue
 
@@ -301,6 +302,7 @@ class BobsBrain(Strategy):
 
             if symbol in position_symbols and action == 'sell':
                 pair['action'] = 'sell'
+                pair['exit_reason'] = 'zscore_exit'
             else:
                 pair['action'] = 'hold'
 
@@ -486,6 +488,7 @@ class BobsBrain(Strategy):
                 continue
             if symbol not in target_portfolio and symbol in position_symbols:
                 pair['action'] = 'sell'
+                pair['exit_reason'] = 'displaced'
                 print(f"Displaced from target portfolio: {symbol} (score={pair.get('composite_score', 0):.3f})")
             elif symbol in target_portfolio and symbol not in position_symbols:
                 pair['action'] = 'buy'
@@ -531,6 +534,7 @@ class BobsBrain(Strategy):
                             price=float(price),
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
+                            exit_reason=pair.get('exit_reason'),
                         )
                     else:
                         print(f"Warning: could not log sell trade for {symbol} — price unavailable.")

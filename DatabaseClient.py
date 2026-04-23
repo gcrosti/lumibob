@@ -603,16 +603,23 @@ class DatabaseClient:
         filled_at: datetime,
         pair_id: int | None = None,
         slippage: float = 0.0,
+        exit_reason: str | None = None,
     ) -> None:
-        """Insert one trade fill row."""
+        """Insert one trade fill row.
+
+        exit_reason is only meaningful for sell-side trades:
+          'zscore_exit'  — spread reverted below exit_threshold
+          'displaced'    — pair crowded out of top-K by a higher-scoring candidate
+          'data_missing' — price data unavailable; reason could not be determined
+        """
         sql = """
             INSERT INTO trades
-                (run_id, pair_id, symbol, side, quantity, price, slippage, filled_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (run_id, pair_id, symbol, side, quantity, price, slippage, filled_at, exit_reason)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     run_id, pair_id, symbol, side,
-                    quantity, price, slippage, filled_at,
+                    quantity, price, slippage, filled_at, exit_reason,
                 ))
