@@ -105,9 +105,10 @@ class BobsBrain(Strategy):
 
         # Quality-scale curve for dynamic-K: pool_corr is divided by the pivot
         # and the result is clamped to [min, max], then multiplied by max_k.
+        # quality_scale_max must be <= 1.0 so that k_target never exceeds max_k.
         self.quality_scale_pivot = self.parameters.get('quality_scale_pivot', 0.7)
         self.quality_scale_min = self.parameters.get('quality_scale_min', 0.5)
-        self.quality_scale_max = self.parameters.get('quality_scale_max', 1.5)
+        self.quality_scale_max = self.parameters.get('quality_scale_max', 1.0)
 
         # TickerClusterer parameters (passed through at construction time).
         self.cluster_lookback_days = self.parameters.get('cluster_lookback_days', 126)

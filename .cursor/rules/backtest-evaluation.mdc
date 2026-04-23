@@ -36,7 +36,20 @@ LIMIT 1;
 As a fallback for runs that pre-date the DB, list files in `logs/` and find all files sharing the target `<6-char-id>`.
 
 **Step 2 — Load configuration**
-Read the `settings` JSONB field from `backtest_runs`. Report **all keys present**; typical current keys include: `lookback_window`, `cluster_recompute_days`, `min_position_pct`, `max_position_pct`, `target_deployed_pct`, `entry_threshold`, `exit_threshold`, `zscore_window`, `corr_long_window`, `corr_short_window`, `w_corr_long`, `w_corr_short`, `w_z_depth`, `max_daily_candidates`, `cooldown_days`. Older runs may still show `replacement_threshold`, `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `min_correlation`, etc. Include budget and date range from the backtest invocation or logs if stored. Fallback: read `logs/*_settings.json`.
+Read the `settings` JSONB field from `backtest_runs`. Report **all keys present**; typical current keys (post Phase 2) include:
+
+| Family | Keys |
+|---|---|
+| Data windows | `lookback_window`, `cluster_recompute_days` |
+| Position sizing | `max_k`, `min_position_pct`, `max_position_pct`, `target_deployed_pct` |
+| Signal | `entry_threshold`, `exit_threshold`, `zscore_window` |
+| Scoring | `corr_long_window`, `corr_short_window`, `w_corr_long`, `w_corr_short`, `w_z_depth` |
+| Discovery | `max_daily_candidates`, `cooldown_days` |
+| Filters | `penny_threshold` |
+| Dynamic-K | `quality_scale_pivot`, `quality_scale_min`, `quality_scale_max` |
+| Clustering / HDBSCAN | `cluster_lookback_days`, `hdbscan_min_cluster_size`, `hdbscan_min_samples`, `pca_variance`, `min_coverage`, `hdbscan_metric`, `hdbscan_selection_method`, `hdbscan_cluster_selection_epsilon`, `min_intra_cluster_corr` |
+
+Older runs (pre Phase 2) show only the first two families. Runs pre-dating the DB may still show legacy keys: `replacement_threshold`, `ticker_limit`, `min_daily_pairs`, `min_sharpe`, `min_correlation`. Include budget and date range from the backtest invocation or logs if stored. Fallback: read `logs/*_settings.json`.
 
 **Step 3 — Evaluate portfolio performance**
 Query `portfolio_snapshots` for the run. Compute and report:
@@ -61,7 +74,7 @@ Fallback: read `logs/*_stats.csv`.
 **Step 4 — Evaluate trade activity**
 Query the `trades` table (all rows are fills — no status filtering needed):
 ```sql
-SELECT symbol, side, quantity, price, slippage, filled_at, pair_id
+SELECT symbol, side, quantity, price, slippage, filled_at, pair_id, exit_reason
 FROM trades
 WHERE run_id = '<run_id>'
 ORDER BY filled_at;
@@ -71,6 +84,7 @@ Compute and report:
 - **Buy/sell split**: count of `side='buy'` vs `side='sell'`
 - **Avg slippage per trade**: mean of `slippage` where non-zero
 - **Symbols traded**: unique tickers and frequency
+- **Exit reason breakdown** (post Phase 2 runs only): `SELECT exit_reason, COUNT(*) FROM trades WHERE run_id = '<run_id>' AND side = 'sell' GROUP BY exit_reason` — distinguishes `zscore_exit` (genuine reversion), `displaced` (crowded out of top-K), `data_missing` (no price at re-score time). High `displaced` share relative to `zscore_exit` indicates the displacement mechanism is the primary exit driver rather than mean-reversion signal.
 
 To compute **win rate and avg P&L per pair**: match each `sell` to its corresponding `buy` by `symbol` (and optionally `pair_id`). P&L = `(sell_price - buy_price) * quantity - slippage`.
 

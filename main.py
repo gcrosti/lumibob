@@ -38,8 +38,8 @@ STRATEGY_PARAMETERS = {
 
     # --- Dynamic-K quality scale ---
     'quality_scale_pivot': 0.7,     # pool_corr is divided by this to get the raw scale
-    'quality_scale_min': 0.5,       # floor on quality_scale multiplier
-    'quality_scale_max': 1.5,       # ceiling on quality_scale multiplier
+    'quality_scale_min': 0.5,       # floor on quality_scale multiplier (K >= max_k * this)
+    'quality_scale_max': 1.0,       # ceiling on quality_scale multiplier (must be <= 1.0 to honour max_k hard ceiling)
 
     # --- Clustering / HDBSCAN ---
     'cluster_lookback_days': 126,               # calendar days of price history for clustering

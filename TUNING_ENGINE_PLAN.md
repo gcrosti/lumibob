@@ -9,6 +9,14 @@ Build a parameter tuning engine that optimizes LumiBob's strategy parameters
 based on market conditions so that LumiBob consistently outperforms the SPY
 index and ultimately maximizes returns.
 
+> **Goal revision (2026-04-23):** Phase 3.5 deep dive identified a structural constraint —
+> the strategy is long-only with beta ~0.5–0.8 vs SPY. A long-only anti-momentum book cannot
+> beat SPY consistently through parameter tuning alone, regardless of regime conditioning.
+> **Interim goal for Phase 4:** positive absolute returns with Sharpe > 0 across all three
+> test regimes. The SPY-beating goal is reinstated once a short leg is added (H1 fix),
+> making the strategy genuinely market-neutral. The short leg is being built in parallel
+> with Phase 4 and is targeted for completion before Phase 4.5 (dense study) launches.
+
 ## Confirmed design decisions
 
 
@@ -131,8 +139,10 @@ score = (mean_oos_return - rf) / oos_vol  -  λ * max_drawdown  -  μ * trade_co
         ─────────────────── Sharpe ───────  ── DD penalty ──   ── overfitting guard ──
 ```
 
-**Hard constraint**: out-of-sample return > SPY return for ≥ 60% of holdout
-windows. Implements the "consistently outperform SPY" requirement directly.
+**Hard constraint (Phase 4 coarse/dense, pre-short-leg):** out-of-sample Sharpe > 0 across
+all three test regimes. The original SPY-beating constraint is suspended until the short leg
+(H1 fix) is implemented — a long-only strategy cannot meet it structurally. The SPY constraint
+is reinstated for Phase 4.5 if the short leg is in place by then, or for Phase 5 otherwise.
 
 ### Tuning cadence
 
@@ -190,20 +200,31 @@ hdbscan.HDBSCAN(
 
 ---
 
-## Test battery (5 standard regimes)
+## Test battery (3-regime calibration set — Phase 3)
+
+Original plan called for 5 regimes. Trimmed to 3 after observing 9–17 h
+wall-clock per best-trial run; `trend_bull_2023` and `mixed_2024` deferred to
+Phase 4 (added as mandatory folds there).
 
 
-| Regime               | Window            | Tests                               |
-| -------------------- | ----------------- | ----------------------------------- |
-| Calm bull            | 2017-01 → 2017-12 | Underdeployment risk                |
-| Vol shock            | 2020-02 → 2020-06 | Drawdown control                    |
-| Sideways high-vol    | 2022-01 → 2022-12 | Pairs strategy's natural habitat    |
-| Trend-following bull | 2023-04 → 2023-12 | Cluster gate / sector gate behavior |
-| Mixed recent         | 2024-01 → 2024-09 | OOS vs. anything trained on ≤2023   |
+| Regime            | Window            | Tests                            | Best-trial run                  | Best-trial result    |
+| ----------------- | ----------------- | -------------------------------- | ------------------------------- | -------------------- |
+| Calm bull         | 2017-01 → 2017-12 | Underdeployment risk             | `3f7def`                        | −37.8% vs SPY +19.0% |
+| Vol shock         | 2020-02 → 2020-06 | Drawdown control                 | `feac3e` (partial, 62/104 days) | +0.3% vs SPY −10.8%  |
+| Sideways high-vol | 2022-01 → 2022-12 | Pairs strategy's natural habitat | `815f18`                        | −22.1% vs SPY −13.7% |
 
 
-**Pass criterion**: beats SPY in **≥ 4 of 5 regimes**, never has worse DD than
-SPY by more than 2pp.
+*Deferred regimes (Phase 4 mandatory folds):*
+
+
+| Regime               | Window            | Reason deferred                             |
+| -------------------- | ----------------- | ------------------------------------------- |
+| Trend-following bull | 2023-04 → 2023-12 | Wall-clock budget; redundant for gate check |
+| Mixed recent         | 2024-01 → 2024-09 | OOS signal better used in Phase 4 holdouts  |
+
+
+**Phase 3 gate criterion**: best-trial composite score beats baseline in **≥ 2 of 3**
+completed regimes (lower bar reflects trimmed set; full 5-regime gate applies in Phase 4).
 
 ---
 
@@ -317,15 +338,18 @@ start coarse; densify only if the gate is met.**
 > all subsequent backtests to produce meaningful signals.
 
 
-| Phase           | Deliverable                                                                                                                                              | Active work | Backtest wait | Compute envelope | Gate to advance                                                          |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------------- | ---------------- | ------------------------------------------------------------------------ |
-| **0** ✓         | Expose magic numbers as parameters; verify no behavior change                                                                                            | 2-3 hrs     | 5.5 hrs       | trivial          | Verification backtest passed (e52b20 vs b94e19 baseline)                 |
-| **2**           | HDBSCAN (corr distance + sector pre-partition + Option B unknown bucket) + remove sector/ETF gate + harden metadata pre-fetch + `max_k` K-ballooning fix | 1-2 days    | ~30-60 min    | ~2 hrs           | Cluster noise rate drops measurably; trial time < 1hr; K stays bounded   |
-| **1**           | Tuning harness skeleton (`parameter_space`, `objective`, `walk_forward`); one Optuna proof study on Tier 2, single 12mo window                           | 1 day       | 1 hr          | 1 hr             | Tuner produces param set that beats default on holdout, even marginally  |
-| **3**           | 5-regime battery + comparison harness vs. baseline                                                                                                       | half day    | 2 hrs         | 2 hrs            | Battery distinguishes a known-good vs. known-bad param set (calibration) |
-| **4 (coarse)**  | Regime detector (FRED + VIX + dispersion) + Tier 3 lookup table; 12 folds × 50 trials = 600 backtests                                                    | half day    | ~24 hrs       | 24 hrs           | Holdout Sharpe distribution beats baseline at p<0.10                     |
-| **4.5 (dense)** | Densify to 36 folds × 100 trials = 3,600 backtests                                                                                                       | minimal     | ~72 hrs       | 72 hrs           | Same gate at p<0.05                                                      |
-| **5**           | Scheduled tuning job → `active_parameters`; strategy reads from there; ±20% week-over-week cap                                                           | 1 day       | —             | 6 hrs/month      | Live shadow run beats baseline for 4 consecutive weeks                   |
+| Phase           | Deliverable                                                                                                                                                                                                             | Active work | Backtest wait  | Compute envelope | Gate to advance                                                                             |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | -------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| **0** ✓         | Expose magic numbers as parameters; verify no behavior change                                                                                                                                                           | 2-3 hrs     | 5.5 hrs        | trivial          | Verification backtest passed (e52b20 vs b94e19 baseline)                                    |
+| **2** ✓         | HDBSCAN (corr distance + sector pre-partition + Option B unknown bucket) + remove sector/ETF gate + harden metadata pre-fetch + `max_k` K-ballooning fix                                                                | 1-2 days    | ~30-60 min     | ~2 hrs           | Cluster noise rate drops measurably; trial time < 1hr; K stays bounded                      |
+| **1** ✓         | Tuning harness skeleton (`parameter_space`, `objective`, `walk_forward`); one Optuna proof study on Tier 2, single 12mo window                                                                                          | 1 day       | 1 hr           | 1 hr             | Tuner produces param set that beats default on holdout, even marginally                     |
+| **Pre-3** ✓     | SEC EDGAR metadata refresh — `scripts/refresh_ticker_metadata.py`; clears dotted-symbol artifacts, uses broader `company_tickers.json`, retries all NULL-sector rows; **result: 22% → 74.5% coverage (+4,621 tickers)** | ~20 min     | —              | trivial          | Coverage crosses 50% ✓; re-running Phase 1 study NOT required (Phase 1 gate already passed) |
+| **3**           | 3-regime battery (calm_bull_2017, vol_shock_2020, sideways_2022) vs. baseline; `trend_bull_2023` / `mixed_2024` deferred to Phase 4 mandatory folds — actual wall-clock: ~36 hrs (9–17 h/run cold)                      | half day    | ~36 hrs actual | 36 hrs           | best-trial beats baseline in ≥ 2/3 completed regimes                                        |
+| **3.5**  | Strategy deep dive: 6 analysis notebooks (regime P&L, signal quality, pair selection, portfolio beta, timing, tuning engine health); findings writeup with 1–3 hypotheses and recommended changes; go/no-go for Phase 4 — see `STRATEGY_DEEPDIVE_PLAN.md` | half day | — | trivial | `STRATEGY_DEEPDIVE_FINDINGS.md` written; go/no-go decision recorded in Decision Point 4.5 |
+| **Pre-4** | Pre-warm `stock_prices` for all Phase 4 fold windows (2022-01 → 2026-03); cap `max_daily_candidates` upper bound to 300 in `parameter_space.py`; add 20-min per-trial wall-clock timeout | ~2 hrs | — | trivial | All fold windows warm in DB; no trial exceeds 20 min |
+| **4 (coarse)**  | Regime detector (FRED + VIX + dispersion) + Tier 3 lookup table; 12 folds × 50 trials = 600 backtests; fold windows restricted to 2022+ warm data; `trend_bull_2023` / `mixed_2024` as mandatory holdout folds (deferred from Phase 3); also run Phase 3 best-trial (static) through same 12 folds as comparator (~12 extra backtests, ~1 hr) | half day | ~25 hrs | 25 hrs | Positive Sharpe across all three test regimes; regime-conditioned params beat Phase 3 best-trial (static) at p<0.10 — validates regime conditioning adds value |
+| **4.5 (dense)** | Densify to 36 folds × 100 trials = 3,600 backtests — plan as Friday-night launch. **Run with short leg if implemented; SPY-beating gate reinstated if so.** | minimal | ~75 hrs | 75 hrs | If short leg in place: SPY-beating in ≥ 60% of holdout windows at p<0.05. If not: same Sharpe gate at p<0.05 vs Phase 3 best-trial (static) |
+| **5**           | Scheduled tuning job → `active_parameters`; strategy reads from there; ±20% week-over-week cap                                                                                                                          | 1 day       | —              | 6 hrs/month      | Live shadow run beats baseline for 4 consecutive weeks                                      |
 
 
 **Total minimum wall-clock**: ~10 days continuous, including 3 explicit
@@ -333,34 +357,46 @@ decision points before any large compute spend.
 
 ### Decision points (no/no-go gates)
 
-1. **After Phase 2** — Did trial time drop to < 1hr? Does cluster noise rate
-  fall measurably? Does K stay bounded with `max_k`? If no on any: fix
-   before Phase 1.
-2. **After Phase 1** — Did the proof study produce sensible suggestions? If
-  no: fix objective/space before continuing.
-3. **After Phase 3** — Do battery results validate Phase 2 changes? Compare
-  to pre-Phase-2 baseline. If regression: fix before Phase 4.
-4. **After Phase 4 coarse** — Does coarse run beat baseline at p<0.10? If
-  no: stop, rethink objective or features. Only densify (Phase 4.5) if yes.
+1. **After Phase 2** ✓ — Trial time dropped to ~7 min (warm cache). K stays bounded. Noise rate reduced. Passed.
+2. **After Phase 1** ✓ — Best trial (score -3.056) beat baseline (-4.712) by +1.656 delta. Harness validated. Passed.
+  - Note: best trial returned -3.89% vs SPY +9.84% on Jan–Mar 2024 (strong bull market — structurally hostile to market-neutral pairs). Not a concern; real verdict is Phase 3.
+3. **Pre-Phase-3** ✓ — SEC EDGAR metadata refresh completed. Coverage: 22% → **74.5%** (+4,621 tickers). All 8,204 universe tickers now have metadata rows. 259 dotted-symbol artifacts cleaned. Re-running Phase 1 study skipped (Jan–Mar 2024 bull market is not the right benchmark; compute better spent on Phase 3 multi-regime battery).
+4. **After Phase 3** — Does best-trial beat baseline in ≥ 2/3 regimes? Observations so far: vol_shock_2020 best-trial +0.3% vs SPY −10.8% (strong signal); calm_bull_2017 and sideways_2022 both negative (expected for market-neutral strategy in trending/bear markets). Gate verdict pending baseline comparison. `trend_bull_2023` / `mixed_2024` added as mandatory folds in Phase 4.
+4.5. **After Phase 3.5 deep dive** ✓ — GO, with revised goal. Phase 3 gate FAIL (1/3). Four hypotheses: (H1) structural long-only SPY beta ~0.57 — beating SPY is not achievable through tuning alone without a short leg; (H2/H3) exit/entry parameters tuned on a bull market — Phase 4 sideways folds fix this without pre-work; (H4) 75.6% displacement exits — working as intended, no intervention. **Goal revised:** Phase 4 target is positive Sharpe across regimes, not SPY-beating. SPY gate reinstated once short leg is implemented (targeted before Phase 4.5). Short leg is Priority 1 and runs as a parallel workstream to Phase 4. `max_portfolio_beta` cap added as interim H1 mitigation during Phase 4 coarse. See `STRATEGY_DEEPDIVE_FINDINGS.md`.
+5. **After Phase 4 coarse** — Does regime-conditioned system beat Phase 3 best-trial (static, same 12 folds) at p<0.10? If no: regime conditioning is not adding value over tuning alone — stop, rethink detector features or objective. Only densify (Phase 4.5) if yes.
 
 ---
 
-## Benchmark timing (measured 2026-04-17)
+## Benchmark timing (measured 2026-04-17, updated 2026-04-21)
 
-Jan 2 → Mar 25 2024, full Alpaca universe (~4,900 symbols), 58 trading days:
-
+### Short window (Jan 2 → Mar 25 2024, ~4,900 symbols, 58 trading days)
 
 | Cache state      | Wall-clock       | Notes                                             |
 | ---------------- | ---------------- | ------------------------------------------------- |
 | Cold (first run) | ~4.7 hours       | All prices fetched from Alpaca; one-time cost     |
 | **Warm**         | **~3–7 minutes** | Prices already in DB; all tuning trials land here |
 
+### Full-year window (Phase 3 actuals, ~250 trading days, best-trial params)
 
-**Implications for the tuning engine:**
+| Regime / params       | Wall-clock  | Notes                                                           |
+| --------------------- | ----------- | --------------------------------------------------------------- |
+| calm_bull_2017 / best | ~17 hrs     | Cold fetch + max_daily_candidates=487                           |
+| vol_shock_2020 / best | ~3 hrs      | 5-month window, cold (crashed at 62/104 days)                   |
+| sideways_2022 / best  | ~9 hrs      | Partially warm (stock_prices starts 2022-01-24)                 |
+| calm_bull_2017 / base | ~5 hrs est. | Cold, but default max_daily_candidates=200 is ~2× faster        |
 
-- Pre-warm `StockDataCache` once per tuning window before Optuna starts
-- 100 trials × ~5 min / 4 parallel jobs ≈ **2 hours per study**
-- Phase 4 dense (3,600 trials / 4 jobs) ≈ **20–30 hours** — feasible locally overnight + weekend
+**Key Phase 3 findings for Phase 4 planning:**
+
+- `stock_prices` only covers **2022-01-24 → present**. Any fold outside this range triggers a cold Alpaca fetch that turns a 5-min warm trial into a multi-hour stall.
+- `max_daily_candidates=487` (Phase 1 best-trial) is ~2.5× slower per day than the default 200. Must cap the Optuna search space upper bound to prevent runaway trials.
+- **Phase 4 timing estimate still holds** if and only if: (a) all fold windows are pre-warmed in `stock_prices` before Optuna starts, (b) `max_daily_candidates` is capped at 300, and (c) a 20-min per-trial timeout prunes anything pathological.
+
+**Revised implications:**
+
+- Pre-warm all fold windows in `stock_prices` (one-time ~2h cost) before Phase 4 Optuna launch
+- Cap `max_daily_candidates` upper bound to 300 in `parameter_space.py`
+- 600 coarse trials × ~5 min ÷ 4 parallel workers ≈ **~12–15 hours** — feasible overnight
+- Phase 4.5 dense (3,600 trials ÷ 4 workers) ≈ **~75 hours** — plan as a Friday-night launch
 
 ## Known concerns / observations
 
@@ -395,11 +431,13 @@ quality_scale = clamp(pool_corr / quality_scale_pivot, quality_scale_min, qualit
 k_target = max(1, round(max_k * quality_scale))  # K floats between max_k×min and max_k
 ```
 
-`quality_scale` now bounds K between `max_k × quality_scale_min` and `max_k`
-based on daily pool quality. The buy loop's existing `if available_cash <
-per_stock_budget: continue` already enforces affordability — no need to encode
-it in K. Genuine rotation is now possible: positions ranked below `k_target`
-in composite score get displaced and sold each day.
+`quality_scale` bounds K between `max_k × quality_scale_min` and `max_k ×
+quality_scale_max`. `quality_scale_max` must be set to **≤ 1.0** (default: 1.0)
+to enforce the `max_k` hard ceiling — values above 1.0 allow K to exceed
+`max_k` and reproduce the ballooning behaviour. The buy loop's existing
+`if available_cash < per_stock_budget: continue` already enforces affordability
+— no need to encode it in K. Genuine rotation is now possible: positions ranked
+below `k_target` in composite score get displaced and sold each day.
 
 **Why Phase 2, not Phase 0:** This is a behavioral change (not just a parameter
 expose), so it belongs in its own phase with a before/after comparison. Without
