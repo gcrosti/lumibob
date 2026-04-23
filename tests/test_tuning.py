@@ -83,14 +83,13 @@ class TestWalkForward:
         wf = WalkForward(train_months=6, holdout_months=3)
         folds = wf.generate_folds(date(2020, 1, 1), date(2023, 12, 31))
         assert len(folds) >= 2
+        from datetime import timedelta
         for i in range(1, len(folds)):
             prev, curr = folds[i - 1], folds[i]
-            # Each new train_start is the previous holdout_start.
+            # Each new train_start is the previous holdout_start (rolling window).
             assert curr.train_start == prev.holdout_start
-            # No gap between train_end and holdout_start.
-            from datetime import timedelta
-            assert curr.train_start == prev.holdout_start
-            assert prev.holdout_end + timedelta(days=1) == curr.train_end + timedelta(days=1) or True
+            # Successive holdout windows must not overlap.
+            assert curr.holdout_start > prev.holdout_end
 
     def test_holdout_never_exceeds_end(self):
         wf = WalkForward(train_months=12, holdout_months=3)
