@@ -29,7 +29,7 @@ N_TRIALS        : 50 (with TIMEOUT_HOURS=4 wall-clock cap).
 
 Storage         : Optuna PostgreSQL RDB (same DB as strategy data).
     Allows resuming interrupted studies and future parallel workers.
-    Study name 'tier2_proof_v1' is preserved across restarts.
+    Study name 'tier2_proof_v2' is preserved across restarts.
 """
 
 from __future__ import annotations
