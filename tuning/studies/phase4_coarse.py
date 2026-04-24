@@ -90,7 +90,8 @@ BUDGET        = 10_000
 TRIAL_TIMEOUT = 1200   # seconds — 20 min hard cap per trial
 
 # Phase 1 best-trial study name — used to seed base params.
-PHASE1_STUDY  = 'tier2_proof_v1'
+# tier2_proof_v2 is the passing study (v1 had all pruned trials due to a timezone bug).
+PHASE1_STUDY  = 'tier2_proof_v2'
 
 # Phase 4 coarse tunes Tier 3 parameters only.
 # All Tier 1 and Tier 2 values are held fixed at Phase 1 best-trial values.
