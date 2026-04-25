@@ -85,7 +85,7 @@ FOLD_START    = date(2022, 1, 1)
 FOLD_END      = date(2025, 1, 31)   # 12 non-overlapping 3+1 month folds
 TRAIN_MONTHS  = 3
 HOLDOUT_MONTHS = 1
-N_TRIALS      = 50
+N_TRIALS      = 15   # reduced from 50: 2022 trials take ~90 min each; 15 gives TPE enough signal
 BUDGET        = 10_000
 TRIAL_TIMEOUT = 1200   # seconds — 20 min hard cap per trial
 
