@@ -203,6 +203,14 @@ def run_fold(
             k: v for k, v in base_params.items()
             if PARAMETER_SPACE[k].tier not in PHASE4_TIERS
         }
+        # Clamp any base param that exceeds the current search-space bound.
+        # Phase 1 found max_daily_candidates=487; the bound was tightened to 300
+        # for Phase 4 to keep per-trial time under 20 min.
+        for k, spec in PARAMETER_SPACE.items():
+            if k in fold_base and spec.high is not None:
+                fold_base[k] = min(fold_base[k], spec.high)
+            if k in fold_base and spec.low is not None:
+                fold_base[k] = max(fold_base[k], spec.low)
 
         objective = BacktestObjective(
             train_start=fold.train_start,
