@@ -1,0 +1,26 @@
+---
+description: Discipline for avoiding shallow first-pass conclusions across all tasks
+alwaysApply: true
+---
+
+# Verify Before Proceeding
+
+The most common source of wasted work is accepting an initial result, hypothesis, or proposed fix at face value. Before proceeding, verify the premise.
+
+## Before committing to an analysis approach
+
+Check that the required data actually exists. A silent failure — 100% `data_missing`, an empty result set, an implausibly round number — is a red flag, not a result. If a fallback or proxy is used, state it explicitly and quantify the loss of precision.
+
+## Before writing a hypothesis or conclusion
+
+Draft conclusions from data, not toward data. Write the hypothesis after the evidence is in hand, not before. If the evidence section contradicts the headline claim, fix the headline — not the evidence.
+
+## Before proposing a fix
+
+- Read the evidence you just gathered. A fix that suppresses a mechanism the evidence shows is working is wrong.
+- Check whether the problem is already addressed elsewhere. If a feature is already producing better outcomes than the alternative, "make it do less" requires positive justification, not just a hunch.
+- Finally, is the solution as simple as it can be? Simple is fantastic, simplistic is fatal.
+
+## When a result looks clean or obvious
+
+Ask: what would make this wrong? A result that perfectly confirms the prior hypothesis, or a solution that requires no trade-offs, is worth a second look before committing to it.
