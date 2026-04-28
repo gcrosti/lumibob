@@ -133,15 +133,16 @@ CREATE INDEX IF NOT EXISTS portfolio_snapshots_run_id_idx
 -- per-pair P&L can be computed across all runs. Replaces _trade_events.csv.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS trades (
-    id         SERIAL PRIMARY KEY,
-    run_id     VARCHAR(10) NOT NULL REFERENCES backtest_runs(run_id),
-    pair_id    INT         REFERENCES pairs(id),
-    symbol     VARCHAR(20) NOT NULL,
-    side       VARCHAR(4)  NOT NULL CHECK (side IN ('buy', 'sell')),
-    quantity   NUMERIC     NOT NULL,
-    price      NUMERIC     NOT NULL,
-    slippage   NUMERIC     NOT NULL DEFAULT 0,
-    filled_at  TIMESTAMPTZ NOT NULL
+    id          SERIAL PRIMARY KEY,
+    run_id      VARCHAR(10) NOT NULL REFERENCES backtest_runs(run_id),
+    pair_id     INT         REFERENCES pairs(id),
+    symbol      VARCHAR(20) NOT NULL,
+    side        VARCHAR(4)  NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity    NUMERIC     NOT NULL,
+    price       NUMERIC     NOT NULL,
+    slippage    NUMERIC     NOT NULL DEFAULT 0,
+    filled_at   TIMESTAMPTZ NOT NULL,
+    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing'))
 );
 
 CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
@@ -157,4 +158,42 @@ CREATE TABLE IF NOT EXISTS failed_tickers (
     symbol     VARCHAR(20) PRIMARY KEY,
     reason     TEXT,
     failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- Tuning engine tables (Phase 1+)
+-- ---------------------------------------------------------------------------
+
+-- One row per Optuna study run.  The compute receipt columns let us plot
+-- marginal Sharpe gain per trial and make data-driven scaling decisions.
+CREATE TABLE IF NOT EXISTS tuning_studies (
+    study_id            SERIAL PRIMARY KEY,
+    study_name          VARCHAR(100) NOT NULL,
+    tier                INT NOT NULL,           -- 1, 2, or 3
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    train_start         DATE NOT NULL,
+    train_end           DATE NOT NULL,
+    holdout_start       DATE,                   -- NULL for single-window proof studies
+    holdout_end         DATE,
+    best_params         JSONB,
+    best_objective      NUMERIC,
+    holdout_metrics     JSONB,                  -- scored after study completes
+    -- compute receipt
+    n_trials_completed  INT,
+    n_trials_pruned     INT,
+    wall_clock_seconds  INT,
+    parallel_jobs       INT DEFAULT 1,
+    machine             VARCHAR(100)
+);
+
+-- Active parameter set for live / paper trading.
+-- BobsBrain.initialize() will add one line to read from here when Phase 5
+-- is implemented.  For now this table is populated manually or by the
+-- tuner after a study completes.
+CREATE TABLE IF NOT EXISTS active_parameters (
+    effective_date      DATE PRIMARY KEY,
+    regime_label        INT,                    -- NULL until Phase 4 regime detector
+    params              JSONB NOT NULL,
+    source_study_id     INT REFERENCES tuning_studies(study_id)
 );
