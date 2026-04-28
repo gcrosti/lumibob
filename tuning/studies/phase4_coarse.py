@@ -177,11 +177,17 @@ def run_fold(
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
     )
 
-    existing = len(study.trials)
+    # Count only finalized trials (COMPLETE or PRUNED) — RUNNING/FAIL do not count
+    # so orphaned trials from crashed workers do not eat into the quota.
+    finalized = sum(
+        1 for t in study.trials
+        if t.state.name in ('COMPLETE', 'PRUNED')
+    )
+    existing = finalized
     remaining = max(0, N_TRIALS - existing)
 
     if dry_run:
-        print(f'  [dry-run] would run {remaining} trial(s) (study already has {existing})')
+        print(f'  [dry-run] would run {remaining} trial(s) (finalized: {existing}/{N_TRIALS})')
         return FoldResult(
             fold_idx=fold_idx,
             train_start=fold.train_start,
@@ -196,7 +202,7 @@ def run_fold(
         )
 
     if remaining > 0:
-        print(f'  Running {remaining} trial(s) (study already has {existing}/{N_TRIALS})...')
+        print(f'  Running {remaining} trial(s) (finalized: {existing}/{N_TRIALS})...')
 
         # Base params: Phase 1 best (all tiers), minus Tier 3 (which Optuna will suggest).
         fold_base = {
@@ -229,7 +235,7 @@ def run_fold(
             show_progress_bar=False,
         )
     else:
-        print(f'  Fold already complete ({existing}/{N_TRIALS} trials).')
+        print(f'  Fold already complete ({existing}/{N_TRIALS} finalized).')
 
     # --- Best training params ---
     try:
