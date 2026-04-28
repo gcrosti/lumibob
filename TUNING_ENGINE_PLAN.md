@@ -9,13 +9,15 @@ Build a parameter tuning engine that optimizes LumiBob's strategy parameters
 based on market conditions so that LumiBob consistently outperforms the SPY
 index and ultimately maximizes returns.
 
-> **Goal revision (2026-04-23):** Phase 3.5 deep dive identified a structural constraint —
-> the strategy is long-only with beta ~0.5–0.8 vs SPY. A long-only anti-momentum book cannot
-> beat SPY consistently through parameter tuning alone, regardless of regime conditioning.
-> **Interim goal for Phase 4:** positive absolute returns with Sharpe > 0 across all three
-> test regimes. The SPY-beating goal is reinstated once a short leg is added (H1 fix),
-> making the strategy genuinely market-neutral. The short leg is being built in parallel
-> with Phase 4 and is targeted for completion before Phase 4.5 (dense study) launches.
+> **Goal revision (2026-04-24):** Phase 3.5 deep dive identified two structural problems
+> above the parameter-tuning layer. (H1) The strategy is long-only with beta ~0.5–0.8 —
+> a long-only anti-momentum book cannot beat SPY through tuning alone. (H5) Only 12% of
+> traded pairs have stationary spreads; even a perfectly dollar-neutral version of the
+> current strategy loses money (-8.37 avg P&L per trade), and z-score entries have no
+> discriminatory power. **The SPY-beating goal requires both fixes:** a cointegration gate
+> in pair selection (H5) and a short leg (H1). **Interim goal for Phase 4:** positive
+> Sharpe > 0 across all three test regimes, achievable once the cointegration gate is in
+> place. SPY-beating gate reinstated for paper trade phase after both H1 and H5 are resolved.
 
 ## Confirmed design decisions
 
@@ -346,10 +348,10 @@ start coarse; densify only if the gate is met.**
 | **Pre-3** ✓     | SEC EDGAR metadata refresh — `scripts/refresh_ticker_metadata.py`; clears dotted-symbol artifacts, uses broader `company_tickers.json`, retries all NULL-sector rows; **result: 22% → 74.5% coverage (+4,621 tickers)** | ~20 min     | —              | trivial          | Coverage crosses 50% ✓; re-running Phase 1 study NOT required (Phase 1 gate already passed) |
 | **3**           | 3-regime battery (calm_bull_2017, vol_shock_2020, sideways_2022) vs. baseline; `trend_bull_2023` / `mixed_2024` deferred to Phase 4 mandatory folds — actual wall-clock: ~36 hrs (9–17 h/run cold)                      | half day    | ~36 hrs actual | 36 hrs           | best-trial beats baseline in ≥ 2/3 completed regimes                                        |
 | **3.5**  | Strategy deep dive: 6 analysis notebooks (regime P&L, signal quality, pair selection, portfolio beta, timing, tuning engine health); findings writeup with 1–3 hypotheses and recommended changes; go/no-go for Phase 4 — see `STRATEGY_DEEPDIVE_PLAN.md` | half day | — | trivial | `STRATEGY_DEEPDIVE_FINDINGS.md` written; go/no-go decision recorded in Decision Point 4.5 |
-| **Pre-4** | Pre-warm `stock_prices` for all Phase 4 fold windows (2022-01 → 2026-03); cap `max_daily_candidates` upper bound to 300 in `parameter_space.py`; add 20-min per-trial wall-clock timeout | ~2 hrs | — | trivial | All fold windows warm in DB; no trial exceeds 20 min |
+| **Pre-4** | (1) Add cointegration gate to pair discovery (Engle-Granger ADF on spread, `coint_pvalue_threshold` param); run validation backtest on sideways_2022 — stationarity rate among entered pairs must reach > 60% and dollar-neutral win rate > 50% before Phase 4 launches. (2) Pre-warm `stock_prices` for all Phase 4 fold windows (2022-01 → 2026-03); cap `max_daily_candidates` upper bound to 300 in `parameter_space.py`; add 20-min per-trial wall-clock timeout | ~1 day | ~3 hrs | ~5 hrs | Cointegration validation backtest passes; all fold windows warm; no trial exceeds 20 min |
 | **4 (coarse)**  | Regime detector (FRED + VIX + dispersion) + Tier 3 lookup table; 12 folds × 50 trials = 600 backtests; fold windows restricted to 2022+ warm data; `trend_bull_2023` / `mixed_2024` as mandatory holdout folds (deferred from Phase 3); also run Phase 3 best-trial (static) through same 12 folds as comparator (~12 extra backtests, ~1 hr) | half day | ~25 hrs | 25 hrs | Positive Sharpe across all three test regimes; regime-conditioned params beat Phase 3 best-trial (static) at p<0.10 — validates regime conditioning adds value |
-| **4.5 (dense)** | Densify to 36 folds × 100 trials = 3,600 backtests — plan as Friday-night launch. **Run with short leg if implemented; SPY-beating gate reinstated if so.** | minimal | ~75 hrs | 75 hrs | If short leg in place: SPY-beating in ≥ 60% of holdout windows at p<0.05. If not: same Sharpe gate at p<0.05 vs Phase 3 best-trial (static) |
-| **5**           | Scheduled tuning job → `active_parameters`; strategy reads from there; ±20% week-over-week cap                                                                                                                          | 1 day       | —              | 6 hrs/month      | Live shadow run beats baseline for 4 consecutive weeks                                      |
+| **4.5 (dense)** | Densify to 36 folds × 100 trials = 3,600 backtests — plan as Friday-night launch | minimal | ~75 hrs | 75 hrs | Positive Sharpe across all three test regimes at p<0.05 vs Phase 3 best-trial (static); SPY-beating gate deferred to post-short-leg paper trade |
+| **5**           | Scheduled tuning job → `active_parameters`; `BobsBrain` reads from there on startup; ±20% week-over-week cap enforced | 1 day | — | 6 hrs/month | Scheduled job runs cleanly for 4 consecutive weeks and `active_parameters` updates correctly on each cycle — no paper trade gate here; paper trade validation deferred to post-short-leg (H1 fix), when live testing with a market-neutral strategy produces meaningful signal |
 
 
 **Total minimum wall-clock**: ~10 days continuous, including 3 explicit
@@ -362,8 +364,9 @@ decision points before any large compute spend.
   - Note: best trial returned -3.89% vs SPY +9.84% on Jan–Mar 2024 (strong bull market — structurally hostile to market-neutral pairs). Not a concern; real verdict is Phase 3.
 3. **Pre-Phase-3** ✓ — SEC EDGAR metadata refresh completed. Coverage: 22% → **74.5%** (+4,621 tickers). All 8,204 universe tickers now have metadata rows. 259 dotted-symbol artifacts cleaned. Re-running Phase 1 study skipped (Jan–Mar 2024 bull market is not the right benchmark; compute better spent on Phase 3 multi-regime battery).
 4. **After Phase 3** — Does best-trial beat baseline in ≥ 2/3 regimes? Observations so far: vol_shock_2020 best-trial +0.3% vs SPY −10.8% (strong signal); calm_bull_2017 and sideways_2022 both negative (expected for market-neutral strategy in trending/bear markets). Gate verdict pending baseline comparison. `trend_bull_2023` / `mixed_2024` added as mandatory folds in Phase 4.
-4.5. **After Phase 3.5 deep dive** ✓ — GO, with revised goal. Phase 3 gate FAIL (1/3). Four hypotheses: (H1) structural long-only SPY beta ~0.57 — beating SPY is not achievable through tuning alone without a short leg; (H2/H3) exit/entry parameters tuned on a bull market — Phase 4 sideways folds fix this without pre-work; (H4) 75.6% displacement exits — working as intended, no intervention. **Goal revised:** Phase 4 target is positive Sharpe across regimes, not SPY-beating. SPY gate reinstated once short leg is implemented (targeted before Phase 4.5). Short leg is Priority 1 and runs as a parallel workstream to Phase 4. `max_portfolio_beta` cap added as interim H1 mitigation during Phase 4 coarse. See `STRATEGY_DEEPDIVE_FINDINGS.md`.
+4.5. **After Phase 3.5 deep dive** ✓ — CONDITIONAL GO. Five hypotheses identified: (H1) long-only SPY beta ~0.57; (H2/H3) parameters tuned on bull market; (H4) displacement working as intended; **(H5) only 12% of traded pairs have stationary spreads — dollar-neutral simulation confirms strategy still loses money (-8.37 avg P&L) even with perfect hedging, z-score entry signal has no discriminatory power.** H5 is the deepest problem: pair selection finds correlated but not cointegrated stocks. **Pre-Phase-4 gate added:** cointegration gate (Engle-Granger ADF) must be implemented and validated before launching 600-trial study — running Phase 4 on non-stationary pairs wastes compute and produces uninterpretable results. Short leg (H1) built in parallel with Phase 4; targeted before Phase 4.5. Phase 4 goal: positive Sharpe across regimes (SPY gate deferred until H1 + H5 fixed). See `STRATEGY_DEEPDIVE_FINDINGS.md`.
 5. **After Phase 4 coarse** — Does regime-conditioned system beat Phase 3 best-trial (static, same 12 folds) at p<0.10? If no: regime conditioning is not adding value over tuning alone — stop, rethink detector features or objective. Only densify (Phase 4.5) if yes.
+6. **After Phase 5** — Does the scheduled tuning job run cleanly for 4 consecutive weeks and update `active_parameters` correctly on each cycle? Infrastructure gate only — no paper trade or live performance requirement. Paper trade validation is deferred until after the short leg (H1 fix) is implemented; running a paper trade with a long-only strategy produces no meaningful signal given the known structural ceiling.
 
 ---
 

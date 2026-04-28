@@ -4,11 +4,16 @@ objective — BacktestObjective for Optuna.
 Wraps a BobsBrain backtest and converts the results into a scalar score:
 
     score = Sharpe(daily) - penalty_dd × max_drawdown - penalty_trades × log(n+1)
-            ± spy_penalty
+            - spy_penalty_weight × (2.0 if return ≤ SPY else 0.0)
 
-Hard constraint: if portfolio total return ≤ SPY total return over the
-backtest window, a fixed penalty of -2.0 is added.  This is cheaper than
-pruning the trial, which would exclude it from Optuna's median statistics.
+*spy_penalty_weight* controls the SPY hard-constraint strength:
+  - 1.0 (default, Phases 1–3): full -2.0 penalty if strategy ≤ SPY.
+  - 0.0 (Phase 4): SPY constraint lifted; goal is positive Sharpe, not
+    SPY-beating (see STRATEGY_DEEPDIVE_FINDINGS.md §7).
+
+*trial_timeout_secs* (default None): if the backtest subprocess exceeds
+this wall-clock budget, the trial is pruned rather than blocking the study.
+Set to 1200 (20 min) for Phase 4 coarse to guard against pathological runs.
 
 Scoring uses the portfolio_snapshots and trades tables written by BobsBrain
 during the run.  The run_id is recovered by querying backtest_runs for the
@@ -21,6 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import threading
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -61,6 +68,12 @@ class BacktestObjective:
     min_trades : int
         Runs with fewer than this many fills return a heavy penalty instead
         of being scored normally (catches extreme underdeployment).
+    spy_penalty_weight : float
+        Multiplier on the -2.0 SPY hard-constraint penalty.  Set to 0.0 to
+        remove the SPY constraint entirely (Phase 4 goal: positive Sharpe).
+    trial_timeout_secs : int | None
+        If set, a trial whose backtest exceeds this many seconds is pruned.
+        Prevents pathological cold-cache runs from blocking the study.
     """
 
     def __init__(
@@ -73,6 +86,8 @@ class BacktestObjective:
         penalty_dd: float = 0.5,
         penalty_trades: float = 0.01,
         min_trades: int = 5,
+        spy_penalty_weight: float = 1.0,
+        trial_timeout_secs: int | None = None,
     ) -> None:
         self.train_start = datetime(train_start.year, train_start.month, train_start.day)
         self.train_end = datetime(train_end.year, train_end.month, train_end.day)
@@ -82,6 +97,8 @@ class BacktestObjective:
         self.penalty_dd = penalty_dd
         self.penalty_trades = penalty_trades
         self.min_trades = min_trades
+        self.spy_penalty_weight = spy_penalty_weight
+        self.trial_timeout_secs = trial_timeout_secs
 
     # ------------------------------------------------------------------
     # Optuna interface
@@ -112,12 +129,30 @@ class BacktestObjective:
     def _run_backtest(self, params: dict[str, Any]) -> str | None:
         """
         Run BobsBrain.backtest() with *params* and return the run_id written
-        to the DB, or None if the backtest raises an exception.
+        to the DB, or None if the backtest raises an exception or times out.
         """
         from lumibot.backtesting import YahooDataBacktesting
         from BobsBrain import BobsBrain
 
         start_ts = datetime.now(timezone.utc)
+
+        timed_out = threading.Event()
+        timer: threading.Timer | None = None
+
+        def _on_timeout() -> None:
+            timed_out.set()
+            # SIGALRM only works on the main thread; use SIGINT as a best-effort
+            # interrupt when running in a worker thread.
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except (AttributeError, OSError):
+                pass
+
+        if self.trial_timeout_secs is not None:
+            timer = threading.Timer(self.trial_timeout_secs, _on_timeout)
+            timer.daemon = True
+            timer.start()
+
         try:
             BobsBrain.backtest(
                 YahooDataBacktesting,
@@ -129,9 +164,17 @@ class BacktestObjective:
                 show_tearsheet=False,
                 save_tearsheet=False,
             )
+        except KeyboardInterrupt:
+            if timed_out.is_set():
+                logger.warning('Trial timed out after %d s — pruning', self.trial_timeout_secs)
+                return None
+            raise
         except Exception:
             logger.exception('BobsBrain.backtest raised an exception')
             return None
+        finally:
+            if timer is not None:
+                timer.cancel()
 
         return self._find_run_id(after_ts=start_ts)
 
@@ -226,11 +269,11 @@ class BacktestObjective:
 
         # --- SPY hard constraint (soft implementation via additive penalty) ---
         spy_penalty = 0.0
-        if not spy.isna().all() and spy.iloc[0] > 0:
+        if self.spy_penalty_weight > 0.0 and not spy.isna().all() and spy.iloc[0] > 0:
             port_total = pv.iloc[-1] / pv.iloc[0] - 1
             spy_total = spy.iloc[-1] / spy.iloc[0] - 1
             if port_total <= spy_total:
-                spy_penalty = -2.0
+                spy_penalty = -2.0 * self.spy_penalty_weight
 
         score = sharpe - self.penalty_dd * max_dd - trade_penalty + spy_penalty
 

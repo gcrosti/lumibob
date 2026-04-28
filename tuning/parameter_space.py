@@ -78,7 +78,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
         'target_deployed_pct', tier=2, default=0.60, low=0.40, high=0.90,
     ),
     'max_daily_candidates': ParamSpec(
-        'max_daily_candidates', tier=2, default=200, low=50, high=500, dtype='int',
+        'max_daily_candidates', tier=2, default=200, low=50, high=300, dtype='int',
     ),
     'corr_long_window': ParamSpec(
         'corr_long_window', tier=2, default=90, low=45, high=252, dtype='int',

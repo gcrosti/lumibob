@@ -32,3 +32,7 @@ pairs/
 
 # VSCode
 .vscode/
+
+# IDE / Anaconda environment artefacts
+anaconda_projects/
+notebooks/.virtual_documents/
