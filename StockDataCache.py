@@ -71,7 +71,7 @@ class StockDataCache:
         fetchable = [s for s in missing_symbols if s not in self._failed]
 
         if fetchable:
-            fresh = self._alpaca.get_historical_bars(fetchable, start, end)
+            fresh = self._fetch_with_retry(fetchable, start, end)
             if not fresh.empty:
                 self._db.upsert_prices(fresh)
                 cached = _merge(cached, fresh)
@@ -84,6 +84,47 @@ class StockDataCache:
                     self._db.mark_ticker_failed(symbol, "no data from Alpaca")
 
         return cached
+
+    def _fetch_with_retry(
+        self,
+        symbols: list[str],
+        start: datetime,
+        end: datetime,
+        max_retries: int = 3,
+        backoff_seconds: float = 15.0,
+    ) -> pd.DataFrame:
+        """
+        Call AlpacaClient.get_historical_bars with exponential-backoff retry
+        on transient network errors (timeouts, connection resets).
+
+        Raises the final exception if all retries are exhausted, but logs a
+        warning so callers can decide whether to treat the failure as fatal.
+        """
+        import time as _time
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._alpaca.get_historical_bars(symbols, start, end)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    wait = backoff_seconds * (2 ** (attempt - 1))
+                    _log.warning(
+                        'StockDataCache: Alpaca fetch failed (attempt %d/%d): %s — '
+                        'retrying in %.0fs',
+                        attempt, max_retries, exc, wait,
+                    )
+                    _time.sleep(wait)
+                else:
+                    _log.error(
+                        'StockDataCache: Alpaca fetch failed after %d attempts: %s — '
+                        'returning empty DataFrame',
+                        max_retries, exc,
+                    )
+        return pd.DataFrame()
 
     def warm_cache(self, symbols: list[str], days: int = 126) -> None:
         """
