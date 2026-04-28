@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, NamedTuple
@@ -235,8 +236,6 @@ def _find_run_id(after_ts: datetime, retries: int = 5, delay: float = 3.0) -> st
     failed to write their completion timestamp (e.g. after a transient crash
     that Lumibot recovered from).
     """
-    import time as _time
-
     for attempt in range(retries):
         with psycopg2.connect(_DB_URL) as conn:
             with conn.cursor() as cur:
@@ -283,7 +282,7 @@ def _find_run_id(after_ts: datetime, retries: int = 5, delay: float = 3.0) -> st
                     return row[0]
 
         if attempt < retries - 1:
-            _time.sleep(delay)
+            time.sleep(delay)
 
     return None
 
@@ -339,23 +338,21 @@ def _fill_metrics(result: RegimeResult) -> None:
     if not cr.empty:
         result.avg_cash_ratio = float(cr.mean())
 
-    # Composite score (same formula as BacktestObjective)
-    PENALTY_DD = 0.5
-    PENALTY_TRADES = 0.01
-    MIN_TRADES = 5
+    # Composite score — delegate to BacktestObjective.score_run to avoid
+    # duplicating the formula (which would silently diverge if the objective
+    # changes, e.g. when spy_penalty_weight differs between phases).
+    from tuning.objective import BacktestObjective
+    from datetime import date as _date
 
-    if result.n_trades < MIN_TRADES:
-        result.score = -50.0
-        return
-
-    spy_penalty = 0.0
-    if result.beats_spy is not None and not result.beats_spy:
-        spy_penalty = -2.0
-
-    sharpe = result.sharpe or 0.0
-    dd_val = (result.max_drawdown_pct or 0.0) / 100
-    trade_pen = float(np.log1p(result.n_trades)) * PENALTY_TRADES
-    result.score = sharpe - PENALTY_DD * dd_val - trade_pen + spy_penalty
+    # Construct a minimal scorer just for score_run(); train window is unused
+    # because score_run() reads from the DB by run_id, not from the objective.
+    scorer = BacktestObjective(
+        train_start=result.regime.start,
+        train_end=result.regime.end,
+        budget=10_000,
+        spy_penalty_weight=1.0,   # Phase 3 battery uses the full SPY constraint
+    )
+    result.score = scorer.score_run(run_id)
 
 
 # ---------------------------------------------------------------------------

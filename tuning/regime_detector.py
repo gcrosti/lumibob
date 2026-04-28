@@ -37,7 +37,6 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -132,7 +131,7 @@ class RegimeDetector:
         )
         return regime
 
-    def get_features(self, start: date, end: date) -> Optional[RegimeFeatures]:
+    def get_features(self, start: date, end: date) -> RegimeFeatures | None:
         """
         Compute regime features for [*start*, *end*] from stock_prices.
 

@@ -17,9 +17,13 @@ from a bulk Alpaca API call (network-bound, ~seconds) to a single DB query
 (~milliseconds for 60 rows × 100 tickers locally).
 """
 
+import logging
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from AlpacaClient import AlpacaClient
 from DatabaseClient import DatabaseClient
@@ -97,29 +101,22 @@ class StockDataCache:
         Call AlpacaClient.get_historical_bars with exponential-backoff retry
         on transient network errors (timeouts, connection resets).
 
-        Raises the final exception if all retries are exhausted, but logs a
-        warning so callers can decide whether to treat the failure as fatal.
+        Returns an empty DataFrame if all retries are exhausted.
         """
-        import time as _time
-        import logging as _logging
-        _log = _logging.getLogger(__name__)
-
-        last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 return self._alpaca.get_historical_bars(symbols, start, end)
             except Exception as exc:
-                last_exc = exc
                 if attempt < max_retries:
                     wait = backoff_seconds * (2 ** (attempt - 1))
-                    _log.warning(
+                    logger.warning(
                         'StockDataCache: Alpaca fetch failed (attempt %d/%d): %s — '
                         'retrying in %.0fs',
                         attempt, max_retries, exc, wait,
                     )
-                    _time.sleep(wait)
+                    time.sleep(wait)
                 else:
-                    _log.error(
+                    logger.error(
                         'StockDataCache: Alpaca fetch failed after %d attempts: %s — '
                         'returning empty DataFrame',
                         max_retries, exc,

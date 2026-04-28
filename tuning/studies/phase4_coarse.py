@@ -43,7 +43,7 @@ Tier 3 parameters tuned (7 parameters):
   + target_deployed_pct (Tier 2, included for Phase 4 range expansion)
 
 Base parameters (all tiers, Phase 1 best-trial merged with defaults):
-  Taken from the Phase 1 best-trial (tier2_proof_v1 study) read from DB,
+  Taken from the Phase 1 best-trial (tier2_proof_v2 study) read from DB,
   or canonical defaults as fallback.
 """
 
@@ -96,9 +96,6 @@ PHASE1_STUDY  = 'tier2_proof_v2'
 # Phase 4 coarse tunes Tier 3 parameters only.
 # All Tier 1 and Tier 2 values are held fixed at Phase 1 best-trial values.
 PHASE4_TIERS: tuple[int, ...] = (3,)
-
-# Optuna storage (PostgreSQL).
-STORAGE = f'postgresql://postgres:lumibob@localhost:5432/lumibob'
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +396,6 @@ def print_report() -> None:
 
     # --- Build regime lookup table ---
     print('\n── Regime lookup table ─────────────────────────────────')
-    import numpy as np
     tier3_names = [k for k, v in PARAMETER_SPACE.items() if v.tier == 3]
     lookup: dict[str, dict] = {}
     for regime in ALL_REGIMES:
