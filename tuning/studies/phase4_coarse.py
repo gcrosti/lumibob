@@ -87,7 +87,7 @@ TRAIN_MONTHS  = 3
 HOLDOUT_MONTHS = 1
 N_TRIALS      = 15   # reduced from 50: 2022 trials take ~90 min each; 15 gives TPE enough signal
 BUDGET        = 10_000
-TRIAL_TIMEOUT = 1200   # seconds — 20 min hard cap per trial
+TRIAL_TIMEOUT = 2700   # seconds — 45 min hard cap per trial (2024 folds take ~22 min)
 
 # Phase 1 best-trial study name — used to seed base params.
 # tier2_proof_v2 is the passing study (v1 had all pruned trials due to a timezone bug).
@@ -198,22 +198,21 @@ def run_fold(
             holdout_score=None,
         )
 
+    # Base params for this fold: Phase 1 best minus Tier 3 (Optuna will fill those),
+    # clamped to current search-space bounds.  Built unconditionally so the holdout
+    # evaluation also receives the clamped values (not the raw Phase 1 defaults).
+    fold_base = {
+        k: v for k, v in base_params.items()
+        if PARAMETER_SPACE[k].tier not in PHASE4_TIERS
+    }
+    for k, spec in PARAMETER_SPACE.items():
+        if k in fold_base and spec.high is not None:
+            fold_base[k] = min(fold_base[k], spec.high)
+        if k in fold_base and spec.low is not None:
+            fold_base[k] = max(fold_base[k], spec.low)
+
     if remaining > 0:
         print(f'  Running {remaining} trial(s) (finalized: {existing}/{N_TRIALS})...')
-
-        # Base params: Phase 1 best (all tiers), minus Tier 3 (which Optuna will suggest).
-        fold_base = {
-            k: v for k, v in base_params.items()
-            if PARAMETER_SPACE[k].tier not in PHASE4_TIERS
-        }
-        # Clamp any base param that exceeds the current search-space bound.
-        # Phase 1 found max_daily_candidates=487; the bound was tightened to 300
-        # for Phase 4 to keep per-trial time under 20 min.
-        for k, spec in PARAMETER_SPACE.items():
-            if k in fold_base and spec.high is not None:
-                fold_base[k] = min(fold_base[k], spec.high)
-            if k in fold_base and spec.low is not None:
-                fold_base[k] = max(fold_base[k], spec.low)
 
         objective = BacktestObjective(
             train_start=fold.train_start,
@@ -243,7 +242,7 @@ def run_fold(
         best_raw   = {}
         best_score = float('-inf')
 
-    best_params = normalize_weights({**base_params, **best_raw})
+    best_params = normalize_weights({**fold_base, **best_raw})
     print(f'  best_train_score={best_score:.4f}  regime={regime}')
     print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
 
