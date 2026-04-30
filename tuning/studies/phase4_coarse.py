@@ -85,9 +85,10 @@ FOLD_START    = date(2022, 1, 1)
 FOLD_END      = date(2025, 1, 31)   # 12 non-overlapping 3+1 month folds
 TRAIN_MONTHS  = 3
 HOLDOUT_MONTHS = 1
-N_TRIALS      = 15   # reduced from 50: 2022 trials take ~90 min each; 15 gives TPE enough signal
+N_TRIALS      = 15   # default; 2024 folds (8-11) override to 5 (see N_TRIALS_2024)
+N_TRIALS_2024 = 5    # 2024 Q1-Q4 training windows take ~90 min/trial; 5 is enough for TPE signal
 BUDGET        = 10_000
-TRIAL_TIMEOUT = 2700   # seconds — 45 min hard cap per trial (2024 folds take ~22 min)
+TRIAL_TIMEOUT = 6000  # seconds — 100 min hard cap; 2024 3-month windows take ~90 min cold-cache
 
 # Phase 1 best-trial study name — used to seed base params.
 # tier2_proof_v2 is the passing study (v1 had all pruned trials due to a timezone bug).
@@ -174,6 +175,9 @@ def run_fold(
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
     )
 
+    # 2024 folds (8–11) take ~90 min/trial cold-cache; cap at 5 trials.
+    n_trials_for_fold = N_TRIALS_2024 if fold.train_start.year >= 2024 else N_TRIALS
+
     # Count only finalized trials (COMPLETE or PRUNED) — RUNNING/FAIL do not count
     # so orphaned trials from crashed workers do not eat into the quota.
     finalized = sum(
@@ -181,10 +185,10 @@ def run_fold(
         if t.state.name in ('COMPLETE', 'PRUNED')
     )
     existing = finalized
-    remaining = max(0, N_TRIALS - existing)
+    remaining = max(0, n_trials_for_fold - existing)
 
     if dry_run:
-        print(f'  [dry-run] would run {remaining} trial(s) (finalized: {existing}/{N_TRIALS})')
+        print(f'  [dry-run] would run {remaining} trial(s) (finalized: {existing}/{n_trials_for_fold})')
         return FoldResult(
             fold_idx=fold_idx,
             train_start=fold.train_start,
@@ -212,7 +216,7 @@ def run_fold(
             fold_base[k] = max(fold_base[k], spec.low)
 
     if remaining > 0:
-        print(f'  Running {remaining} trial(s) (finalized: {existing}/{N_TRIALS})...')
+        print(f'  Running {remaining} trial(s) (finalized: {existing}/{n_trials_for_fold})...')
 
         objective = BacktestObjective(
             train_start=fold.train_start,
@@ -231,7 +235,7 @@ def run_fold(
             show_progress_bar=False,
         )
     else:
-        print(f'  Fold already complete ({existing}/{N_TRIALS} finalized).')
+        print(f'  Fold already complete ({existing}/{n_trials_for_fold} finalized).')
 
     # --- Best training params ---
     try:
