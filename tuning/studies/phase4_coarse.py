@@ -274,10 +274,15 @@ def run_fold(
 def _evaluate_holdout(
     fold: Fold,
     params: dict[str, Any],
+    in_process: bool = False,
 ) -> tuple[str | None, float | None]:
     """
     Run a single backtest on the holdout window with *params* and return
     (run_id, composite_score).  Returns (None, None) on failure.
+
+    When *in_process* is True the backtest runs directly in the current
+    process (no subprocess spawn), which keeps the DB env intact and avoids
+    cache issues when calling from --holdout-only mode.
     """
     from tuning.objective import BacktestObjective
 
@@ -288,7 +293,7 @@ def _evaluate_holdout(
         base_params=params,
         tiers=(),              # no Optuna suggestions — use params as-is
         spy_penalty_weight=0.0,
-        trial_timeout_secs=TRIAL_TIMEOUT,
+        trial_timeout_secs=None if in_process else TRIAL_TIMEOUT,
     )
     try:
         run_id = scorer._run_backtest(params)
@@ -505,6 +510,63 @@ def _save_holdout_score(fold_idx: int, run_id: str | None, score: float | None) 
 
 
 # ---------------------------------------------------------------------------
+# Holdout-only replay
+# ---------------------------------------------------------------------------
+
+def _run_holdout_only(
+    folds: list[Fold],
+    base_params: dict[str, Any],
+    fold_idx: int | None = None,
+) -> None:
+    """
+    For each fold that has at least one COMPLETE training trial, load the Optuna
+    study's best params and evaluate the holdout period without running any new
+    training trials.  Saves results to tuning_studies.
+
+    If *fold_idx* is given, only that fold is processed.
+    """
+    storage = optuna.storages.RDBStorage(url=_DB_URL)
+    indices = [fold_idx] if fold_idx is not None else list(range(len(folds)))
+
+    for idx in indices:
+        fold = folds[idx]
+        study_name = _study_name(idx)
+
+        try:
+            study = optuna.load_study(study_name=study_name, storage=storage)
+            best_raw   = study.best_params
+            best_score = study.best_value
+        except Exception:
+            print(f'[fold {idx:02d}] no complete trials — skipping holdout')
+            continue
+
+        regime_detector = RegimeDetector(_DB_URL)
+        regime = regime_detector.label_window(fold.train_start, fold.train_end)
+
+        fold_base = {k: v for k, v in base_params.items() if PARAMETER_SPACE[k].tier not in PHASE4_TIERS}
+        for k, spec in PARAMETER_SPACE.items():
+            if k in fold_base and spec.high is not None:
+                fold_base[k] = min(fold_base[k], spec.high)
+            if k in fold_base and spec.low is not None:
+                fold_base[k] = max(fold_base[k], spec.low)
+        best_params_full = normalize_weights({**fold_base, **best_raw})
+
+        print(
+            f'\n[fold {idx:02d}] {fold}  regime={regime}'
+            f'  best_train_score={best_score:.4f}',
+            flush=True,
+        )
+        print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
+
+        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full, in_process=True)
+        if holdout_score is not None:
+            print(f'  holdout_score={holdout_score:.4f}  run_id={holdout_run_id}')
+        else:
+            print(f'  holdout evaluation FAILED')
+        _save_holdout_score(idx, holdout_run_id, holdout_score)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -537,6 +599,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--list-folds', action='store_true',
         help='Print the fold plan (regime-labelled) and exit.',
+    )
+    parser.add_argument(
+        '--holdout-only', action='store_true',
+        help='Skip training; evaluate holdout with existing best params for each fold.',
     )
     return parser.parse_args()
 
@@ -576,6 +642,10 @@ def main() -> None:
             return
 
     base_params = _load_base_params()
+
+    if args.holdout_only:
+        _run_holdout_only(folds, base_params, fold_idx=args.fold)
+        return
 
     if args.fold is not None:
         if args.fold < 0 or args.fold >= len(folds):
