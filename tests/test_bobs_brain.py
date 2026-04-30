@@ -131,14 +131,22 @@ class TestCompositeScoreSizing(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _composite_score logic (mirrors BobsBrain._composite_score)
+# _composite_score logic (mirrors BobsBrain._composite_score, 5 components)
 # ---------------------------------------------------------------------------
 
 def _composite_score(corr_long, corr_short, z_depth,
-                     w_long=0.3, w_short=0.5, w_z=0.2):
+                     coint_score=0.0, halflife_score=0.0,
+                     w_long=0.3, w_short=0.5, w_z=0.2,
+                     w_coint=0.0, w_halflife=0.0):
     cl = max(corr_long, 0.0) if not np.isnan(corr_long) else 0.0
     cs = max(corr_short, 0.0) if not np.isnan(corr_short) else 0.0
-    return w_long * min(cl, 1.0) + w_short * min(cs, 1.0) + w_z * z_depth
+    return (
+        w_long * min(cl, 1.0)
+        + w_short * min(cs, 1.0)
+        + w_z * z_depth
+        + w_coint * coint_score
+        + w_halflife * halflife_score
+    )
 
 
 class TestCompositeScore(unittest.TestCase):
@@ -170,6 +178,62 @@ class TestCompositeScore(unittest.TestCase):
 
     def test_weights_sum_to_one(self):
         self.assertAlmostEqual(0.3 + 0.5 + 0.2, 1.0)
+
+    def test_coint_score_raises_composite(self):
+        """A perfect coint_score should raise composite above the 3-weight baseline."""
+        base = _composite_score(0.5, 0.5, 0.5, coint_score=0.0, w_coint=0.0)
+        with_coint = _composite_score(0.5, 0.5, 0.5, coint_score=1.0, w_coint=0.25)
+        self.assertGreater(with_coint, base)
+
+    def test_halflife_score_raises_composite(self):
+        """A perfect halflife_score should raise composite above the 3-weight baseline."""
+        base = _composite_score(0.5, 0.5, 0.5, halflife_score=0.0, w_halflife=0.0)
+        with_hl = _composite_score(0.5, 0.5, 0.5, halflife_score=1.0, w_halflife=0.15)
+        self.assertGreater(with_hl, base)
+
+    def test_zero_coint_and_halflife_unchanged(self):
+        """When both new scores are 0, result equals the 3-component formula."""
+        old = _composite_score(0.6, 0.7, 0.8)
+        new = _composite_score(0.6, 0.7, 0.8, coint_score=0.0, halflife_score=0.0,
+                               w_coint=0.25, w_halflife=0.15)
+        self.assertAlmostEqual(old, new)
+
+
+# ---------------------------------------------------------------------------
+# Composite score weight normalization helpers
+# ---------------------------------------------------------------------------
+
+class TestWeightNormalization(unittest.TestCase):
+    """Verify that normalize_weights handles the expanded 5-weight set."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from tuning.parameter_space import normalize_weights
+        self.normalize_weights = normalize_weights
+
+    def test_five_weights_sum_to_one_after_normalisation(self):
+        params = {
+            'w_corr_long': 0.3,
+            'w_corr_short': 0.5,
+            'w_z_depth': 0.2,
+            'w_coint': 0.25,
+            'w_halflife': 0.15,
+        }
+        result = self.normalize_weights(params)
+        total = sum(result[k] for k in params)
+        self.assertAlmostEqual(total, 1.0, places=10)
+
+    def test_old_params_without_coint_still_normalise(self):
+        """Old param dicts missing w_coint/w_halflife should be normalised correctly."""
+        old_params = {'w_corr_long': 0.3, 'w_corr_short': 0.5, 'w_z_depth': 0.2}
+        result = self.normalize_weights(old_params)
+        # Result should contain only old keys normalised (new defaults absorbed in denominator)
+        present = {k for k in result if k.startswith('w_')}
+        self.assertTrue(present.issubset({'w_corr_long', 'w_corr_short', 'w_z_depth'}))
+        # Values must be positive and < 1
+        for k in old_params:
+            self.assertGreater(result[k], 0.0)
+            self.assertLessEqual(result[k], 1.0)
 
 
 # ---------------------------------------------------------------------------

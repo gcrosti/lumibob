@@ -198,7 +198,8 @@ class DatabaseClient:
             SELECT id, lead_symbol, lag_symbol, lag_days,
                    short_ma, long_ma, correlation, initial_cost,
                    simulated_return, sim_sharpe, signal_type,
-                   zscore_window, entry_threshold, exit_threshold
+                   zscore_window, entry_threshold, exit_threshold,
+                   coint_pvalue, halflife_days
             FROM   pairs
             WHERE  active = TRUE
               AND  run_id = %s
@@ -212,7 +213,8 @@ class DatabaseClient:
         for row in rows:
             (pid, lead, lag, lag_days, short_ma, long_ma, correlation, initial_cost,
              sim_ret, sim_sharpe, signal_type, zscore_window,
-             entry_threshold, exit_threshold) = row
+             entry_threshold, exit_threshold,
+             coint_pvalue, halflife_days) = row
             result[lag] = {
                 "pair_id":          pid,
                 "lead_stock":       lead,
@@ -229,6 +231,8 @@ class DatabaseClient:
                 "zscore_window":    zscore_window,
                 "entry_threshold":  float(entry_threshold) if entry_threshold is not None else None,
                 "exit_threshold":   float(exit_threshold) if exit_threshold is not None else None,
+                "coint_pvalue":     float(coint_pvalue) if coint_pvalue is not None else None,
+                "halflife_days":    float(halflife_days) if halflife_days is not None else None,
             }
         return result
 
@@ -402,9 +406,9 @@ class DatabaseClient:
             INSERT INTO pairs
                 (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
                  correlation, simulated_return, sim_sharpe, signal_type, zscore_window,
-                 entry_threshold, exit_threshold,
+                 entry_threshold, exit_threshold, coint_pvalue, halflife_days,
                  discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -420,6 +424,8 @@ class DatabaseClient:
                 zscore_window = pair.get("zscore_window")
                 entry_threshold = pair.get("entry_threshold")
                 exit_threshold = pair.get("exit_threshold")
+                coint_pvalue = pair.get("coint_pvalue")
+                halflife_days = pair.get("halflife_days")
                 cur.execute(sql, (
                     run_id,
                     pair["lead_stock"],
@@ -434,6 +440,8 @@ class DatabaseClient:
                     int(zscore_window) if zscore_window is not None else None,
                     float(entry_threshold) if entry_threshold is not None else None,
                     float(exit_threshold) if exit_threshold is not None else None,
+                    float(coint_pvalue) if coint_pvalue is not None else None,
+                    float(halflife_days) if halflife_days is not None else None,
                     today,
                     today,
                 ))
@@ -481,6 +489,96 @@ class DatabaseClient:
     # ------------------------------------------------------------------
     # Unfetchable ticker registry
     # ------------------------------------------------------------------
+
+    def migrate_coint_cache(self) -> None:
+        """
+        Idempotent migration: create the pair_coint_cache table and add
+        coint_pvalue / halflife_days columns to the pairs table.
+        Safe to call on every startup.
+        """
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS pair_coint_cache (
+                lead_symbol     VARCHAR(20)       NOT NULL,
+                lag_symbol      VARCHAR(20)       NOT NULL,
+                lookback_window INT               NOT NULL,
+                window_end_date DATE              NOT NULL,
+                coint_pvalue    DOUBLE PRECISION  NOT NULL,
+                halflife_days   DOUBLE PRECISION,
+                computed_at     TIMESTAMP         NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (lead_symbol, lag_symbol, lookback_window, window_end_date)
+            )
+            """,
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS coint_pvalue  DOUBLE PRECISION",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS halflife_days DOUBLE PRECISION",
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
+    def load_coint_cache(
+        self,
+        window_end_date: date,
+        lookback_window: int,
+    ) -> dict[tuple[str, str], tuple[float, float | None]]:
+        """
+        Load all cache entries for the given (window_end_date, lookback_window)
+        into an in-memory dict keyed by (lead_symbol, lag_symbol).
+
+        Returns an empty dict if the table does not exist yet or has no rows.
+        """
+        sql = """
+            SELECT lead_symbol, lag_symbol, coint_pvalue, halflife_days
+            FROM   pair_coint_cache
+            WHERE  window_end_date = %s
+              AND  lookback_window = %s
+        """
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (window_end_date, lookback_window))
+                    rows = cur.fetchall()
+            return {
+                (lead, lag): (float(pval), float(hl) if hl is not None else None)
+                for lead, lag, pval, hl in rows
+            }
+        except Exception:
+            return {}
+
+    def write_coint_cache(
+        self,
+        entries: dict[tuple[str, str], tuple[float, float | None]],
+        window_end_date: date,
+        lookback_window: int,
+    ) -> None:
+        """
+        Upsert cointegration cache entries.  *entries* maps
+        (lead_symbol, lag_symbol) → (coint_pvalue, halflife_days).
+        No-op when *entries* is empty or the table does not exist.
+        """
+        if not entries:
+            return
+        rows = [
+            (lead, lag, window_end_date, lookback_window, pval, hl)
+            for (lead, lag), (pval, hl) in entries.items()
+        ]
+        sql = """
+            INSERT INTO pair_coint_cache
+                (lead_symbol, lag_symbol, window_end_date, lookback_window,
+                 coint_pvalue, halflife_days, computed_at)
+            VALUES %s
+            ON CONFLICT (lead_symbol, lag_symbol, lookback_window, window_end_date)
+            DO UPDATE SET
+                coint_pvalue = EXCLUDED.coint_pvalue,
+                halflife_days = EXCLUDED.halflife_days,
+                computed_at  = NOW()
+        """
+        try:
+            with self._conn() as conn:
+                psycopg2.extras.execute_values(conn.cursor(), sql, rows)
+        except Exception:
+            pass  # Cache miss on write is non-fatal
 
     def migrate_failed_tickers(self) -> None:
         """
