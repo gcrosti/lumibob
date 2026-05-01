@@ -25,9 +25,13 @@ STRATEGY_PARAMETERS = {
     # --- Scoring ---
     'corr_long_window': 90,
     'corr_short_window': 20,
-    'w_corr_long': 0.3,
-    'w_corr_short': 0.5,
-    'w_z_depth': 0.2,
+    # H5 validation: 5-weight composite, normalised from (0.3, 0.5, 0.2, 0.25, 0.15) → sum=1.0
+    'w_corr_long': 0.2143,
+    'w_corr_short': 0.3571,
+    'w_z_depth': 0.1429,
+    'w_coint': 0.1786,
+    'w_halflife': 0.1071,
+    'max_halflife_days': 60,
 
     # --- Discovery ---
     'max_daily_candidates': 200,
@@ -75,8 +79,8 @@ if __name__ == '__main__':
     else:
         from lumibot.backtesting import YahooDataBacktesting
 
-        backtesting_start = datetime(2024, 1, 2)
-        backtesting_end = datetime(2024, 3, 26)
+        backtesting_start = datetime(2023, 4, 1)    # H5 validation run 2: calm bull 2023
+        backtesting_end = datetime(2023, 6, 30)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,
