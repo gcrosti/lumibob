@@ -196,9 +196,9 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
     """
     Ask an Optuna trial to suggest values for parameters in *tiers*.
 
-    Composite score weights (w_corr_long, w_corr_short, w_z_depth) are
-    suggested freely and then normalised so they sum to 1.0.  If only a
-    subset of the three weights is being tuned, the others take their
+    Composite score weights (w_corr_long, w_corr_short, w_z_depth, w_coint,
+    w_halflife) are suggested freely and then normalised so they sum to 1.0.
+    If only a subset of the five weights is being tuned, the others take their
     defaults before normalisation.
     """
     params: dict[str, Any] = {}

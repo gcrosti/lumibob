@@ -274,15 +274,13 @@ def run_fold(
 def _evaluate_holdout(
     fold: Fold,
     params: dict[str, Any],
-    in_process: bool = False,
 ) -> tuple[str | None, float | None]:
     """
     Run a single backtest on the holdout window with *params* and return
     (run_id, composite_score).  Returns (None, None) on failure.
 
-    When *in_process* is True the backtest runs directly in the current
-    process (no subprocess spawn), which keeps the DB env intact and avoids
-    cache issues when calling from --holdout-only mode.
+    Always runs as a subprocess so the OS-level timeout fires reliably
+    regardless of what the backtest is blocked on.
     """
     from tuning.objective import BacktestObjective
 
@@ -293,7 +291,7 @@ def _evaluate_holdout(
         base_params=params,
         tiers=(),              # no Optuna suggestions — use params as-is
         spy_penalty_weight=0.0,
-        trial_timeout_secs=None if in_process else TRIAL_TIMEOUT,
+        trial_timeout_secs=TRIAL_TIMEOUT,
     )
     try:
         run_id = scorer._run_backtest(params)
@@ -558,7 +556,7 @@ def _run_holdout_only(
         )
         print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
 
-        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full, in_process=False)
+        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full)
         if holdout_score is not None:
             print(f'  holdout_score={holdout_score:.4f}  run_id={holdout_run_id}')
         else:

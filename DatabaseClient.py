@@ -8,10 +8,13 @@ across the strategy lifecycle.
 """
 
 import json
+import logging
 import math
 from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 import psycopg2
@@ -578,7 +581,7 @@ class DatabaseClient:
             with self._conn() as conn:
                 psycopg2.extras.execute_values(conn.cursor(), sql, rows)
         except Exception:
-            pass  # Cache miss on write is non-fatal
+            logger.debug('write_coint_cache failed — non-fatal', exc_info=True)
 
     def migrate_failed_tickers(self) -> None:
         """

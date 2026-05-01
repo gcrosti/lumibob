@@ -18,6 +18,11 @@ from TickerClusterer import TickerClusterer
 
 load_dotenv()
 
+# ADF p-value ceiling used to normalise coint_score: pairs at or above this
+# value score 0 on the cointegration component.  Shared between the discovery
+# loop and the re-score loop so both produce comparable values.
+_COINT_PVALUE_CEILING = 0.20
+
 SIC_SECTORS = {
     range(100, 1000):   'Agriculture, Forestry & Fishing',
     range(1000, 1500):  'Mining',
@@ -309,7 +314,7 @@ class BobsBrain(Strategy):
 
             # Reuse stored coint_pvalue from discovery — no ADF re-run needed.
             stored_pvalue = pair.get('coint_pvalue', 1.0)
-            coint_score = max(0.0, 1.0 - stored_pvalue / 0.20)
+            coint_score = max(0.0, 1.0 - stored_pvalue / _COINT_PVALUE_CEILING)
             stored_hl = pair.get('halflife_days')
             halflife_score = (
                 max(0.0, 1.0 - stored_hl / self.max_halflife_days)
@@ -421,7 +426,7 @@ class BobsBrain(Strategy):
                         self._coint_cache[cache_key] = (coint_pvalue, halflife_days)
                         self._coint_cache_new[cache_key] = (coint_pvalue, halflife_days)
 
-                    coint_score = max(0.0, 1.0 - coint_pvalue / 0.20)
+                    coint_score = max(0.0, 1.0 - coint_pvalue / _COINT_PVALUE_CEILING)
                     halflife_score = (
                         max(0.0, 1.0 - halflife_days / self.max_halflife_days)
                         if halflife_days is not None and np.isfinite(halflife_days)

@@ -161,11 +161,13 @@ class TestPairs:
     def _pair_row(self, pid=1, lead="AAPL", lag="MSFT", lag_days=1,
                   short_ma=2, long_ma=5, corr=0.91, initial_cost=None,
                   sim_ret=None, sim_sharpe=None, signal_type=None,
-                  zscore_window=None, entry_threshold=None, exit_threshold=None):
-        """Build a 14-column pairs row matching the SELECT in load_active_pairs."""
+                  zscore_window=None, entry_threshold=None, exit_threshold=None,
+                  coint_pvalue=None, halflife_days=None):
+        """Build a 16-column pairs row matching the SELECT in load_active_pairs."""
         return (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
                 sim_ret, sim_sharpe, signal_type, zscore_window,
-                entry_threshold, exit_threshold)
+                entry_threshold, exit_threshold,
+                coint_pvalue, halflife_days)
 
     def test_load_active_pairs_returns_dict_keyed_by_lag(self):
         client, mock_pool = _make_client()

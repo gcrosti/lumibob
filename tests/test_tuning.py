@@ -148,20 +148,25 @@ class TestDefaults:
 
 
 class TestNormalizeWeights:
-    _weight_names = {'w_corr_long', 'w_corr_short', 'w_z_depth'}
+    _weight_names = {'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife'}
 
     def test_weights_sum_to_one(self):
-        params = {'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4}
+        params = {
+            'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4,
+            'w_coint': 0.3, 'w_halflife': 0.2,
+        }
         result = normalize_weights(params)
-        total = result['w_corr_long'] + result['w_corr_short'] + result['w_z_depth']
+        total = sum(result[w] for w in self._weight_names)
         assert abs(total - 1.0) < 1e-9
 
     def test_already_normalized_unchanged(self):
-        params = {'w_corr_long': 0.3, 'w_corr_short': 0.5, 'w_z_depth': 0.2}
+        params = {
+            'w_corr_long': 0.2, 'w_corr_short': 0.4, 'w_z_depth': 0.2,
+            'w_coint': 0.1, 'w_halflife': 0.1,
+        }
         result = normalize_weights(params)
-        assert abs(result['w_corr_long'] - 0.3) < 1e-9
-        assert abs(result['w_corr_short'] - 0.5) < 1e-9
-        assert abs(result['w_z_depth'] - 0.2) < 1e-9
+        for k, v in params.items():
+            assert abs(result[k] - v) < 1e-9
 
     def test_does_not_mutate_original(self):
         original = {'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4}
@@ -205,7 +210,10 @@ class TestSuggest:
         study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=42))
         trial = study.ask()
         result = suggest(trial, tiers=(2,))
-        total = result['w_corr_long'] + result['w_corr_short'] + result['w_z_depth']
+        total = (
+            result['w_corr_long'] + result['w_corr_short'] + result['w_z_depth']
+            + result['w_coint'] + result['w_halflife']
+        )
         assert abs(total - 1.0) < 1e-9
 
     def test_suggest_int_params_in_bounds(self):

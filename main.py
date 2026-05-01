@@ -25,7 +25,8 @@ STRATEGY_PARAMETERS = {
     # --- Scoring ---
     'corr_long_window': 90,
     'corr_short_window': 20,
-    # H5 validation: 5-weight composite, normalised from (0.3, 0.5, 0.2, 0.25, 0.15) → sum=1.0
+    # 5-component composite score — normalised defaults (raw: 0.3, 0.5, 0.2, 0.25, 0.15 → ÷1.4).
+    # BobsBrain uses these as-is; call tuning.parameter_space.normalize_weights() if adjusting.
     'w_corr_long': 0.2143,
     'w_corr_short': 0.3571,
     'w_z_depth': 0.1429,
@@ -79,8 +80,8 @@ if __name__ == '__main__':
     else:
         from lumibot.backtesting import YahooDataBacktesting
 
-        backtesting_start = datetime(2023, 4, 1)    # H5 validation run 2: calm bull 2023
-        backtesting_end = datetime(2023, 6, 30)
+        backtesting_start = datetime(2024, 1, 2)
+        backtesting_end = datetime(2024, 3, 26)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,
