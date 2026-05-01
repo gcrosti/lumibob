@@ -558,7 +558,7 @@ def _run_holdout_only(
         )
         print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
 
-        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full, in_process=True)
+        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full, in_process=False)
         if holdout_score is not None:
             print(f'  holdout_score={holdout_score:.4f}  run_id={holdout_run_id}')
         else:
