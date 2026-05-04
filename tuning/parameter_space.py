@@ -96,6 +96,19 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'w_z_depth': ParamSpec(
         'w_z_depth', tier=2, default=0.2, low=0.0, high=1.0,
     ),
+    # H5: cointegration quality and mean-reversion speed weights.
+    # low=0.10 on w_coint prevents Optuna from zeroing out cointegration signal.
+    'w_coint': ParamSpec(
+        'w_coint', tier=2, default=0.25, low=0.10, high=1.0,
+    ),
+    'w_halflife': ParamSpec(
+        'w_halflife', tier=2, default=0.15, low=0.0, high=1.0,
+    ),
+    # Half-life normalisation ceiling (tunable so Optuna can widen or narrow the
+    # scoring window without changing the formula structure).
+    'max_halflife_days': ParamSpec(
+        'max_halflife_days', tier=2, default=60, low=20, high=120, dtype='int',
+    ),
     'hdbscan_min_cluster_size': ParamSpec(
         'hdbscan_min_cluster_size', tier=2, default=5, low=3, high=15, dtype='int',
     ),
@@ -140,7 +153,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
 # Public helpers
 # ---------------------------------------------------------------------------
 
-_WEIGHT_NAMES = frozenset({'w_corr_long', 'w_corr_short', 'w_z_depth'})
+_WEIGHT_NAMES = frozenset({'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife'})
 
 
 def defaults() -> dict[str, Any]:
@@ -183,9 +196,9 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
     """
     Ask an Optuna trial to suggest values for parameters in *tiers*.
 
-    Composite score weights (w_corr_long, w_corr_short, w_z_depth) are
-    suggested freely and then normalised so they sum to 1.0.  If only a
-    subset of the three weights is being tuned, the others take their
+    Composite score weights (w_corr_long, w_corr_short, w_z_depth, w_coint,
+    w_halflife) are suggested freely and then normalised so they sum to 1.0.
+    If only a subset of the five weights is being tuned, the others take their
     defaults before normalisation.
     """
     params: dict[str, Any] = {}

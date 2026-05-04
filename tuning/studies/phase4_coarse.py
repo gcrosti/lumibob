@@ -85,9 +85,10 @@ FOLD_START    = date(2022, 1, 1)
 FOLD_END      = date(2025, 1, 31)   # 12 non-overlapping 3+1 month folds
 TRAIN_MONTHS  = 3
 HOLDOUT_MONTHS = 1
-N_TRIALS      = 15   # reduced from 50: 2022 trials take ~90 min each; 15 gives TPE enough signal
+N_TRIALS      = 15   # default; 2024 folds (8-11) override to 5 (see N_TRIALS_2024)
+N_TRIALS_2024 = 5    # 2024 Q1-Q4 training windows take ~90 min/trial; 5 is enough for TPE signal
 BUDGET        = 10_000
-TRIAL_TIMEOUT = 1200   # seconds — 20 min hard cap per trial
+TRIAL_TIMEOUT = 6000  # seconds — 100 min hard cap; 2024 3-month windows take ~90 min cold-cache
 
 # Phase 1 best-trial study name — used to seed base params.
 # tier2_proof_v2 is the passing study (v1 had all pruned trials due to a timezone bug).
@@ -174,6 +175,9 @@ def run_fold(
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0),
     )
 
+    # 2024 folds (8–11) take ~90 min/trial cold-cache; cap at 5 trials.
+    n_trials_for_fold = N_TRIALS_2024 if fold.train_start.year >= 2024 else N_TRIALS
+
     # Count only finalized trials (COMPLETE or PRUNED) — RUNNING/FAIL do not count
     # so orphaned trials from crashed workers do not eat into the quota.
     finalized = sum(
@@ -181,10 +185,10 @@ def run_fold(
         if t.state.name in ('COMPLETE', 'PRUNED')
     )
     existing = finalized
-    remaining = max(0, N_TRIALS - existing)
+    remaining = max(0, n_trials_for_fold - existing)
 
     if dry_run:
-        print(f'  [dry-run] would run {remaining} trial(s) (finalized: {existing}/{N_TRIALS})')
+        print(f'  [dry-run] would run {remaining} trial(s) (finalized: {existing}/{n_trials_for_fold})')
         return FoldResult(
             fold_idx=fold_idx,
             train_start=fold.train_start,
@@ -198,22 +202,21 @@ def run_fold(
             holdout_score=None,
         )
 
-    if remaining > 0:
-        print(f'  Running {remaining} trial(s) (finalized: {existing}/{N_TRIALS})...')
+    # Base params for this fold: Phase 1 best minus Tier 3 (Optuna will fill those),
+    # clamped to current search-space bounds.  Built unconditionally so the holdout
+    # evaluation also receives the clamped values (not the raw Phase 1 defaults).
+    fold_base = {
+        k: v for k, v in base_params.items()
+        if PARAMETER_SPACE[k].tier not in PHASE4_TIERS
+    }
+    for k, spec in PARAMETER_SPACE.items():
+        if k in fold_base and spec.high is not None:
+            fold_base[k] = min(fold_base[k], spec.high)
+        if k in fold_base and spec.low is not None:
+            fold_base[k] = max(fold_base[k], spec.low)
 
-        # Base params: Phase 1 best (all tiers), minus Tier 3 (which Optuna will suggest).
-        fold_base = {
-            k: v for k, v in base_params.items()
-            if PARAMETER_SPACE[k].tier not in PHASE4_TIERS
-        }
-        # Clamp any base param that exceeds the current search-space bound.
-        # Phase 1 found max_daily_candidates=487; the bound was tightened to 300
-        # for Phase 4 to keep per-trial time under 20 min.
-        for k, spec in PARAMETER_SPACE.items():
-            if k in fold_base and spec.high is not None:
-                fold_base[k] = min(fold_base[k], spec.high)
-            if k in fold_base and spec.low is not None:
-                fold_base[k] = max(fold_base[k], spec.low)
+    if remaining > 0:
+        print(f'  Running {remaining} trial(s) (finalized: {existing}/{n_trials_for_fold})...')
 
         objective = BacktestObjective(
             train_start=fold.train_start,
@@ -232,7 +235,7 @@ def run_fold(
             show_progress_bar=False,
         )
     else:
-        print(f'  Fold already complete ({existing}/{N_TRIALS} finalized).')
+        print(f'  Fold already complete ({existing}/{n_trials_for_fold} finalized).')
 
     # --- Best training params ---
     try:
@@ -243,7 +246,7 @@ def run_fold(
         best_raw   = {}
         best_score = float('-inf')
 
-    best_params = normalize_weights({**base_params, **best_raw})
+    best_params = normalize_weights({**fold_base, **best_raw})
     print(f'  best_train_score={best_score:.4f}  regime={regime}')
     print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
 
@@ -275,6 +278,9 @@ def _evaluate_holdout(
     """
     Run a single backtest on the holdout window with *params* and return
     (run_id, composite_score).  Returns (None, None) on failure.
+
+    Always runs as a subprocess so the OS-level timeout fires reliably
+    regardless of what the backtest is blocked on.
     """
     from tuning.objective import BacktestObjective
 
@@ -502,6 +508,63 @@ def _save_holdout_score(fold_idx: int, run_id: str | None, score: float | None) 
 
 
 # ---------------------------------------------------------------------------
+# Holdout-only replay
+# ---------------------------------------------------------------------------
+
+def _run_holdout_only(
+    folds: list[Fold],
+    base_params: dict[str, Any],
+    fold_idx: int | None = None,
+) -> None:
+    """
+    For each fold that has at least one COMPLETE training trial, load the Optuna
+    study's best params and evaluate the holdout period without running any new
+    training trials.  Saves results to tuning_studies.
+
+    If *fold_idx* is given, only that fold is processed.
+    """
+    storage = optuna.storages.RDBStorage(url=_DB_URL)
+    indices = [fold_idx] if fold_idx is not None else list(range(len(folds)))
+
+    for idx in indices:
+        fold = folds[idx]
+        study_name = _study_name(idx)
+
+        try:
+            study = optuna.load_study(study_name=study_name, storage=storage)
+            best_raw   = study.best_params
+            best_score = study.best_value
+        except Exception:
+            print(f'[fold {idx:02d}] no complete trials — skipping holdout')
+            continue
+
+        regime_detector = RegimeDetector(_DB_URL)
+        regime = regime_detector.label_window(fold.train_start, fold.train_end)
+
+        fold_base = {k: v for k, v in base_params.items() if PARAMETER_SPACE[k].tier not in PHASE4_TIERS}
+        for k, spec in PARAMETER_SPACE.items():
+            if k in fold_base and spec.high is not None:
+                fold_base[k] = min(fold_base[k], spec.high)
+            if k in fold_base and spec.low is not None:
+                fold_base[k] = max(fold_base[k], spec.low)
+        best_params_full = normalize_weights({**fold_base, **best_raw})
+
+        print(
+            f'\n[fold {idx:02d}] {fold}  regime={regime}'
+            f'  best_train_score={best_score:.4f}',
+            flush=True,
+        )
+        print(f'  best_params (Tier 3): { {k: round(v, 4) for k, v in best_raw.items()} }')
+
+        holdout_run_id, holdout_score = _evaluate_holdout(fold, best_params_full)
+        if holdout_score is not None:
+            print(f'  holdout_score={holdout_score:.4f}  run_id={holdout_run_id}')
+        else:
+            print(f'  holdout evaluation FAILED')
+        _save_holdout_score(idx, holdout_run_id, holdout_score)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -534,6 +597,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--list-folds', action='store_true',
         help='Print the fold plan (regime-labelled) and exit.',
+    )
+    parser.add_argument(
+        '--holdout-only', action='store_true',
+        help='Skip training; evaluate holdout with existing best params for each fold.',
     )
     return parser.parse_args()
 
@@ -573,6 +640,10 @@ def main() -> None:
             return
 
     base_params = _load_base_params()
+
+    if args.holdout_only:
+        _run_holdout_only(folds, base_params, fold_idx=args.fold)
+        return
 
     if args.fold is not None:
         if args.fold < 0 or args.fold >= len(folds):

@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
-import threading
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -130,28 +128,19 @@ class BacktestObjective:
         """
         Run BobsBrain.backtest() with *params* and return the run_id written
         to the DB, or None if the backtest raises an exception or times out.
-        """
-        from lumibot.backtesting import YahooDataBacktesting
-        from BobsBrain import BobsBrain
 
+        When *trial_timeout_secs* is set, the backtest is run in a subprocess
+        via ``subprocess.run(..., timeout=...)``.  This guarantees an OS-level
+        SIGKILL after the deadline even if the backtest is blocked inside a
+        C-extension or network call (threading.Timer cannot do this).
+        """
         start_ts = datetime.now(timezone.utc)
 
-        timed_out = threading.Event()
-        timer: threading.Timer | None = None
-
-        def _on_timeout() -> None:
-            timed_out.set()
-            # SIGALRM only works on the main thread; use SIGINT as a best-effort
-            # interrupt when running in a worker thread.
-            try:
-                signal.raise_signal(signal.SIGINT)
-            except (AttributeError, OSError):
-                pass
-
         if self.trial_timeout_secs is not None:
-            timer = threading.Timer(self.trial_timeout_secs, _on_timeout)
-            timer.daemon = True
-            timer.start()
+            return self._run_backtest_subprocess(params, start_ts)
+
+        from lumibot.backtesting import YahooDataBacktesting
+        from BobsBrain import BobsBrain
 
         try:
             BobsBrain.backtest(
@@ -164,17 +153,82 @@ class BacktestObjective:
                 show_tearsheet=False,
                 save_tearsheet=False,
             )
-        except KeyboardInterrupt:
-            if timed_out.is_set():
-                logger.warning('Trial timed out after %d s — pruning', self.trial_timeout_secs)
-                return None
-            raise
         except Exception:
             logger.exception('BobsBrain.backtest raised an exception')
             return None
+
+        return self._find_run_id(after_ts=start_ts)
+
+    def _run_backtest_subprocess(
+        self,
+        params: dict[str, Any],
+        start_ts: datetime,
+    ) -> str | None:
+        """
+        Run BobsBrain.backtest in a child process so the OS-level timeout
+        (SIGKILL) fires reliably regardless of what the backtest is blocked on.
+        """
+        import json
+        import subprocess
+        import sys
+        import tempfile
+
+        # Serialise params to a temp file; the child reads and runs the backtest.
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False
+        ) as fh:
+            json.dump(
+                {
+                    'train_start': self.train_start.isoformat(),
+                    'train_end':   self.train_end.isoformat(),
+                    'budget':      self.budget,
+                    'params':      params,
+                },
+                fh,
+            )
+            param_file = fh.name
+
+        script = (
+            'import json, sys\n'
+            'from lumibot.backtesting import YahooDataBacktesting\n'
+            'from BobsBrain import BobsBrain\n'
+            'from datetime import datetime\n'
+            'from dotenv import load_dotenv; load_dotenv()\n'
+            f'd = json.load(open({param_file!r}))\n'
+            'BobsBrain.backtest(\n'
+            '    YahooDataBacktesting,\n'
+            '    datetime.fromisoformat(d["train_start"]),\n'
+            '    datetime.fromisoformat(d["train_end"]),\n'
+            '    budget=d["budget"],\n'
+            '    parameters=d["params"],\n'
+            '    show_plot=False, show_tearsheet=False, save_tearsheet=False,\n'
+            ')\n'
+        )
+
+        try:
+            result = subprocess.run(
+                [sys.executable, '-c', script],
+                timeout=self.trial_timeout_secs,
+                capture_output=False,
+            )
+            if result.returncode != 0:
+                logger.warning('Backtest subprocess exited with code %d', result.returncode)
+                return None
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                'Trial timed out after %d s (subprocess killed) — pruning',
+                self.trial_timeout_secs,
+            )
+            return None
+        except Exception:
+            logger.exception('Backtest subprocess raised')
+            return None
         finally:
-            if timer is not None:
-                timer.cancel()
+            import os as _os
+            try:
+                _os.unlink(param_file)
+            except OSError:
+                pass
 
         return self._find_run_id(after_ts=start_ts)
 

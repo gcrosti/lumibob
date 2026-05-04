@@ -18,6 +18,11 @@ from TickerClusterer import TickerClusterer
 
 load_dotenv()
 
+# ADF p-value ceiling used to normalise coint_score: pairs at or above this
+# value score 0 on the cointegration component.  Shared between the discovery
+# loop and the re-score loop so both produce comparable values.
+_COINT_PVALUE_CEILING = 0.20
+
 SIC_SECTORS = {
     range(100, 1000):   'Agriculture, Forestry & Fishing',
     range(1000, 1500):  'Mining',
@@ -84,10 +89,15 @@ class BobsBrain(Strategy):
         # Log-return correlation windows (bars); long vs short horizon.
         self.corr_long_window = self.parameters.get('corr_long_window', 90)
         self.corr_short_window = self.parameters.get('corr_short_window', 20)
-        # Composite score weights (corr_long, corr_short, z_depth); should sum to 1.
+        # Composite score weights (5 components); normalised to sum to 1.
         self.w_corr_long = self.parameters.get('w_corr_long', 0.3)
         self.w_corr_short = self.parameters.get('w_corr_short', 0.5)
         self.w_z_depth = self.parameters.get('w_z_depth', 0.2)
+        # H5: cointegration quality and mean-reversion speed weights.
+        self.w_coint = self.parameters.get('w_coint', 0.25)
+        self.w_halflife = self.parameters.get('w_halflife', 0.15)
+        # Ceiling for half-life scoring: pairs with halflife >= this score 0.
+        self.max_halflife_days = self.parameters.get('max_halflife_days', 60)
 
         # Max new pairs scored per day (global budget).
         self.max_daily_candidates = self.parameters.get('max_daily_candidates', 200)
@@ -153,6 +163,7 @@ class BobsBrain(Strategy):
         self._db.migrate_pairs_sim_sharpe()
         self._db.migrate_ticker_metadata()
         self._db.migrate_failed_tickers()
+        self._db.migrate_coint_cache()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -215,6 +226,9 @@ class BobsBrain(Strategy):
                 'w_corr_long': self.w_corr_long,
                 'w_corr_short': self.w_corr_short,
                 'w_z_depth': self.w_z_depth,
+                'w_coint': self.w_coint,
+                'w_halflife': self.w_halflife,
+                'max_halflife_days': self.max_halflife_days,
                 # Discovery
                 'max_daily_candidates': self.max_daily_candidates,
                 'cooldown_days': self.cooldown_days,
@@ -250,6 +264,13 @@ class BobsBrain(Strategy):
         evaluator = StockEvaluator()
         end_date = self.get_datetime()
         start_date = end_date - timedelta(days=self.lookback_window)
+        today = end_date.date() if hasattr(end_date, 'date') else end_date
+
+        # Load cointegration cache for today's window upfront; avoids repeated
+        # ADF tests for pairs that have already been evaluated on this date.
+        self._coint_cache: dict[tuple[str, str], tuple[float, float | None]] = \
+            self._db.load_coint_cache(today, self.lookback_window)
+        self._coint_cache_new: dict[tuple[str, str], tuple[float, float | None]] = {}
 
         _series_cache: dict[str, pd.Series | None] = {}
 
@@ -291,11 +312,23 @@ class BobsBrain(Strategy):
                 exit_threshold=self.exit_threshold,
             )
 
+            # Reuse stored coint_pvalue from discovery — no ADF re-run needed.
+            stored_pvalue = pair.get('coint_pvalue', 1.0)
+            coint_score = max(0.0, 1.0 - stored_pvalue / _COINT_PVALUE_CEILING)
+            stored_hl = pair.get('halflife_days')
+            halflife_score = (
+                max(0.0, 1.0 - stored_hl / self.max_halflife_days)
+                if stored_hl is not None and np.isfinite(stored_hl)
+                else 0.0
+            )
+
             pair['corr_long'] = corr_long
             pair['corr_short'] = corr_short
             pair['z_depth'] = z_depth
             pair['current_zscore'] = current_z if current_z is not None else z_raw
-            pair['composite_score'] = self._composite_score(corr_long, corr_short, z_depth)
+            pair['composite_score'] = self._composite_score(
+                corr_long, corr_short, z_depth, coint_score, halflife_score,
+            )
 
             pid = pair.get('pair_id')
             if pid is not None and np.isfinite(corr_long):
@@ -318,8 +351,6 @@ class BobsBrain(Strategy):
             recompute_days=self.cluster_recompute_days,
             ticker_metadata=self._ticker_metadata,
         )
-
-        today = end_date.date() if hasattr(end_date, 'date') else end_date
 
         pairs_scanned = 0
         candidates_found = 0
@@ -382,7 +413,28 @@ class BobsBrain(Strategy):
                         s1, s2, self.zscore_window,
                         self.entry_threshold, self.exit_threshold,
                     )
-                    score = self._composite_score(corr_long, corr_short, z_depth)
+
+                    # Cointegration / half-life scores — cache-first.
+                    cache_key = (stock1, stock2)
+                    if cache_key in self._coint_cache:
+                        coint_pvalue, halflife_days = self._coint_cache[cache_key]
+                    else:
+                        ss = evaluator.compute_spread_scores(
+                            s1, s2, max_halflife_days=float(self.max_halflife_days),
+                        )
+                        coint_pvalue, halflife_days = ss.coint_pvalue, ss.halflife_days
+                        self._coint_cache[cache_key] = (coint_pvalue, halflife_days)
+                        self._coint_cache_new[cache_key] = (coint_pvalue, halflife_days)
+
+                    coint_score = max(0.0, 1.0 - coint_pvalue / _COINT_PVALUE_CEILING)
+                    halflife_score = (
+                        max(0.0, 1.0 - halflife_days / self.max_halflife_days)
+                        if halflife_days is not None and np.isfinite(halflife_days)
+                        else 0.0
+                    )
+                    score = self._composite_score(
+                        corr_long, corr_short, z_depth, coint_score, halflife_score,
+                    )
 
                     candidates_found += 1
                     budget_remaining -= 1
@@ -393,12 +445,19 @@ class BobsBrain(Strategy):
                         'corr_short': corr_short,
                         'z_depth': z_depth,
                         'z_raw': z_raw,
+                        'coint_pvalue': coint_pvalue,
+                        'halflife_days': halflife_days,
                         'composite_score': score,
                     })
 
                 clusters_tried += 1
 
             self._next_cluster_idx = (start_idx + 1) % n_clusters
+
+        # Persist newly computed cointegration results to the DB cache.
+        if self._coint_cache_new:
+            self._db.write_coint_cache(self._coint_cache_new, today, self.lookback_window)
+            self._coint_cache_new = {}
 
         for sym in new_penny_stocks:
             self._failed_tickers.add(sym)
@@ -467,6 +526,8 @@ class BobsBrain(Strategy):
                     'z_depth': cand_data['z_depth'],
                     'composite_score': cand_data['composite_score'],
                     'current_zscore': cand_data.get('z_raw'),
+                    'coint_pvalue': cand_data.get('coint_pvalue', 1.0),
+                    'halflife_days': cand_data.get('halflife_days'),
                     'action': 'buy',
                     'signal_type': 'zscore',
                     'zscore_window': self.zscore_window,
@@ -851,11 +912,16 @@ class BobsBrain(Strategy):
         corr_long: float,
         corr_short: float,
         z_depth: float,
+        coint_score: float = 0.0,
+        halflife_score: float = 0.0,
     ) -> float:
         """
-        Weighted composite of the three scoring components.  Each correlation
-        value is clamped to [0, 1] before weighting; z_depth is already in
-        that range by construction.
+        Weighted composite of five scoring components.  Each correlation value
+        is clamped to [0, 1] before weighting; z_depth, coint_score, and
+        halflife_score are already in [0, 1] by construction.
+
+        Defaults of 0 for coint_score / halflife_score mean old callers that
+        do not supply them behave identically to before (modulo weight normalisation).
         """
         cl = max(corr_long, 0.0) if not np.isnan(corr_long) else 0.0
         cs = max(corr_short, 0.0) if not np.isnan(corr_short) else 0.0
@@ -863,4 +929,6 @@ class BobsBrain(Strategy):
             self.w_corr_long * min(cl, 1.0)
             + self.w_corr_short * min(cs, 1.0)
             + self.w_z_depth * z_depth
+            + self.w_coint * coint_score
+            + self.w_halflife * halflife_score
         )

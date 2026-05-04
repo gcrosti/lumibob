@@ -25,9 +25,14 @@ STRATEGY_PARAMETERS = {
     # --- Scoring ---
     'corr_long_window': 90,
     'corr_short_window': 20,
-    'w_corr_long': 0.3,
-    'w_corr_short': 0.5,
-    'w_z_depth': 0.2,
+    # 5-component composite score — normalised defaults (raw: 0.3, 0.5, 0.2, 0.25, 0.15 → ÷1.4).
+    # BobsBrain uses these as-is; call tuning.parameter_space.normalize_weights() if adjusting.
+    'w_corr_long': 0.2143,
+    'w_corr_short': 0.3571,
+    'w_z_depth': 0.1429,
+    'w_coint': 0.1786,
+    'w_halflife': 0.1071,
+    'max_halflife_days': 60,
 
     # --- Discovery ---
     'max_daily_candidates': 200,

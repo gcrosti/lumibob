@@ -73,7 +73,10 @@ CREATE TABLE IF NOT EXISTS pairs (
     initial_cost  NUMERIC,
     discovered_at DATE        NOT NULL,
     last_updated  DATE,
-    active        BOOLEAN     NOT NULL DEFAULT TRUE
+    active        BOOLEAN     NOT NULL DEFAULT TRUE,
+    -- H5: cointegration quality (stored at discovery for post-hoc analysis)
+    coint_pvalue  DOUBLE PRECISION,
+    halflife_days DOUBLE PRECISION
 );
 
 -- One active configuration per (run, lead, lag, lag_days) triple.
@@ -85,6 +88,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS pairs_run_lead_lag_days_idx
 
 CREATE INDEX IF NOT EXISTS pairs_lag_symbol_active_idx
     ON pairs (lag_symbol, active);
+
+-- ---------------------------------------------------------------------------
+-- Cross-run cointegration test result cache (H5)
+-- Keyed by (lead, lag, lookback_window, window_end_date) so results are
+-- shared across battery runs that cover the same date range.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pair_coint_cache (
+    lead_symbol     VARCHAR(20)       NOT NULL,
+    lag_symbol      VARCHAR(20)       NOT NULL,
+    lookback_window INT               NOT NULL,
+    window_end_date DATE              NOT NULL,
+    coint_pvalue    DOUBLE PRECISION  NOT NULL,
+    halflife_days   DOUBLE PRECISION,
+    computed_at     TIMESTAMP         NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (lead_symbol, lag_symbol, lookback_window, window_end_date)
+);
 
 -- ---------------------------------------------------------------------------
 -- Backtest / paper run metadata

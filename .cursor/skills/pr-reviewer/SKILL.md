@@ -66,7 +66,27 @@ For every function/method touched in the diff: is there a corresponding test? We
 **Step 10 — Dependency hygiene** *(only if `requirements.txt` changed)*
 - New dependency necessary and justified, pinned to a version, actively maintained
 
-**Step 11 — Commit hygiene**
+**Step 11 — Tuning engine consistency** *(skip only if the diff touches no strategy logic)*
+
+Any change to how the strategy discovers, scores, enters, or exits pairs may require tuning engine updates. Check each of the following:
+
+- **New parameter exposed**: is it in `tuning/parameter_space.py` with the correct tier, default, and search bounds? If it is a composite score weight, is it added to `_WEIGHT_NAMES`?
+- **Parameter removed or renamed**: does `parameter_space.py` still reference it? Is it still in `BobsBrain.initialize()` defaults?
+- **Composite score changed** (new component, new weight, new normalisation): does `normalize_weights()` in `parameter_space.py` handle the full new weight set?
+- **Settings dict in `create_run()`**: does it include every new tunable param so runs are self-describing in the DB?
+- **Tier boundaries**: does any new param belong in a tier other than what was chosen? (Tier 1 = constant, Tier 2 = slow-adaptive, Tier 3 = fast-adaptive / regime-conditioned)
+
+
+Flag any mismatch as **blocking** — an unregistered parameter cannot be optimized by Optuna and silently uses its default across all tuning runs.
+
+**Step 12 — Documentation** *(README and inline docs)*
+
+- If the PR changes user-visible behaviour (new parameters, changed defaults, new exit modes, new DB tables/columns), is `README.md` updated?
+- If the PR adds or changes operational steps (migrations to run, env vars to set, scripts to invoke), are those reflected in the README or relevant docs?
+- Do new public methods/functions have docstrings that explain *what* and *why*, not just *what*?
+- Flag missing README updates as **blocking** when the gap would leave a user unable to configure or operate the changed behaviour correctly; flag as **non-blocking nit** otherwise.
+
+**Step 13 — Commit hygiene**
 - Commits atomic and scoped; messages descriptive (not "fix", "WIP", "changes")
 
 ---

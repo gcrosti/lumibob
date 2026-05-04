@@ -46,6 +46,7 @@ scripts/
 
 migrations/
   001_add_exit_reason.sql   ALTER TABLE migration for exit_reason column
+  002_coint_cache.sql       Add pair_coint_cache table and coint_pvalue/halflife_days columns to pairs
 ```
 
 | Module | Responsibility |
@@ -138,6 +139,11 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `w_corr_long` | Composite weight on long correlation | `0.3` |
 | `w_corr_short` | Composite weight on short correlation | `0.5` |
 | `w_z_depth` | Composite weight on Z-score depth | `0.2` |
+| `w_coint` | Composite weight on cointegration quality (ADF p-value) | `0.25` |
+| `w_halflife` | Composite weight on mean-reversion speed (AR(1) half-life) | `0.15` |
+| `max_halflife_days` | Half-life ceiling for scoring; pairs at or above this score 0 | `60` |
+
+All five `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
 
 ### Discovery
 
@@ -252,6 +258,7 @@ Apply **`schema.sql`** on a fresh database. For existing databases, apply increm
 
 ```bash
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/001_add_exit_reason.sql
+psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/002_coint_cache.sql
 ```
 
 **`DatabaseClient`** also runs idempotent **`ALTER … IF NOT EXISTS`** migrations at startup for incremental columns/tables.

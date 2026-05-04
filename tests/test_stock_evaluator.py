@@ -9,7 +9,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from StockEvaluator import StockEvaluator
+from StockEvaluator import StockEvaluator, SpreadScores
 
 
 class TestGetCorrelation(unittest.TestCase):
@@ -321,6 +321,99 @@ class TestComputeZDepth(unittest.TestCase):
         s = pd.Series(np.cumsum(rng.normal(0, 1, 80)) + 100)
         z_depth, _ = self.evaluator.compute_z_depth(s, s)
         self.assertAlmostEqual(z_depth, 0.0, places=1)
+
+
+class TestComputeSpreadScores(unittest.TestCase):
+    def setUp(self):
+        self.evaluator = StockEvaluator()
+
+    def _make_cointegrated_pair(self, n: int = 200, seed: int = 42):
+        """Shared random walk plus stationary noise — cointegrated by construction."""
+        rng = np.random.default_rng(seed)
+        common = np.cumsum(rng.normal(0, 1, n)) + 100
+        lead = pd.Series(common + rng.normal(0, 0.1, n))
+        lag = pd.Series(common + rng.normal(0, 0.1, n))
+        return lead.clip(lower=0.01), lag.clip(lower=0.01)
+
+    def _make_independent_pair(self, n: int = 200, seed: int = 99):
+        """Two fully independent random walks."""
+        rng = np.random.default_rng(seed)
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        lag = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        return lead.clip(lower=0.01), lag.clip(lower=0.01)
+
+    def test_returns_spread_scores_namedtuple(self):
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        self.assertIsInstance(result, SpreadScores)
+
+    def test_cointegrated_pair_scores_high(self):
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        self.assertGreater(result.coint_score, 0.5)
+        self.assertIsNotNone(result.halflife_days)
+        self.assertGreater(result.halflife_days, 0)
+
+    def test_independent_pair_scores_low_coint(self):
+        """Independent random walks should produce a low cointegration score most of the time."""
+        lead, lag = self._make_independent_pair()
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        self.assertLess(result.coint_score, 0.5)
+
+    def test_non_stationary_spread_gives_zero_halflife_score(self):
+        """A non-stationary spread (|rho| >= 1) produces halflife_score == 0."""
+        rng = np.random.default_rng(7)
+        n = 150
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100).clip(lower=0.01)
+        lag = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100).clip(lower=0.01)
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        # Either halflife_days is None (non-stationary) or score is 0
+        if result.halflife_days is None:
+            self.assertEqual(result.halflife_score, 0.0)
+
+    def test_graceful_on_all_nan_input(self):
+        nan_series = pd.Series([float('nan')] * 100)
+        other = pd.Series(range(1, 101), dtype=float)
+        result = self.evaluator.compute_spread_scores(nan_series, other)
+        self.assertEqual(result, SpreadScores(0.0, 0.0, 1.0, None))
+
+    def test_graceful_on_too_short_input(self):
+        short = pd.Series([100.0, 101.0, 100.5])
+        result = self.evaluator.compute_spread_scores(short, short)
+        self.assertEqual(result, SpreadScores(0.0, 0.0, 1.0, None))
+
+    def test_coint_score_between_zero_and_one(self):
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        self.assertGreaterEqual(result.coint_score, 0.0)
+        self.assertLessEqual(result.coint_score, 1.0)
+
+    def test_halflife_score_between_zero_and_one(self):
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.compute_spread_scores(lead, lag)
+        self.assertGreaterEqual(result.halflife_score, 0.0)
+        self.assertLessEqual(result.halflife_score, 1.0)
+
+    def test_is_cointegrated_still_works_on_cointegrated_pair(self):
+        """Regression: is_cointegrated must still return True after log-price fix."""
+        lead, lag = self._make_cointegrated_pair()
+        self.assertTrue(self.evaluator.is_cointegrated(lead, lag))
+
+    def test_halflife_score_zero_when_halflife_at_ceiling(self):
+        """A pair with halflife_days >= max_halflife_days should score 0."""
+        lead, lag = self._make_cointegrated_pair()
+        result = self.evaluator.compute_spread_scores(
+            lead, lag, max_halflife_days=1.0
+        )
+        self.assertEqual(result.halflife_score, 0.0)
+
+    def test_max_halflife_days_controls_scoring_range(self):
+        """Wider ceiling → same halflife_days → higher halflife_score."""
+        lead, lag = self._make_cointegrated_pair()
+        r_narrow = self.evaluator.compute_spread_scores(lead, lag, max_halflife_days=30.0)
+        r_wide = self.evaluator.compute_spread_scores(lead, lag, max_halflife_days=120.0)
+        if r_narrow.halflife_days is not None and r_wide.halflife_days is not None:
+            self.assertGreaterEqual(r_wide.halflife_score, r_narrow.halflife_score)
 
 
 if __name__ == '__main__':
