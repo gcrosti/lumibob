@@ -162,12 +162,12 @@ class TestPairs:
                   short_ma=2, long_ma=5, corr=0.91, initial_cost=None,
                   sim_ret=None, sim_sharpe=None, signal_type=None,
                   zscore_window=None, entry_threshold=None, exit_threshold=None,
-                  coint_pvalue=None, halflife_days=None):
-        """Build a 16-column pairs row matching the SELECT in load_active_pairs."""
+                  coint_pvalue=None, halflife_days=None, lead_short_qty=None):
+        """Build a 17-column pairs row matching the SELECT in load_active_pairs."""
         return (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
                 sim_ret, sim_sharpe, signal_type, zscore_window,
                 entry_threshold, exit_threshold,
-                coint_pvalue, halflife_days)
+                coint_pvalue, halflife_days, lead_short_qty)
 
     def test_load_active_pairs_returns_dict_keyed_by_lag(self):
         client, mock_pool = _make_client()
@@ -180,6 +180,15 @@ class TestPairs:
         assert result["MSFT"]["pair_id"] == 1
         assert result["MSFT"]["action"] == "hold"
         assert result["MSFT"]["corr_long"] == 0.91
+        assert result["MSFT"]["lead_short_qty"] is None
+
+    def test_load_active_pairs_includes_lead_short_qty_when_set(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row(lead_short_qty=12.5)])
+
+        result = client.load_active_pairs("run01")
+
+        assert result["MSFT"]["lead_short_qty"] == 12.5
 
     def test_load_active_pairs_filters_by_run_id(self):
         client, mock_pool = _make_client()
@@ -560,3 +569,4 @@ class TestLogging:
         params = mock_cur.execute.call_args[0][1]
         assert "MSFT" in params
         assert "buy" in params
+        assert params[-1] == "long"  # leg

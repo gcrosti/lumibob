@@ -34,6 +34,9 @@ STRATEGY_PARAMETERS = {
     'w_halflife': 0.1071,
     'max_halflife_days': 60,
 
+    # --- Execution (H1 dollar-neutral) ---
+    'enable_short_leg': False,      # True: short lead in equal notional on each pair entry
+
     # --- Discovery ---
     'max_daily_candidates': 200,
     'cooldown_days': 7,

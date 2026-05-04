@@ -202,7 +202,7 @@ class DatabaseClient:
                    short_ma, long_ma, correlation, initial_cost,
                    simulated_return, sim_sharpe, signal_type,
                    zscore_window, entry_threshold, exit_threshold,
-                   coint_pvalue, halflife_days
+                   coint_pvalue, halflife_days, lead_short_qty
             FROM   pairs
             WHERE  active = TRUE
               AND  run_id = %s
@@ -217,7 +217,7 @@ class DatabaseClient:
             (pid, lead, lag, lag_days, short_ma, long_ma, correlation, initial_cost,
              sim_ret, sim_sharpe, signal_type, zscore_window,
              entry_threshold, exit_threshold,
-             coint_pvalue, halflife_days) = row
+             coint_pvalue, halflife_days, lead_short_qty) = row
             result[lag] = {
                 "pair_id":          pid,
                 "lead_stock":       lead,
@@ -236,6 +236,7 @@ class DatabaseClient:
                 "exit_threshold":   float(exit_threshold) if exit_threshold is not None else None,
                 "coint_pvalue":     float(coint_pvalue) if coint_pvalue is not None else None,
                 "halflife_days":    float(halflife_days) if halflife_days is not None else None,
+                "lead_short_qty":   float(lead_short_qty) if lead_short_qty is not None else None,
             }
         return result
 
@@ -410,8 +411,9 @@ class DatabaseClient:
                 (run_id, lead_symbol, lag_symbol, lag_days, short_ma, long_ma,
                  correlation, simulated_return, sim_sharpe, signal_type, zscore_window,
                  entry_threshold, exit_threshold, coint_pvalue, halflife_days,
+                 lead_short_qty,
                  discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -429,6 +431,7 @@ class DatabaseClient:
                 exit_threshold = pair.get("exit_threshold")
                 coint_pvalue = pair.get("coint_pvalue")
                 halflife_days = pair.get("halflife_days")
+                lead_short_qty = pair.get("lead_short_qty")
                 cur.execute(sql, (
                     run_id,
                     pair["lead_stock"],
@@ -445,6 +448,7 @@ class DatabaseClient:
                     float(exit_threshold) if exit_threshold is not None else None,
                     float(coint_pvalue) if coint_pvalue is not None else None,
                     float(halflife_days) if halflife_days is not None else None,
+                    float(lead_short_qty) if lead_short_qty is not None else None,
                     today,
                     today,
                 ))
@@ -480,12 +484,22 @@ class DatabaseClient:
                     (float(initial_cost), pair_id),
                 )
 
+    def update_pair_lead_short_qty(self, pair_id: int, qty: float | None) -> None:
+        """Persist open short size on the lead leg (NULL when flat / long-only)."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE pairs SET lead_short_qty=%s WHERE id=%s",
+                    (float(qty) if qty is not None else None, pair_id),
+                )
+
     def deactivate_pair(self, lag_symbol: str, run_id: str) -> None:
         """Mark active pairs for the given lag symbol and run as inactive."""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE pairs SET active=FALSE WHERE lag_symbol=%s AND run_id=%s AND active=TRUE",
+                    "UPDATE pairs SET active=FALSE, lead_short_qty=NULL "
+                    "WHERE lag_symbol=%s AND run_id=%s AND active=TRUE",
                     (lag_symbol, run_id),
                 )
 
@@ -519,6 +533,31 @@ class DatabaseClient:
             with conn.cursor() as cur:
                 for sql in statements:
                     cur.execute(sql)
+
+    def migrate_short_leg(self) -> None:
+        """
+        Idempotent migration: trades.leg (long vs short fills) and
+        pairs.lead_short_qty for paper restart. Safe to call on every startup.
+        """
+        statements = [
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS leg VARCHAR(5) NOT NULL DEFAULT 'long'",
+            "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS lead_short_qty NUMERIC",
+        ]
+        constraint_sql = """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = 'trades_leg_check'
+            ) THEN
+                ALTER TABLE trades ADD CONSTRAINT trades_leg_check CHECK (leg IN ('long', 'short'));
+            END IF;
+        END $$;
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+                cur.execute(constraint_sql)
 
     def load_coint_cache(
         self,
@@ -705,6 +744,7 @@ class DatabaseClient:
         pair_id: int | None = None,
         slippage: float = 0.0,
         exit_reason: str | None = None,
+        leg: str = 'long',
     ) -> None:
         """Insert one trade fill row.
 
@@ -712,15 +752,19 @@ class DatabaseClient:
           'zscore_exit'  — spread reverted below exit_threshold
           'displaced'    — pair crowded out of top-K by a higher-scoring candidate
           'data_missing' — price data unavailable; reason could not be determined
+
+        leg distinguishes long-leg fills (lag stock) vs short-leg fills (lead):
+          'long'  — lag position (default)
+          'short' — lead short / cover
         """
         sql = """
             INSERT INTO trades
-                (run_id, pair_id, symbol, side, quantity, price, slippage, filled_at, exit_reason)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (run_id, pair_id, symbol, side, quantity, price, slippage, filled_at, exit_reason, leg)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (
                     run_id, pair_id, symbol, side,
-                    quantity, price, slippage, filled_at, exit_reason,
+                    quantity, price, slippage, filled_at, exit_reason, leg,
                 ))

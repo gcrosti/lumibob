@@ -47,6 +47,7 @@ scripts/
 migrations/
   001_add_exit_reason.sql   ALTER TABLE migration for exit_reason column
   002_coint_cache.sql       Add pair_coint_cache table and coint_pvalue/halflife_days columns to pairs
+  003_short_leg.sql         trades.leg (long vs short fills) and pairs.lead_short_qty (H1)
 ```
 
 | Module | Responsibility |
@@ -121,6 +122,7 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `min_position_pct` | Min fraction of portfolio for a new position (low score) | `0.03` |
 | `max_position_pct` | Max fraction of portfolio for a new position (high score) | `0.20` |
 | `target_deployed_pct` | Target deployed fraction; gap boosts per-buy allocation | `0.60` |
+| `enable_short_leg` | When `true`, short the lead in equal notional on pair entry (dollar-neutral book) | `false` |
 
 ### Signal
 
@@ -247,7 +249,7 @@ PostgreSQL with [TimescaleDB](https://www.timescale.com/) for time-series prices
 | `backtest_runs` | Run metadata and **`settings` JSONB** (all 26 strategy parameters) |
 | `pairs` | Lead/lag pairs; **`correlation`** stores long-horizon **`corr_long`** |
 | `portfolio_snapshots` | Daily portfolio, cash, SPY line, discovery funnel columns |
-| `trades` | Fills with optional slippage; **`exit_reason`** distinguishes `zscore_exit` / `displaced` / `data_missing` |
+| `trades` | Fills with optional slippage; **`exit_reason`** distinguishes `zscore_exit` / `displaced` / `data_missing`; **`leg`** distinguishes lag long vs lead short leg |
 | `failed_tickers` | Symbols skipped after bad price fetches |
 | `tuning_studies` | Optuna study metadata, fold windows, holdout metrics |
 | `active_parameters` | Current best-trial parameters used by live strategy |
@@ -259,6 +261,7 @@ Apply **`schema.sql`** on a fresh database. For existing databases, apply increm
 ```bash
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/001_add_exit_reason.sql
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/002_coint_cache.sql
+psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/003_short_leg.sql
 ```
 
 **`DatabaseClient`** also runs idempotent **`ALTER … IF NOT EXISTS`** migrations at startup for incremental columns/tables.

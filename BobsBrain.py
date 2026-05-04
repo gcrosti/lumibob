@@ -133,6 +133,9 @@ class BobsBrain(Strategy):
         )
         self.min_intra_cluster_corr = self.parameters.get('min_intra_cluster_corr', 0.3)
 
+        # H1: dollar-neutral pair legs — short lead in equal notional on entry.
+        self.enable_short_leg = bool(self.parameters.get('enable_short_leg', False))
+
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
         self._starting_portfolio_value = None
@@ -164,6 +167,7 @@ class BobsBrain(Strategy):
         self._db.migrate_ticker_metadata()
         self._db.migrate_failed_tickers()
         self._db.migrate_coint_cache()
+        self._db.migrate_short_leg()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -248,6 +252,7 @@ class BobsBrain(Strategy):
                 'hdbscan_selection_method': self.hdbscan_selection_method,
                 'hdbscan_cluster_selection_epsilon': self.hdbscan_cluster_selection_epsilon,
                 'min_intra_cluster_corr': self.min_intra_cluster_corr,
+                'enable_short_leg': self.enable_short_leg,
             },
         )
 
@@ -534,6 +539,7 @@ class BobsBrain(Strategy):
                     'entry_threshold': self.entry_threshold,
                     'exit_threshold': self.exit_threshold,
                 }
+                new_pair['lead_short_qty'] = None
                 new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
                 self.pairs[symbol] = new_pair
                 target_portfolio[symbol] = new_pair
@@ -597,9 +603,36 @@ class BobsBrain(Strategy):
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
                             exit_reason=pair.get('exit_reason'),
+                            leg='long',
                         )
                     else:
                         print(f"Warning: could not log sell trade for {symbol} — price unavailable.")
+
+                if self.enable_short_leg:
+                    lead_sym = pair['lead_stock']
+                    sq = pair.get('lead_short_qty')
+                    if sq is not None and float(sq) > 0:
+                        cover_qty = float(sq)
+                        order_lead = self.create_order(lead_sym, cover_qty, 'buy')
+                        self.submit_order(order_lead)
+                        lead_px = self.get_last_price(lead_sym)
+                        if lead_px and lead_px > 0:
+                            self._db.log_trade(
+                                run_id=self._run_id,
+                                symbol=lead_sym,
+                                side='buy',
+                                quantity=cover_qty,
+                                price=float(lead_px),
+                                filled_at=now,
+                                pair_id=pair.get('pair_id'),
+                                exit_reason=pair.get('exit_reason'),
+                                leg='short',
+                            )
+                        else:
+                            print(
+                                f"Warning: could not log cover trade for {lead_sym} — price unavailable."
+                            )
+
                 self._db.deactivate_pair(symbol, self._run_id)
                 to_remove.append(symbol)
 
@@ -637,8 +670,20 @@ class BobsBrain(Strategy):
                     base_budget = min(base_budget + gap_share, self.max_position_pct * portfolio_value)
                 per_stock_budget = base_budget
 
-                if available_cash < per_stock_budget:
+                effective_cost = per_stock_budget * (2 if self.enable_short_leg else 1)
+                if available_cash < effective_cost:
                     continue  # budget exceeds cash; try the next (cheaper) candidate
+
+                lead_qty: float | None = None
+                lead_px: float | None = None
+                if self.enable_short_leg:
+                    lp = self.get_last_price(pair['lead_stock'])
+                    if not lp or lp <= 0:
+                        continue
+                    lead_px = float(lp)
+                    lead_qty = round(per_stock_budget / lead_px, 6)
+                    if lead_qty <= 0:
+                        continue
 
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
@@ -646,8 +691,8 @@ class BobsBrain(Strategy):
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
-                        available_cash -= per_stock_budget
-                        deployment_gap = max(0.0, deployment_gap - per_stock_budget)
+                        available_cash -= effective_cost
+                        deployment_gap = max(0.0, deployment_gap - effective_cost)
                         n_candidates -= 1
                         new_buy_symbols.add(pair['lag_stock'])
                         daily_new_buys += 1
@@ -659,7 +704,25 @@ class BobsBrain(Strategy):
                             price=float(price),
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
+                            leg='long',
                         )
+                        if self.enable_short_leg and lead_qty is not None and lead_qty > 0 and lead_px:
+                            order_s = self.create_order(pair['lead_stock'], lead_qty, 'sell')
+                            self.submit_order(order_s)
+                            self._db.log_trade(
+                                run_id=self._run_id,
+                                symbol=pair['lead_stock'],
+                                side='sell',
+                                quantity=float(lead_qty),
+                                price=float(lead_px),
+                                filled_at=now,
+                                pair_id=pair.get('pair_id'),
+                                leg='short',
+                            )
+                            pair['lead_short_qty'] = float(lead_qty)
+                            pid = pair.get('pair_id')
+                            if pid is not None:
+                                self._db.update_pair_lead_short_qty(int(pid), float(lead_qty))
                 else:
                     # Price permanently unavailable — record and evict from queue
                     # so this pair stops consuming cash budget each day.

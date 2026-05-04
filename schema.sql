@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS pairs (
     active        BOOLEAN     NOT NULL DEFAULT TRUE,
     -- H5: cointegration quality (stored at discovery for post-hoc analysis)
     coint_pvalue  DOUBLE PRECISION,
-    halflife_days DOUBLE PRECISION
+    halflife_days DOUBLE PRECISION,
+    -- H1: open short quantity on lead (paper restart / analytics); NULL when long-only
+    lead_short_qty NUMERIC
 );
 
 -- One active configuration per (run, lead, lag, lag_days) triple.
@@ -161,7 +163,8 @@ CREATE TABLE IF NOT EXISTS trades (
     price       NUMERIC     NOT NULL,
     slippage    NUMERIC     NOT NULL DEFAULT 0,
     filled_at   TIMESTAMPTZ NOT NULL,
-    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing'))
+    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing')),
+    leg         VARCHAR(5)  NOT NULL DEFAULT 'long' CHECK (leg IN ('long', 'short'))
 );
 
 CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
