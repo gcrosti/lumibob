@@ -208,6 +208,10 @@ Win rate and avg P&L: match each sell to its corresponding buy by `symbol`. P&L 
 
 For complex multi-step tasks, follow the relevant workflow:
 
-- **Backtesting a change** → see [.claude/skills/backtest-agent.md](.claude/skills/backtest-agent.md)
-- **Strategy deep dive / underperformance analysis** → see [.claude/skills/deepdive-agent.md](.claude/skills/deepdive-agent.md)
-- **PR review** → see [.claude/skills/pr-reviewer.md](.claude/skills/pr-reviewer.md)
+- **Backtesting a change** → backtest-agent workflow below
+- **Strategy deep dive / underperformance analysis** → deepdive-agent workflow below
+- **PR review** → pr-reviewer workflow below
+
+@.claude/skills/backtest-agent.md
+@.claude/skills/deepdive-agent.md
+@.claude/skills/pr-reviewer.md
