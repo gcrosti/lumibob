@@ -560,6 +560,50 @@ class TestLogging:
         assert params[-2] is None  # gross_long_pct (not passed → None)
         assert params[-1] is None  # gross_short_pct (not passed → None)
 
+    def test_update_pair_lead_short_qty_executes_update(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_lead_short_qty(99, 7.5)
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "UPDATE pairs" in sql
+        assert "lead_short_qty" in sql
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] == 7.5
+        assert params[1] == 99
+
+    def test_update_pair_lead_short_qty_accepts_none(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_lead_short_qty(5, None)
+
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] is None
+
+    def test_migrate_short_leg_issues_alter_for_leg_column(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_short_leg()
+
+        all_calls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        assert any("leg" in sql for sql in all_calls)
+        assert any("lead_short_qty" in sql for sql in all_calls)
+        assert any("ADD COLUMN IF NOT EXISTS" in sql for sql in all_calls)
+
+    def test_migrate_snapshot_deployment_issues_alter_for_gross_columns(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_snapshot_deployment()
+
+        all_calls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        assert any("gross_long_pct" in sql for sql in all_calls)
+        assert any("gross_short_pct" in sql for sql in all_calls)
+        assert any("ADD COLUMN IF NOT EXISTS" in sql for sql in all_calls)
+
     def test_log_trade_inserts_fill_row(self):
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
