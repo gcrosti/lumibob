@@ -76,6 +76,8 @@ One row per trading day per run. TimescaleDB hypertable.
 | `pairs_scanned` | INT | Pair evaluations that cleared hard gates and were scored |
 | `candidates_found` | INT | Candidate pairs scored that day |
 | `candidates_buy_ready` | INT | New buy slots queued into the target portfolio that day |
+| `gross_long_pct` | NUMERIC | Sum of long notional / portfolio_value (interpretable deployment metric for dollar-neutral books) |
+| `gross_short_pct` | NUMERIC | Sum of short notional / portfolio_value (mirrors `gross_long_pct`; ~0 for long-only runs) |
 
 ### `trades`
 One row per filled order. All rows are fills — no status filtering needed.
@@ -203,6 +205,23 @@ Win rate and avg P&L: match each sell to its corresponding buy by `symbol`. P&L 
 - `completed_at IS NULL` in `backtest_runs`
 
 ---
+
+## Documentation Storage
+
+All generated documents must be saved in `docs/` with the correct subfolder — never at the project root or directly in `docs/`.
+
+| Document type | Folder | Naming convention |
+|---|---|---|
+| Strategy deep dives, findings, deepdive plans | `docs/deepdives/` | `YYYY-MM-DD_<topic-slug>.md` |
+| Implementation plans, feature plans, design plans | `docs/plans/` | `YYYY-MM-DD_<topic-slug>.md` |
+
+## .claude / .cursor Parity
+
+`.claude/skills/` and `.cursor/skills/` are mirrors of each other. When any skill file is created or modified in one location, apply the same content change to the counterpart in the other location. Preserve each format's conventions:
+- `.claude/skills/<name>.md` — plain Markdown, no frontmatter
+- `.cursor/skills/<name>/SKILL.md` — Markdown with YAML frontmatter (`name`, `description`)
+
+The same applies to rules: changes to tone, formatting, or verification guidelines that live in `.cursor/rules/` should be reflected in CLAUDE.md, and vice versa.
 
 ## Workflows
 

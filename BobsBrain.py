@@ -689,7 +689,11 @@ class BobsBrain(Strategy):
                     or pair['lag_stock'] in new_short_symbols
                     or pair['lead_stock'] in new_buy_symbols
                 ):
-                    continue  # mirror-pair conflict: same stock held in the opposite direction
+                    print(
+                        f"Skipping {pair['lag_stock']}/{pair['lead_stock']}: "
+                        f"mirror-pair conflict — same stock held in opposite direction."
+                    )
+                    continue
 
                 lead_qty: float | None = None
                 lead_px: float | None = None

@@ -1,31 +1,3 @@
----
-name: Short Leg Implementation
-overview: Add a genuine short leg for the lead symbol on every pair entry, making the book dollar-neutral and eliminating the SPY beta identified as the root cause (H1) of persistent losses across all regimes.
-todos:
-  - id: migration
-    content: "Create migrations/003_short_leg.sql: ALTER TABLE trades ADD leg, ALTER TABLE pairs ADD lead_short_qty"
-    status: completed
-  - id: schema
-    content: Update schema.sql to reflect the two new columns (trades.leg, pairs.lead_short_qty)
-    status: completed
-  - id: db-client
-    content: Update DatabaseClient.log_trade to accept and persist leg; update save_pair/load_active_pairs for lead_short_qty
-    status: completed
-  - id: brain-init
-    content: Add enable_short_leg parameter to BobsBrain.initialize
-    status: completed
-  - id: brain-buy
-    content: Add short lead entry in the buy block of on_trading_iteration; update cash guard to 2x cost
-    status: completed
-  - id: brain-sell
-    content: Add cover lead order in the sell block of on_trading_iteration
-    status: completed
-  - id: backtest
-    content: Run calm_bull_2017 with enable_short_leg=True and validate beta and return improvement
-    status: completed
-isProject: false
----
-
 # Short Leg for Lead Symbol (H1 Fix)
 
 ## Context

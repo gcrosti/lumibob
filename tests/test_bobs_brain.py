@@ -120,6 +120,46 @@ class TestCompositeScoreSizing(unittest.TestCase):
         available_cash = 2_000.0
         self.assertTrue(available_cash >= per_stock_budget)
 
+    def _conflict(self, pair, held_long=None, held_short=None,
+                  new_buy=None, new_short=None):
+        hl = held_long or set()
+        hs = held_short or set()
+        nb = new_buy or set()
+        ns = new_short or set()
+        return (
+            pair['lag_stock'] in hs
+            or pair['lead_stock'] in hl
+            or pair['lag_stock'] in ns
+            or pair['lead_stock'] in nb
+        )
+
+    def test_conflict_guard_blocks_lag_already_held_short(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, held_short={'AAPL'}))
+
+    def test_conflict_guard_blocks_lead_already_held_long(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, held_long={'MSFT'}))
+
+    def test_conflict_guard_blocks_lag_shorted_same_iteration(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, new_short={'AAPL'}))
+
+    def test_conflict_guard_blocks_lead_bought_same_iteration(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, new_buy={'MSFT'}))
+
+    def test_conflict_guard_passes_for_clean_pair(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertFalse(self._conflict(pair))
+
+    def test_conflict_guard_passes_when_different_symbols_in_sets(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertFalse(self._conflict(
+            pair, held_long={'GOOG'}, held_short={'TSLA'},
+            new_buy={'AMZN'}, new_short={'META'},
+        ))
+
     def test_candidates_sorted_by_score_descending(self):
         pairs = [
             {'lag_stock': 'LOW', 'composite_score': 0.2},
