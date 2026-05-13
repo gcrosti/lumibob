@@ -168,6 +168,7 @@ class BobsBrain(Strategy):
         self._db.migrate_failed_tickers()
         self._db.migrate_coint_cache()
         self._db.migrate_short_leg()
+        self._db.migrate_snapshot_deployment()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -640,18 +641,26 @@ class BobsBrain(Strategy):
             self.pairs.pop(symbol)
 
         # --- Execute buys ---
-        existing_position_symbols = {p.symbol for p in self.get_positions()}
+        existing_positions = self.get_positions()
+        existing_position_symbols = {p.symbol for p in existing_positions}
+        held_long = {p.symbol for p in existing_positions if p.quantity > 0}
+        held_short = {p.symbol for p in existing_positions if p.quantity < 0}
         buy_pairs = [
             pair for symbol, pair in self.pairs.items()
             if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
         new_buy_symbols: set[str] = set()
+        new_short_symbols: set[str] = set()
         no_price_symbols: list[str] = []
         daily_new_buys = 0
         if buy_pairs:
             portfolio_value = self.portfolio_value
-            available_cash = self.get_cash()
+            gross_short_notional = sum(
+                abs(pos.quantity) * (self.get_last_price(pos.symbol) or 0)
+                for pos in existing_positions if pos.quantity < 0
+            )
+            available_cash = self.get_cash() - gross_short_notional
             current_deployed = portfolio_value - available_cash
             deployment_gap = max(0.0, self.target_deployed_pct * portfolio_value - current_deployed)
             n_candidates = len(buy_pairs)
@@ -673,6 +682,14 @@ class BobsBrain(Strategy):
                 effective_cost = per_stock_budget * (2 if self.enable_short_leg else 1)
                 if available_cash < effective_cost:
                     continue  # budget exceeds cash; try the next (cheaper) candidate
+
+                if self.enable_short_leg and (
+                    pair['lag_stock'] in held_short
+                    or pair['lead_stock'] in held_long
+                    or pair['lag_stock'] in new_short_symbols
+                    or pair['lead_stock'] in new_buy_symbols
+                ):
+                    continue  # mirror-pair conflict: same stock held in the opposite direction
 
                 lead_qty: float | None = None
                 lead_px: float | None = None
@@ -720,6 +737,7 @@ class BobsBrain(Strategy):
                                 leg='short',
                             )
                             pair['lead_short_qty'] = float(lead_qty)
+                            new_short_symbols.add(pair['lead_stock'])
                             pid = pair.get('pair_id')
                             if pid is not None:
                                 self._db.update_pair_lead_short_qty(int(pid), float(lead_qty))
@@ -766,6 +784,18 @@ class BobsBrain(Strategy):
         ]
         avg_zscore = round(sum(zscore_pairs) / len(zscore_pairs), 4) if zscore_pairs else None
 
+        end_positions = self.get_positions()
+        gross_long = sum(
+            pos.quantity * (self.get_last_price(pos.symbol) or 0)
+            for pos in end_positions if pos.quantity > 0
+        )
+        gross_short = sum(
+            abs(pos.quantity) * (self.get_last_price(pos.symbol) or 0)
+            for pos in end_positions if pos.quantity < 0
+        )
+        gross_long_pct = round(gross_long / portfolio_value, 4) if portfolio_value else 0.0
+        gross_short_pct = round(gross_short / portfolio_value, 4) if portfolio_value else 0.0
+
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
@@ -776,6 +806,8 @@ class BobsBrain(Strategy):
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
         if avg_zscore is not None:
             self.add_line("avg_zscore", avg_zscore)
+        self.add_line("gross_long_pct",  gross_long_pct)
+        self.add_line("gross_short_pct", gross_short_pct)
 
         self._db.log_snapshot(
             run_id=self._run_id,
@@ -794,6 +826,8 @@ class BobsBrain(Strategy):
             candidates_buy_ready=self._candidates_buy_ready,
             avg_zscore=avg_zscore,
             avg_watchlist_ttl=None,
+            gross_long_pct=gross_long_pct,
+            gross_short_pct=gross_short_pct,
         )
 
     def on_strategy_end(self):

@@ -140,7 +140,9 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     daily_topups         INT,     -- top-up buy orders submitted
     pairs_scanned        INT,     -- combinations evaluated through quality gates
     candidates_found     INT,     -- passed all quality gates (penny/corr/coint/sim)
-    candidates_buy_ready INT      -- subset of candidates_found with a buy signal
+    candidates_buy_ready INT,     -- subset of candidates_found with a buy signal
+    gross_long_pct       NUMERIC, -- sum(long notional) / portfolio_value
+    gross_short_pct      NUMERIC  -- sum(short notional) / portfolio_value
 );
 
 SELECT create_hypertable('portfolio_snapshots', 'time', if_not_exists => TRUE);

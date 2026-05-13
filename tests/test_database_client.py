@@ -516,14 +516,19 @@ class TestLogging:
             daily_buys=2, daily_sells=1,
             daily_topups=3, pairs_scanned=120,
             candidates_found=5, candidates_buy_ready=3,
+            gross_long_pct=0.55, gross_short_pct=0.42,
         )
 
         sql = mock_cur.execute.call_args[0][0]
         assert "INSERT INTO portfolio_snapshots" in sql
+        assert "gross_long_pct" in sql
+        assert "gross_short_pct" in sql
         params = mock_cur.execute.call_args[0][1]
         assert params[0] == ts
         assert params[1] == "abc123"
         assert params[2] == 10500.0
+        assert params[-2] == 0.55   # gross_long_pct
+        assert params[-1] == 0.42   # gross_short_pct
 
     def test_log_snapshot_includes_funnel_and_topup_columns(self):
         client, mock_pool = _make_client()
@@ -546,12 +551,14 @@ class TestLogging:
         assert "avg_watchlist_ttl" in sql
         params = mock_cur.execute.call_args[0][1]
         # avg_watchlist_ttl is now the final param; preceding columns shift by 1
-        assert params[-6] == 3    # daily_topups
-        assert params[-5] == 120  # pairs_scanned
-        assert params[-4] == 5    # candidates_found
-        assert params[-3] == 3    # candidates_buy_ready
-        assert params[-2] is None  # avg_zscore (not passed → None)
-        assert params[-1] is None  # avg_watchlist_ttl (not passed → None)
+        assert params[-8] == 3    # daily_topups
+        assert params[-7] == 120  # pairs_scanned
+        assert params[-6] == 5    # candidates_found
+        assert params[-5] == 3    # candidates_buy_ready
+        assert params[-4] is None  # avg_zscore (not passed → None)
+        assert params[-3] is None  # avg_watchlist_ttl (not passed → None)
+        assert params[-2] is None  # gross_long_pct (not passed → None)
+        assert params[-1] is None  # gross_short_pct (not passed → None)
 
     def test_log_trade_inserts_fill_row(self):
         client, mock_pool = _make_client()

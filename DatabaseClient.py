@@ -559,6 +559,17 @@ class DatabaseClient:
                     cur.execute(sql)
                 cur.execute(constraint_sql)
 
+    def migrate_snapshot_deployment(self) -> None:
+        """Add gross_long_pct / gross_short_pct to portfolio_snapshots. Idempotent."""
+        statements = [
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS gross_long_pct NUMERIC",
+            "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS gross_short_pct NUMERIC",
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
     def load_coint_cache(
         self,
         window_end_date: date,
@@ -702,8 +713,9 @@ class DatabaseClient:
                  active_pairs, avg_correlation, cash_ratio,
                  daily_buys, daily_sells, daily_topups,
                  pairs_scanned, candidates_found, candidates_buy_ready,
-                 avg_zscore, avg_watchlist_ttl)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 avg_zscore, avg_watchlist_ttl,
+                 gross_long_pct, gross_short_pct)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         def _f(v):
             return float(v) if v is not None else None
@@ -727,6 +739,8 @@ class DatabaseClient:
                     metrics.get("candidates_buy_ready"),
                     _f(metrics.get("avg_zscore")),
                     _f(metrics.get("avg_watchlist_ttl")),
+                    _f(metrics.get("gross_long_pct")),
+                    _f(metrics.get("gross_short_pct")),
                 ))
 
     # ------------------------------------------------------------------
