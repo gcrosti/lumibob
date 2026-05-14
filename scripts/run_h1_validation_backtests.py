@@ -66,13 +66,13 @@ RUNS: list[tuple[str, datetime, datetime, str]] = [
     (
         'A_sideways_2022_q1',
         datetime(2022, 2, 1),
-        datetime(2022, 4, 29),
+        datetime(2022, 4, 30),  # exclusive end — baselines ran through 2022-04-29
         'Baseline 0ec7cc: +1.59% vs SPY (long-only, H5)',
     ),
     (
         'B_calm_bull_2023_q2',
-        datetime(2023, 4, 3),
-        datetime(2023, 6, 29),
+        datetime(2023, 4, 1),   # matches main.py used for 691011 (Apr 1 = Sat, first trading day = Apr 3)
+        datetime(2023, 6, 30),  # exclusive end — baselines ran through 2023-06-29
         'Baseline 691011: -7.77% vs SPY (long-only, H5)',
     ),
 ]
