@@ -178,10 +178,16 @@ CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
 -- fetch attempt is skipped on every subsequent day, eliminating repeated
 -- API calls and log noise for delisted or invalid tickers.
 -- ---------------------------------------------------------------------------
+-- window_start / window_end scope each failure to the fetch window that
+-- produced it.  A symbol failed for a 2022 window is not excluded from a
+-- 2023 window.  See migrations/004_failed_tickers_windowed.sql.
 CREATE TABLE IF NOT EXISTS failed_tickers (
-    symbol     VARCHAR(20) PRIMARY KEY,
-    reason     TEXT,
-    failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    symbol       VARCHAR(20)  NOT NULL,
+    window_start DATE         NOT NULL,
+    window_end   DATE         NOT NULL,
+    reason       TEXT,
+    failed_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (symbol, window_start, window_end)
 );
 
 -- ---------------------------------------------------------------------------

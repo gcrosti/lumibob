@@ -635,41 +635,81 @@ class DatabaseClient:
 
     def migrate_failed_tickers(self) -> None:
         """
-        Idempotent migration: create the failed_tickers table if it does not
-        already exist. Safe to call on every startup.
+        Idempotent migration: create failed_tickers (if absent) then apply the
+        window-scoping columns from migration 004. Safe to call on every startup.
         """
-        sql = """
+        create_sql = """
             CREATE TABLE IF NOT EXISTS failed_tickers (
-                symbol     VARCHAR(20) PRIMARY KEY,
-                reason     TEXT,
-                failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                symbol       VARCHAR(20)  NOT NULL,
+                window_start DATE         NOT NULL,
+                window_end   DATE         NOT NULL,
+                reason       TEXT,
+                failed_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+                PRIMARY KEY (symbol, window_start, window_end)
             )
         """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-
-    def get_failed_tickers(self) -> list[str]:
-        """Return all symbols that have been marked as unfetchable."""
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT symbol FROM failed_tickers")
-                return [row[0] for row in cur.fetchall()]
-
-    def mark_ticker_failed(self, symbol: str, reason: str = "") -> None:
+        # ADD COLUMN IF NOT EXISTS is idempotent on already-migrated tables.
+        alter_sql = """
+            ALTER TABLE failed_tickers
+                ADD COLUMN IF NOT EXISTS window_start DATE,
+                ADD COLUMN IF NOT EXISTS window_end   DATE
         """
-        Record a symbol as unfetchable. Idempotent — if the symbol is already
-        present the row is left unchanged so the original failed_at timestamp
-        is preserved.
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(create_sql)
+                cur.execute(alter_sql)
+
+    def get_failed_tickers_for_window(
+        self, window_start: 'date', window_end: 'date'
+    ) -> list[str]:
+        """
+        Return symbols whose stored failure window overlaps [window_start, window_end].
+        A symbol is skipped only when a prior fetch for an overlapping window
+        returned no data — not because it failed a different (non-overlapping) window.
         """
         sql = """
-            INSERT INTO failed_tickers (symbol, reason)
-            VALUES (%s, %s)
-            ON CONFLICT (symbol) DO NOTHING
+            SELECT DISTINCT symbol FROM failed_tickers
+            WHERE window_start <= %s AND window_end >= %s
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (symbol, reason))
+                cur.execute(sql, (window_end, window_start))
+                return [row[0] for row in cur.fetchall()]
+
+    def get_failed_tickers(self) -> list[str]:
+        """Return all symbols that appear in failed_tickers (any window)."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT symbol FROM failed_tickers")
+                return [row[0] for row in cur.fetchall()]
+
+    def mark_ticker_failed(
+        self,
+        symbol: str,
+        reason: str = "",
+        window_start: 'date | None' = None,
+        window_end: 'date | None' = None,
+    ) -> None:
+        """
+        Record a symbol as unfetchable for a specific fetch window. Idempotent —
+        duplicate (symbol, window_start, window_end) rows are silently ignored.
+
+        window_start / window_end should be the calendar start and end of the
+        price fetch that returned no data.  When omitted a sentinel date is used
+        (matches no real backtest window).
+        """
+        from datetime import date as _date
+        _sentinel = _date(1970, 1, 1)
+        ws = window_start if window_start is not None else _sentinel
+        we = window_end   if window_end   is not None else _sentinel
+        sql = """
+            INSERT INTO failed_tickers (symbol, window_start, window_end, reason)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (symbol, window_start, window_end) DO NOTHING
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (symbol, ws, we, reason))
 
     # ------------------------------------------------------------------
     # Run metadata

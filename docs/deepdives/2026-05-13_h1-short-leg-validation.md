@@ -110,9 +110,87 @@ The conflict guard fired once across both fixed runs (vs 32 mirror-pair instance
 
 ---
 
-## 5. Hypotheses
+## 5. Cointegration deepdive — why pair quality appears to differ across runs
 
-### Hypothesis 1: `available_cash` inflation causes over-entry, which amplifies losses
+**Short answer:** the cointegration comparison is not measuring the effect of `enable_short_leg`. It is measuring the effect of running on different days. The cointegration values are non-reproducible across runs, and the reason is a compounding infrastructure gap.
+
+### 5.1 The observed difference
+
+| regime | run | run_id | run_date | total pairs | avg coint_pvalue | p25 | median | p75 |
+|--------|-----|--------|----------|-------------|-----------------|-----|--------|-----|
+| sideways | baseline | 0ec7cc | 2026-04-30 | 204 | 0.0667 | 0.0072 | 0.0250 | 0.0639 |
+| sideways | H1 fixed | fac053 | 2026-05-13 | 311 | 0.1664 | 0.0189 | 0.0575 | 0.1828 |
+| bull | baseline | 691011 | 2026-04-30 | 251 | 0.1228 | 0.0125 | 0.0437 | 0.0998 |
+| bull | H1 fixed | a1bd6b | 2026-05-13 | 274 | 0.2043 | 0.0321 | 0.0800 | 0.2612 |
+
+Avg coint_pvalue is 2.5× higher in the sideways H1 run (0.1664 vs 0.0667) and 1.7× higher in the bull H1 run (0.2043 vs 0.1228). The H1 fixed runs also discover significantly more pairs (+52% in sideways, +9% in bull), with only 12% pair overlap in sideways and 6% in bull.
+
+### 5.2 `enable_short_leg` has no code path into cointegration
+
+`enable_short_leg` is read in `initialize` and used only in the buy/sell block of `on_trading_iteration`. It does not affect `StockEvaluator`, `compute_spread_scores()`, or the Engle-Granger test. The cointegration value in `pairs.coint_pvalue` is computed during pair scoring, before the trading block runs. The short leg cannot cause the cointegration difference.
+
+### 5.3 `pair_coint_cache` is empty
+
+The table was designed to cache cointegration results by `(lead, lag, lookback_window, window_end_date)` so results can be shared across runs. It has **0 rows**. Cointegration is recomputed from scratch on every run from raw price data.
+
+### 5.4 All symbols trigger Alpaca re-fetch on every run
+
+`StockDataCache._find_missing_symbols` marks a symbol as MISSING (requiring Alpaca re-fetch) if:
+
+```python
+earliest > start_ts + timedelta(days=2)  # cached data doesn't reach far enough back
+```
+
+The 2022-02-01 backtest with `lookback_window=130` needs price data from ~2021-08-01. The `stock_prices` table starts at **2021-11-02** — covering zero symbols for the full 130-day pre-window. Every one of the 6544 symbols in `stock_prices` has `earliest > 2021-08-01`. Query confirmed:
+
+```
+total_symbols | have_full_lookback | missing_pre_2021_08
+    6544      |         0          |        6544
+```
+
+Outcome: **all 6544 symbols trigger Alpaca re-fetch on every run for the 2022 window.** `served_from_cache=0` for every symbol.
+
+### 5.5 Alpaca adjusts historical prices over time
+
+Alpaca continuously back-adjusts its historical price data for corporate events (splits, dividends). A price fetch on April 30 and the same fetch on May 13 will return the same nominal dates but potentially different adjusted prices — especially for any stock that had a dividend ex-date between the two fetch dates.
+
+Because cointegration (Engle-Granger) is highly sensitive to the price level and trend of both series over the lookback window, even a small adjustment (e.g., a quarterly dividend ex-date in early May) can shift a p-value from 0.08 (borderline significant) to 1.0 (no cointegration detected). The RDN/MTG pair is the clearest example:
+
+| pair | run_id | run_date | coint_pvalue |
+|------|--------|----------|-------------|
+| RDN / MTG | 0ec7cc | 2026-04-30 | 0.0772 |
+| RDN / MTG | fac053 | 2026-05-13 | 1.0000 |
+
+This is not a different strategy or different parameters. It is the same pair, the same date window (2022-02-01), the same lookback (130 days), recomputed 13 days apart on freshly fetched Alpaca data.
+
+### 5.6 HDBSCAN is sensitive to universe composition
+
+Because each run fetches price data fresh, the set of symbols that succeed vs. fail the Alpaca fetch changes between runs. Symbols that failed on April 30 may succeed on May 13 and vice versa. HDBSCAN is sensitive to the full distance matrix — adding or removing even a few symbols can change cluster boundaries, which changes which pairs get selected, which changes coint_pvalue for all downstream pairs. This explains the 88-94% pair non-overlap despite identical strategy parameters.
+
+### 5.7 Impact on the baseline vs. H1 fixed comparison
+
+The cointegration difference between runs is driven by two compounding mechanisms: (1) Alpaca re-fetch on every run returns slightly different adjusted prices, and (2) HDBSCAN runs on a different effective universe each time. Neither is caused by `enable_short_leg`.
+
+The practical consequence: **the April 30 baselines and May 13 H1 fixed runs are not a clean before/after comparison.** They are two different runs on two different days with different underlying price data and mostly different pair populations. Any metric that depends on discovered pairs — cointegration quality, avg correlation, pair count, displacement rate — is confounded by the time gap.
+
+### 5.8 Required fixes
+
+Three changes are needed to make backtest comparisons reproducible:
+
+1. **Backfill `stock_prices` to 2021-01-01 (minimum)**  
+   The 130-day lookback for a 2022-02-01 start needs ~2021-08-01. The 90-day `corr_long_window` needs additional headroom. Backfilling stock_prices to 2021-01-01 ensures that `_find_missing_symbols` returns no missing symbols for 2022 backtests, eliminating the Alpaca re-fetch and the corporate-action adjustment problem.
+
+2. **Populate `pair_coint_cache`**  
+   The table was designed for exactly this purpose. Compute and write cointegration results on first use; on subsequent runs with the same `(lead, lag, lookback_window, window_end_date)`, read from cache. This ensures that a 2022-02-01 backtest run on May 13 uses the same cointegration values as one run on April 30, regardless of Alpaca adjustment changes.
+
+3. **To get a clean H1 comparison, re-run all four runs on the same day**  
+   With fix 1 in place (stock_prices backfilled), re-run both baselines and both H1 fixed runs in the same session. This eliminates the time gap and produces a head-to-head comparison on identical price data. Until then, the cointegration and pair-quality differences between current baselines and H1 fixed runs cannot be attributed to `enable_short_leg`.
+
+---
+
+## 6. Hypotheses
+
+### Hypothesis A: `available_cash` inflation causes over-entry, which amplifies losses
 
 **Evidence:** avg_daily_buys = 2.0 (H1) vs 1.2 (baseline) in both windows. Long-leg trips: 115 vs 70 in sideways. Median hold: 2d (H1 sideways) vs 4d (baseline). Long-leg avg_pnl = −8.22 vs −1.05 (sideways), −31.92 vs −11.04 (bull).
 
@@ -132,7 +210,7 @@ This is a code fix. `enable_short_leg` is not in `parameter_space.py`; this chan
 
 ---
 
-### Hypothesis 2: Short leg reduces beta materially but not to the target
+### Hypothesis B: Short leg reduces beta materially but not to the target
 
 **Evidence:** Beta fell from 0.559 → 0.240 in sideways (−57%) and 0.662 → 0.443 in bull (−33%). R² fell from 0.609 → 0.163 and 0.259 → 0.176. Target was beta < 0.1.
 
@@ -144,7 +222,7 @@ This is a code fix. `enable_short_leg` is not in `parameter_space.py`; this chan
 
 ---
 
-### Hypothesis 3: Short-leg P&L is regime-dependent — it loses money in down markets
+### Hypothesis C: Short-leg P&L is regime-dependent — it loses money in down markets
 
 **Evidence:** Short avg_pnl = −2.77/trip in sideways 2022 (SPY −5.44%). Short avg_pnl = −0.15/trip in calm_bull 2023 (SPY +6.84%). The short leg loses money in both regimes; it is near-breakeven in the bull window, not profitable. (The original +15.94 figure for `4e2054` was a calculation error.) The short leg was a loss source in the window where a hedge was most needed, and failed to generate meaningful profit in the window where conditions were most favourable.
 
@@ -156,7 +234,7 @@ This is a code fix. `enable_short_leg` is not in `parameter_space.py`; this chan
 
 ---
 
-### Hypothesis 4: `cash_ratio` is not a useful deployment metric for a dollar-neutral book
+### Hypothesis D: `cash_ratio` is not a useful deployment metric for a dollar-neutral book
 
 **Evidence:** avg_cash_ratio = 83.3% and 88.9% in H1 runs vs 26.7% and 28.1% in baselines. Active positions are confirmed by `leg=short` trade fills and `avg_pairs` = 132–144. The metric is structurally uninterpretable.
 
@@ -168,7 +246,7 @@ This is a code fix. `enable_short_leg` is not in `parameter_space.py`; this chan
 
 ---
 
-### Hypothesis 5: Mirror pairs create self-cancelling positions that pay slippage twice for zero net exposure
+### Hypothesis E: Mirror pairs create self-cancelling positions that pay slippage twice for zero net exposure
 
 **Evidence:** 32 instances in each H1 run where the same stock was simultaneously bought long and sold short via different pairs. Three sub-patterns:
 
@@ -184,22 +262,23 @@ This is a code fix. `enable_short_leg` is not in `parameter_space.py`; this chan
 
 ---
 
-## 6. Recommended changes
+## 7. Recommended changes
 
 | Priority | Change | Type | Addresses | Effort |
 |----------|--------|------|-----------|--------|
-| 1 | Fix `available_cash` to exclude gross short exposure (`get_cash() − gross_short`) | Bug fix in `BobsBrain.py` | H1 (root cause of return degradation) | Low |
-| 2 | Add pre-entry conflict guard: skip entry if any leg stock is already held in the opposite direction | Bug fix in `BobsBrain.py` | H5 | Low |
-| 3 | Add `gross_long_pct` / `gross_short_pct` indicators to snapshots; fix `exit_reason` on short closes (currently NULL) | Observability | H4 | Low |
-| 4 | Re-run both validation windows after fixes; measure residual beta | Validation run | H2 | Low (run time) |
-| 5 | If beta > 0.1 after fix: add beta-weighted short-leg sizing | Design change | H2 | Medium |
-| 6 | Investigate short-entry gate after H1 fix and multi-window short P&L audit | Research + design | H3 | Medium |
+| 1 | Fix `available_cash` to exclude gross short exposure (`get_cash() − gross_short`) | Bug fix in `BobsBrain.py` | HA (root cause of return degradation) | Low |
+| 2 | Add pre-entry conflict guard: skip entry if any leg stock is already held in the opposite direction | Bug fix in `BobsBrain.py` | HE | Low |
+| 3 | Add `gross_long_pct` / `gross_short_pct` indicators to snapshots; fix `exit_reason` on short closes (currently NULL) | Observability | HD | Low |
+| 4 | Backfill `stock_prices` to 2021-01-01 and populate `pair_coint_cache` | Infrastructure | Section 5 (reproducibility) | Medium |
+| 5 | Re-run all four validation runs in the same session after infrastructure fix; measure residual beta | Validation run | HB + clean comparison | Low (run time) |
+| 6 | If beta > 0.1 after fix: add beta-weighted short-leg sizing | Design change | HB | Medium |
+| 7 | Investigate short-entry gate after HA fix and multi-window short P&L audit | Research + design | HC | Medium |
 
 Priorities 1, 2, and 3 should all be made before re-running the validation — the observability fixes ensure the re-run produces interpretable data. Priorities 5 and 6 are conditional on what the clean re-run shows.
 
 ---
 
-## 7. Go / no-go
+## 8. Go / no-go
 
 **Decision: NO-GO on H1 as designed. The equal-dollar short leg is structurally incompatible with the strategy's spread-convergence mechanism.**
 
@@ -225,7 +304,7 @@ Do not integrate H1 as currently designed into Phase 4. The short leg harms perf
 
 ---
 
-## 8. Execution checklist
+## 9. Execution checklist
 
 - [x] Phase 1 data validation complete (all four runs confirmed in DB, SPY proxy confirmed)
 - [x] Phase 2 evidence gathered (5 tables: regime perf, trade activity, market neutrality, funnel, exits)

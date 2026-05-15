@@ -421,9 +421,19 @@ class TestFailedTickers:
 
         client.migrate_failed_tickers()
 
-        sql = mock_cur.execute.call_args[0][0]
-        assert "CREATE TABLE IF NOT EXISTS" in sql
-        assert "failed_tickers" in sql
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        assert "CREATE TABLE IF NOT EXISTS" in all_sql
+        assert "failed_tickers" in all_sql
+
+    def test_migrate_adds_window_columns(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_failed_tickers()
+
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        assert "window_start" in all_sql
+        assert "window_end" in all_sql
 
     def test_get_failed_tickers_returns_symbol_list(self):
         client, mock_pool = _make_client()
@@ -441,17 +451,31 @@ class TestFailedTickers:
 
         assert result == []
 
-    def test_mark_ticker_failed_inserts_symbol_and_reason(self):
+    def test_get_failed_tickers_for_window_queries_with_overlap(self):
+        from datetime import date
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[("RDN",)])
+
+        result = client.get_failed_tickers_for_window(date(2022, 2, 1), date(2022, 4, 30))
+
+        assert result == ["RDN"]
+        sql = mock_cur.execute.call_args[0][0]
+        assert "window_start" in sql
+        assert "window_end" in sql
+
+    def test_mark_ticker_failed_inserts_symbol_reason_and_window(self):
+        from datetime import date
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
-        client.mark_ticker_failed("T.PRA", "no data from Alpaca")
+        client.mark_ticker_failed("T.PRA", "no data from Alpaca",
+                                  date(2022, 2, 1), date(2022, 4, 30))
 
         sql = mock_cur.execute.call_args[0][0]
         assert "INSERT INTO failed_tickers" in sql
         params = mock_cur.execute.call_args[0][1]
         assert params[0] == "T.PRA"
-        assert params[1] == "no data from Alpaca"
+        assert params[3] == "no data from Alpaca"
 
     def test_mark_ticker_failed_uses_on_conflict_do_nothing(self):
         client, mock_pool = _make_client()
@@ -463,14 +487,16 @@ class TestFailedTickers:
         assert "ON CONFLICT" in sql
         assert "DO NOTHING" in sql
 
-    def test_mark_ticker_failed_default_reason_is_empty_string(self):
+    def test_mark_ticker_failed_sentinel_dates_when_window_omitted(self):
+        from datetime import date
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
         client.mark_ticker_failed("T.PRA")
 
         params = mock_cur.execute.call_args[0][1]
-        assert params[1] == ""
+        assert params[1] == date(1970, 1, 1)
+        assert params[2] == date(1970, 1, 1)
 
 
 # ---------------------------------------------------------------------------

@@ -41,11 +41,13 @@ class StockDataCache:
     def __init__(self, db: DatabaseClient, alpaca: AlpacaClient):
         self._db = db
         self._alpaca = alpaca
-        # Ensure the table exists (idempotent) then load the known-bad set.
-        # Any symbol in this set is skipped for all Alpaca fetches in this
-        # run and all future runs (the set is persisted to the DB).
+        # Ensure the table exists / columns are up-to-date (idempotent).
         db.migrate_failed_tickers()
-        self._failed: set[str] = set(db.get_failed_tickers())
+        # Per-window failed-symbol cache: keyed by (window_start, window_end)
+        # dates.  Populated lazily on first get_prices call for a given window
+        # so that a symbol that failed a 2022 fetch is not incorrectly excluded
+        # from a 2023 fetch.
+        self._failed: dict[tuple, set[str]] = {}
 
     def get_prices(
         self,
@@ -71,8 +73,9 @@ class StockDataCache:
         cached = self._db.get_prices(symbols, start, end)
         missing_symbols = self._find_missing_symbols(symbols, cached, start, end)
 
-        # Filter out symbols already known to be unfetchable.
-        fetchable = [s for s in missing_symbols if s not in self._failed]
+        # Filter out symbols already known to be unfetchable for this window.
+        window_failed = self._get_failed_for_window(start, end)
+        fetchable = [s for s in missing_symbols if s not in window_failed]
 
         if fetchable:
             fresh = self._fetch_with_retry(fetchable, start, end)
@@ -80,12 +83,14 @@ class StockDataCache:
                 self._db.upsert_prices(fresh)
                 cached = _merge(cached, fresh)
 
-            # Any symbol we requested but didn't get back → mark as failed.
+            # Any symbol we requested but didn't get back → mark failed for this window.
             returned = set(fresh.columns) if not fresh.empty else set()
+            ws = start.date() if hasattr(start, 'date') else start
+            we = end.date()   if hasattr(end,   'date') else end
             for symbol in fetchable:
                 if symbol not in returned:
-                    self._failed.add(symbol)
-                    self._db.mark_ticker_failed(symbol, "no data from Alpaca")
+                    window_failed.add(symbol)
+                    self._db.mark_ticker_failed(symbol, "no data from Alpaca", ws, we)
 
         return cached
 
@@ -149,6 +154,19 @@ class StockDataCache:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_failed_for_window(self, start: datetime, end: datetime) -> set[str]:
+        """
+        Return (and cache in-process) the set of symbols that previously failed
+        for a window overlapping [start, end].  The set is mutable — callers
+        add new failures to it directly so in-process deduplication is free.
+        """
+        ws = start.date() if hasattr(start, 'date') else start
+        we = end.date()   if hasattr(end,   'date') else end
+        key = (ws, we)
+        if key not in self._failed:
+            self._failed[key] = set(self._db.get_failed_tickers_for_window(ws, we))
+        return self._failed[key]
 
     def _find_missing_symbols(
         self,
