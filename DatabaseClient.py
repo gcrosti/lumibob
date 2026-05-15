@@ -698,8 +698,7 @@ class DatabaseClient:
         price fetch that returned no data.  When omitted a sentinel date is used
         (matches no real backtest window).
         """
-        from datetime import date as _date
-        _sentinel = _date(1970, 1, 1)
+        _sentinel = date(1970, 1, 1)
         ws = window_start if window_start is not None else _sentinel
         we = window_end   if window_end   is not None else _sentinel
         sql = """

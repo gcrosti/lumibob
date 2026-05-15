@@ -112,7 +112,7 @@ class TickerClusterer:
         self._db = db
         self._get_prices = get_prices if get_prices is not None else db.get_prices
         self.lookback_days = lookback_days
-        self.min_cluster_size = min_cluster_size
+        self.min_cluster_size = min_cluster_size  # kept for backward compat; actual mcs is dynamic
         self.pca_variance = pca_variance
         self.min_coverage = min_coverage
         self.hdbscan_min_samples = hdbscan_min_samples
@@ -120,6 +120,9 @@ class TickerClusterer:
         self.hdbscan_selection_method = hdbscan_selection_method
         self.hdbscan_cluster_selection_epsilon = hdbscan_cluster_selection_epsilon
         self.min_intra_cluster_corr = min_intra_cluster_corr
+        # Initialised to the configured floor; overwritten each _compute call
+        # with max(_MCS_FLOOR, round(n_symbols * _MCS_FRACTION)).
+        self._dynamic_mcs: int = max(_MCS_FLOOR, min_cluster_size)
 
         self._clusters: list[list[str]] = []
         self._last_computed: datetime | None = None
@@ -261,8 +264,10 @@ class TickerClusterer:
 
         symbols = list(log_returns.columns)
 
-        # Scale min_cluster_size with universe size so cluster density is
-        # consistent regardless of how many symbols failed_tickers removes.
+        # Recompute dynamic mcs each run — universe size changes as failed_tickers
+        # accumulates window-specific failures.  hdbscan_min_cluster_size from
+        # parameters is retained for backward compatibility but is no longer the
+        # authoritative value; _MCS_FRACTION drives effective cluster size.
         self._dynamic_mcs = max(_MCS_FLOOR, round(len(symbols) * _MCS_FRACTION))
 
         # Compute correlation matrix once — used for HDBSCAN distance (precomputed
