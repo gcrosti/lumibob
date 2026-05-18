@@ -619,7 +619,7 @@ class DatabaseClient:
         sql = """
             INSERT INTO pair_coint_cache
                 (lead_symbol, lag_symbol, window_end_date, lookback_window,
-                 coint_pvalue, halflife_days, computed_at)
+                 coint_pvalue, halflife_days)
             VALUES %s
             ON CONFLICT (lead_symbol, lag_symbol, lookback_window, window_end_date)
             DO UPDATE SET

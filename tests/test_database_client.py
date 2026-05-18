@@ -647,3 +647,80 @@ class TestLogging:
         assert "MSFT" in params
         assert "buy" in params
         assert params[-1] == "long"  # leg
+
+
+# ---------------------------------------------------------------------------
+# Cointegration cache
+# ---------------------------------------------------------------------------
+
+class TestCointegrationCache:
+    """write_coint_cache and load_coint_cache round-trip behaviour."""
+
+    def test_write_coint_cache_calls_execute_values(self):
+        """write_coint_cache must reach execute_values — the silent-drop bug
+        was caused by a column-count mismatch that was swallowed by the broad
+        except clause.  If execute_values is never called the cache stays empty."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.write_coint_cache(
+                entries={("AAPL", "MSFT"): (0.04, 12.5)},
+                window_end_date=date(2022, 2, 1),
+                lookback_window=130,
+            )
+            mock_ev.assert_called_once()
+
+    def test_write_coint_cache_row_has_six_values(self):
+        """Each row passed to execute_values must have exactly 6 values matching
+        the INSERT column list (lead, lag, window_end_date, lookback_window,
+        coint_pvalue, halflife_days).  computed_at is omitted — the DB default
+        fills it.  A 7-value row caused the historic silent write failure."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        captured_rows = []
+
+        def _capture(cur, sql, rows, **kwargs):
+            captured_rows.extend(rows)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values", side_effect=_capture):
+            client.write_coint_cache(
+                entries={("AAPL", "MSFT"): (0.04, 12.5), ("GOOG", "AMZN"): (0.01, None)},
+                window_end_date=date(2022, 2, 1),
+                lookback_window=130,
+            )
+
+        assert len(captured_rows) == 2
+        for row in captured_rows:
+            assert len(row) == 6, f"Expected 6 columns per row, got {len(row)}: {row}"
+
+    def test_write_coint_cache_noop_on_empty_entries(self):
+        """No DB call when entries dict is empty."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.write_coint_cache({}, date(2022, 2, 1), 130)
+            mock_ev.assert_not_called()
+
+    def test_load_coint_cache_returns_dict_keyed_by_symbol_pair(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(
+            mock_pool,
+            fetchall_return=[("AAPL", "MSFT", 0.04, 12.5), ("GOOG", "AMZN", 0.01, None)],
+        )
+
+        result = client.load_coint_cache(date(2022, 2, 1), 130)
+
+        assert ("AAPL", "MSFT") in result
+        assert result[("AAPL", "MSFT")] == (0.04, 12.5)
+        assert result[("GOOG", "AMZN")] == (0.01, None)
+
+    def test_load_coint_cache_returns_empty_dict_on_no_rows(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[])
+
+        result = client.load_coint_cache(date(2022, 2, 1), 130)
+
+        assert result == {}
