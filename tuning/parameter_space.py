@@ -136,7 +136,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
         'exit_threshold', tier=3, default=0.5, low=0.1, high=1.5,
     ),
     'zscore_window': ParamSpec(
-        'zscore_window', tier=3, default=20, low=10, high=40, dtype='int',
+        'zscore_window', tier=1, default=20, low=10, high=40, dtype='int',
     ),
     'min_position_pct': ParamSpec(
         'min_position_pct', tier=3, default=0.03, low=0.01, high=0.10,
