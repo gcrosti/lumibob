@@ -173,8 +173,32 @@ to enforce coherent timescale relationships.
 | Fixed params | All Tier 1 and Tier 3 at current defaults |
 | Window | 2022-01 → 2024-06 (covers sideways, bull, and mixed regimes) |
 | Trials | 200 |
-| Objective | Sharpe on a 3-month rolling OOS holdout (walk-forward, 3 folds) |
+| Objective | Blended discriminatory score (`discriminatory_weight=0.7`) — see below |
 | Wall-clock | ~6 hrs (warm cache, 10 free params × 200 trials ÷ parallelism) |
+
+**Objective — why not Sharpe:** Sharpe measures overall portfolio outcome and
+conflates score quality with regime luck. A well-discriminating score in a losing
+regime produces bad Sharpe; the optimizer discards those params even if the score
+is doing exactly the right thing. Study 1's goal is to find timescales and weights
+that make the composite score a reliable ranking signal — that calls for a
+discriminatory objective.
+
+```
+score = 0.7 × Spearman_rho(composite_score_at_entry, round_trip_pnl)
+      + 0.3 × Sharpe_normalised
+
+subject to: mean(round_trip_pnl) > pnl_floor (-100)
+            n_round_trips ≥ 10
+```
+
+`Sharpe_normalised = clip(sharpe_score / 3, -1, 1)` — scaled to [-1, 1] so both
+terms are comparable. The 0.3 Sharpe component keeps the optimizer grounded: a
+perfectly discriminating set of pairs that all lose badly is still penalised.
+The P&L floor provides a hard backstop against that case.
+
+Studies 2 and 3 revert to pure Sharpe (`discriminatory_weight=0.0`) — by that
+stage the score discriminates by construction and the goal shifts to regime-level
+portfolio optimization.
 
 **Joint constraints:**
 - `zscore_window ≤ lookback_window / 3` — z-score window must be shorter than a

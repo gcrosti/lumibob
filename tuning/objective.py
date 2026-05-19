@@ -1,25 +1,41 @@
 """
 objective — BacktestObjective for Optuna.
 
-Wraps a BobsBrain backtest and converts the results into a scalar score:
+Two scoring modes, selected via *discriminatory_weight* (0.0–1.0):
 
-    score = Sharpe(daily) - penalty_dd × max_drawdown - penalty_trades × log(n+1)
-            - spy_penalty_weight × (2.0 if return ≤ SPY else 0.0)
+    Pure Sharpe (discriminatory_weight=0.0, default — Studies 2 and 3):
+
+        score = Sharpe(daily) - penalty_dd × max_drawdown
+                - penalty_trades × log(n+1)
+                - spy_penalty_weight × (2.0 if return ≤ SPY else 0.0)
+
+    Blended discriminatory (discriminatory_weight > 0 — Study 1 / Tier 2):
+
+        score = w × spearman_rho(composite_score, round_trip_pnl)
+                + (1−w) × sharpe_component
+
+        where sharpe_component is the Sharpe score normalised to [−1, 1]
+        so the two terms are on a comparable scale.
+
+        A hard floor is applied first: if mean round-trip P&L falls below
+        *pnl_floor*, a heavy penalty is returned regardless of rho.  This
+        prevents the optimizer finding a perfectly discriminating set of
+        pairs that all lose money.
 
 *spy_penalty_weight* controls the SPY hard-constraint strength:
   - 1.0 (default, Phases 1–3): full -2.0 penalty if strategy ≤ SPY.
-  - 0.0 (Phase 4): SPY constraint lifted; goal is positive Sharpe, not
-    SPY-beating (see STRATEGY_DEEPDIVE_FINDINGS.md §7).
+  - 0.0 (Phase 4+): SPY constraint lifted; goal is positive Sharpe.
 
 *trial_timeout_secs* (default None): if the backtest subprocess exceeds
 this wall-clock budget, the trial is pruned rather than blocking the study.
 Set to 1200 (20 min) for Phase 4 coarse to guard against pathological runs.
 
-Scoring uses the portfolio_snapshots and trades tables written by BobsBrain
-during the run.  The run_id is recovered by querying backtest_runs for the
-most recently completed run started after this call's invocation timestamp.
-This is safe for single-threaded (n_jobs=1) Optuna studies; parallel workers
-must use a DB-level mechanism (e.g. passing a deterministic run_id) instead.
+Scoring uses the portfolio_snapshots, pairs, and trades tables written by
+BobsBrain during the run.  The run_id is recovered by querying backtest_runs
+for the most recently completed run started after this call's invocation
+timestamp.  This is safe for single-threaded (n_jobs=1) Optuna studies;
+parallel workers must use a DB-level mechanism (e.g. passing a deterministic
+run_id) instead.
 """
 
 from __future__ import annotations
@@ -72,6 +88,19 @@ class BacktestObjective:
     trial_timeout_secs : int | None
         If set, a trial whose backtest exceeds this many seconds is pruned.
         Prevents pathological cold-cache runs from blocking the study.
+    discriminatory_weight : float
+        w in [0.0, 1.0].  0.0 = pure Sharpe (default, backward compatible).
+        > 0 blends Spearman rank correlation between composite_score and
+        round-trip P&L into the objective.  Recommended value for Study 1
+        (Tier 2 signal construction): 0.7.
+    pnl_floor : float
+        Mean round-trip P&L floor for discriminatory scoring.  If the run's
+        mean P&L falls below this value the trial is penalised regardless of
+        how well the score discriminates.  Prevents optimizing a beautifully
+        discriminating set of pairs that all lose money.  Default -100.
+    min_round_trips : int
+        Minimum matched buy/sell round-trips needed for a valid discriminatory
+        score.  Runs below this threshold return a heavy penalty.  Default 10.
     """
 
     def __init__(
@@ -86,6 +115,9 @@ class BacktestObjective:
         min_trades: int = 5,
         spy_penalty_weight: float = 1.0,
         trial_timeout_secs: int | None = None,
+        discriminatory_weight: float = 0.0,
+        pnl_floor: float = -100.0,
+        min_round_trips: int = 10,
     ) -> None:
         self.train_start = datetime(train_start.year, train_start.month, train_start.day)
         self.train_end = datetime(train_end.year, train_end.month, train_end.day)
@@ -97,6 +129,9 @@ class BacktestObjective:
         self.min_trades = min_trades
         self.spy_penalty_weight = spy_penalty_weight
         self.trial_timeout_secs = trial_timeout_secs
+        self.discriminatory_weight = discriminatory_weight
+        self.pnl_floor = pnl_floor
+        self.min_round_trips = min_round_trips
 
     # ------------------------------------------------------------------
     # Optuna interface
@@ -329,9 +364,82 @@ class BacktestObjective:
             if port_total <= spy_total:
                 spy_penalty = -2.0 * self.spy_penalty_weight
 
-        score = sharpe - self.penalty_dd * max_dd - trade_penalty + spy_penalty
+        sharpe_score = sharpe - self.penalty_dd * max_dd - trade_penalty + spy_penalty
+
+        if self.discriminatory_weight <= 0.0:
+            score = sharpe_score
+        else:
+            rho = self._discriminatory_score(run_id)
+            if rho is None:
+                # Insufficient data for discriminatory scoring — fall back to Sharpe.
+                score = sharpe_score
+            else:
+                # Normalise Sharpe to [-1, 1] (divide by 3 — a generous ceiling
+                # for this strategy) so the two terms are on a comparable scale.
+                sharpe_norm = float(np.clip(sharpe_score / 3.0, -1.0, 1.0))
+                w = self.discriminatory_weight
+                score = w * rho + (1.0 - w) * sharpe_norm
 
         if trial is not None:
             trial.report(score, step=0)
 
         return score
+
+    def _discriminatory_score(self, run_id: str) -> float | None:
+        """
+        Compute Spearman rank correlation between composite_score at entry and
+        round-trip P&L for long-leg matched trades in *run_id*.
+
+        Returns the correlation coefficient in [-1, 1], or None if there are
+        fewer than *min_round_trips* matched pairs or no composite_score data.
+
+        A hard floor on mean P&L is applied: if the mean falls below
+        *pnl_floor*, returns -1.0 (worst possible discriminatory score) to
+        penalise a trial that finds a discriminating but losing configuration.
+        """
+        sql = """
+            SELECT p.composite_score,
+                   SUM(CASE WHEN t.side = 'sell'
+                            THEN t.quantity * t.price - t.slippage
+                            ELSE 0 END)
+                 - SUM(CASE WHEN t.side = 'buy'
+                            THEN t.quantity * t.price + t.slippage
+                            ELSE 0 END) AS round_trip_pnl
+            FROM pairs p
+            JOIN trades t
+              ON t.pair_id = p.id AND t.leg = 'long'
+            WHERE p.run_id = %s
+              AND p.composite_score IS NOT NULL
+            GROUP BY p.id, p.composite_score
+            HAVING COUNT(DISTINCT CASE WHEN t.side = 'sell' THEN t.id END) > 0
+               AND COUNT(DISTINCT CASE WHEN t.side = 'buy'  THEN t.id END) > 0
+        """
+        with psycopg2.connect(_DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (run_id,))
+                rows = cur.fetchall()
+
+        if len(rows) < self.min_round_trips:
+            logger.warning(
+                'run_id=%s: only %d round-trips for discriminatory score (need %d)',
+                run_id, len(rows), self.min_round_trips,
+            )
+            return None
+
+        scores = np.array([float(r[0]) for r in rows])
+        pnls   = np.array([float(r[1]) for r in rows])
+
+        mean_pnl = float(pnls.mean())
+        if mean_pnl < self.pnl_floor:
+            logger.warning(
+                'run_id=%s: mean P&L %.2f below floor %.2f — penalising',
+                run_id, mean_pnl, self.pnl_floor,
+            )
+            return -1.0
+
+        # Spearman rho via rank correlation.
+        score_ranks = pd.Series(scores).rank()
+        pnl_ranks   = pd.Series(pnls).rank()
+        rho = float(score_ranks.corr(pnl_ranks))
+        logger.info('run_id=%s: discriminatory rho=%.4f  mean_pnl=%.2f', run_id, rho, mean_pnl)
+        return rho
