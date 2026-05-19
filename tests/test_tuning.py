@@ -247,6 +247,57 @@ class TestSuggest:
         result = suggest(trial, tiers=(99,))
         assert result == {}
 
+    # --- Joint timescale constraint tests ---
+
+    def test_zscore_window_constrained_by_lookback(self):
+        """zscore_window must be ≤ lookback_window // 3 when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['zscore_window'] <= result['lookback_window'] // 3, (
+                f"seed={seed}: zscore_window={result['zscore_window']} > "
+                f"lookback_window // 3 = {result['lookback_window'] // 3}"
+            )
+
+    def test_cooldown_days_constrained_by_zscore_window(self):
+        """cooldown_days must be ≥ zscore_window // 2 when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['cooldown_days'] >= result['zscore_window'] // 2, (
+                f"seed={seed}: cooldown_days={result['cooldown_days']} < "
+                f"zscore_window // 2 = {result['zscore_window'] // 2}"
+            )
+
+    def test_corr_short_window_constrained_by_corr_long_window(self):
+        """corr_short_window must be ≤ corr_long_window when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['corr_short_window'] <= result['corr_long_window'], (
+                f"seed={seed}: corr_short_window={result['corr_short_window']} > "
+                f"corr_long_window={result['corr_long_window']}"
+            )
+
+    def test_constraints_not_applied_when_dependency_missing(self):
+        """When only zscore_window tier is tuned (Tier 2) but lookback is Tier 1
+        and not in the call, zscore_window falls back to its unconstrained range."""
+        import optuna
+        # Tuning only Tier 3 — zscore_window is Tier 2, so it won't appear at all.
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=0))
+        trial = study.ask()
+        result = suggest(trial, tiers=(3,))
+        # zscore_window should not be present since it is Tier 2
+        assert 'zscore_window' not in result
+        # lookback_window should not be present either
+        assert 'lookback_window' not in result
+
 
 # ===========================================================================
 # tuning.objective.BacktestObjective.score_run
