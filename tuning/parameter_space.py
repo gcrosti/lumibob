@@ -109,8 +109,11 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'max_halflife_days': ParamSpec(
         'max_halflife_days', tier=2, default=60, low=20, high=120, dtype='int',
     ),
+    # Dynamic: TickerClusterer._compute() overwrites this with max(_MCS_FLOOR,
+    # round(universe_size * _MCS_FRACTION)) on every cluster rebuild, so Optuna
+    # suggestions have no effect on clustering.  Tier 1 — structural, not tunable.
     'hdbscan_min_cluster_size': ParamSpec(
-        'hdbscan_min_cluster_size', tier=2, default=5, low=3, high=15, dtype='int',
+        'hdbscan_min_cluster_size', tier=1, default=5, low=3, high=15, dtype='int',
     ),
     'hdbscan_min_samples': ParamSpec(
         'hdbscan_min_samples', tier=2, default=2, low=1, high=5, dtype='int',
