@@ -289,6 +289,40 @@ class DatabaseClient:
                     "ALTER TABLE pairs ADD COLUMN IF NOT EXISTS sim_sharpe DOUBLE PRECISION"
                 )
 
+    def migrate_pairs_score_components(self) -> None:
+        """
+        Idempotent migration: add composite score, per-component scores, and
+        per-component weights to the pairs table.  Safe to call on every startup.
+
+        Columns added:
+            composite_score              -- final weighted score at discovery
+            score_corr_long/short        -- normalised [0,1] correlation components
+            score_z_depth                -- z-score depth component
+            score_coint                  -- normalised cointegration component
+            score_halflife               -- normalised half-life component
+            w_corr_long/short/z_depth    -- weights active at discovery time
+            w_coint / w_halflife         -- weights active at discovery time
+        """
+        columns = [
+            ("composite_score",  "DOUBLE PRECISION"),
+            ("score_corr_long",  "DOUBLE PRECISION"),
+            ("score_corr_short", "DOUBLE PRECISION"),
+            ("score_z_depth",    "DOUBLE PRECISION"),
+            ("score_coint",      "DOUBLE PRECISION"),
+            ("score_halflife",   "DOUBLE PRECISION"),
+            ("w_corr_long",      "DOUBLE PRECISION"),
+            ("w_corr_short",     "DOUBLE PRECISION"),
+            ("w_z_depth",        "DOUBLE PRECISION"),
+            ("w_coint",          "DOUBLE PRECISION"),
+            ("w_halflife",       "DOUBLE PRECISION"),
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for col, dtype in columns:
+                    cur.execute(
+                        f"ALTER TABLE pairs ADD COLUMN IF NOT EXISTS {col} {dtype}"
+                    )
+
     def migrate_ticker_metadata(self) -> None:
         """
         Idempotent migration: create the ticker_metadata table if it does not
@@ -412,8 +446,13 @@ class DatabaseClient:
                  correlation, simulated_return, sim_sharpe, signal_type, zscore_window,
                  entry_threshold, exit_threshold, coint_pvalue, halflife_days,
                  lead_short_qty,
+                 composite_score,
+                 score_corr_long, score_corr_short, score_z_depth,
+                 score_coint, score_halflife,
+                 w_corr_long, w_corr_short, w_z_depth, w_coint, w_halflife,
                  discovered_at, last_updated, active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -432,6 +471,11 @@ class DatabaseClient:
                 coint_pvalue = pair.get("coint_pvalue")
                 halflife_days = pair.get("halflife_days")
                 lead_short_qty = pair.get("lead_short_qty")
+
+                def _f(key):
+                    v = pair.get(key)
+                    return float(v) if v is not None else None
+
                 cur.execute(sql, (
                     run_id,
                     pair["lead_stock"],
@@ -449,6 +493,11 @@ class DatabaseClient:
                     float(coint_pvalue) if coint_pvalue is not None else None,
                     float(halflife_days) if halflife_days is not None else None,
                     float(lead_short_qty) if lead_short_qty is not None else None,
+                    _f("composite_score"),
+                    _f("score_corr_long"), _f("score_corr_short"), _f("score_z_depth"),
+                    _f("score_coint"), _f("score_halflife"),
+                    _f("w_corr_long"), _f("w_corr_short"), _f("w_z_depth"),
+                    _f("w_coint"), _f("w_halflife"),
                     today,
                     today,
                 ))

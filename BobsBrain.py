@@ -164,6 +164,7 @@ class BobsBrain(Strategy):
         self._db.migrate_pairs_simulated_return()
         self._db.migrate_zscore_columns()
         self._db.migrate_pairs_sim_sharpe()
+        self._db.migrate_pairs_score_components()
         self._db.migrate_ticker_metadata()
         self._db.migrate_failed_tickers()
         self._db.migrate_coint_cache()
@@ -454,6 +455,18 @@ class BobsBrain(Strategy):
                         'coint_pvalue': coint_pvalue,
                         'halflife_days': halflife_days,
                         'composite_score': score,
+                        # Normalised [0,1] component scores — stored for post-hoc analysis
+                        'score_corr_long': min(max(corr_long, 0.0), 1.0),
+                        'score_corr_short': min(max(corr_short, 0.0), 1.0),
+                        'score_z_depth': z_depth,
+                        'score_coint': coint_score,
+                        'score_halflife': halflife_score,
+                        # Weights active at discovery time
+                        'w_corr_long': self.w_corr_long,
+                        'w_corr_short': self.w_corr_short,
+                        'w_z_depth': self.w_z_depth,
+                        'w_coint': self.w_coint,
+                        'w_halflife': self.w_halflife,
                     })
 
                 clusters_tried += 1
@@ -539,6 +552,17 @@ class BobsBrain(Strategy):
                     'zscore_window': self.zscore_window,
                     'entry_threshold': self.entry_threshold,
                     'exit_threshold': self.exit_threshold,
+                    # Score components and weights — forwarded from candidate for DB storage
+                    'score_corr_long': cand_data.get('score_corr_long'),
+                    'score_corr_short': cand_data.get('score_corr_short'),
+                    'score_z_depth': cand_data.get('score_z_depth'),
+                    'score_coint': cand_data.get('score_coint'),
+                    'score_halflife': cand_data.get('score_halflife'),
+                    'w_corr_long': cand_data.get('w_corr_long'),
+                    'w_corr_short': cand_data.get('w_corr_short'),
+                    'w_z_depth': cand_data.get('w_z_depth'),
+                    'w_coint': cand_data.get('w_coint'),
+                    'w_halflife': cand_data.get('w_halflife'),
                 }
                 new_pair['lead_short_qty'] = None
                 new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)

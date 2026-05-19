@@ -347,6 +347,66 @@ class TestPairs:
         _sql, params = mock_cur.execute.call_args[0]
         assert params[6] is None
 
+    def test_save_pair_stores_composite_score_and_components(self):
+        """Score components and weights must be written to pairs so post-hoc
+        analysis can reconstruct and validate the composite score."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(42,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5,
+            "composite_score": 0.72,
+            "score_corr_long": 0.85, "score_corr_short": 0.76,
+            "score_z_depth": 0.60,
+            "score_coint": 0.90, "score_halflife": 0.50,
+            "w_corr_long": 0.2143, "w_corr_short": 0.3571,
+            "w_z_depth": 0.1429, "w_coint": 0.1786, "w_halflife": 0.1071,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        # composite_score is the 17th param (index 16)
+        assert params[16] == 0.72
+        # component scores follow at indices 17–21
+        assert params[17] == 0.85   # score_corr_long
+        assert params[18] == 0.76   # score_corr_short
+        assert params[19] == 0.60   # score_z_depth
+        assert params[20] == 0.90   # score_coint
+        assert params[21] == 0.50   # score_halflife
+        # weights at indices 22–26
+        assert params[22] == 0.2143  # w_corr_long
+        assert params[23] == 0.3571  # w_corr_short
+        assert params[24] == 0.1429  # w_z_depth
+        assert params[25] == 0.1786  # w_coint
+        assert params[26] == 0.1071  # w_halflife
+
+    def test_save_pair_score_components_default_to_none(self):
+        """Score columns are NULL when not provided — legacy callers stay compatible."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(99,))
+
+        pair = {"lead_stock": "AAPL", "lag_stock": "MSFT", "lag": 1}
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        # composite_score and all component/weight params should be None
+        for idx in range(16, 27):
+            assert params[idx] is None, f"param[{idx}] expected None, got {params[idx]}"
+
+    def test_migrate_pairs_score_components_adds_all_columns(self):
+        """Migration must issue ADD COLUMN IF NOT EXISTS for all 11 score columns."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_pairs_score_components()
+
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        for col in ("composite_score", "score_corr_long", "score_corr_short",
+                    "score_z_depth", "score_coint", "score_halflife",
+                    "w_corr_long", "w_corr_short", "w_z_depth", "w_coint", "w_halflife"):
+            assert col in all_sql, f"Migration missing column: {col}"
+
     def test_update_pair_initial_cost_executes_update(self):
         """update_pair_initial_cost should UPDATE pairs SET initial_cost for the given id."""
         client, mock_pool = _make_client()

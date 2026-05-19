@@ -78,7 +78,20 @@ CREATE TABLE IF NOT EXISTS pairs (
     coint_pvalue  DOUBLE PRECISION,
     halflife_days DOUBLE PRECISION,
     -- H1: open short quantity on lead (paper restart / analytics); NULL when long-only
-    lead_short_qty NUMERIC
+    lead_short_qty NUMERIC,
+    -- Composite score and per-component breakdown recorded at discovery time.
+    -- Allows post-hoc analysis of score discriminatory power and weight tuning.
+    composite_score  DOUBLE PRECISION,
+    score_corr_long  DOUBLE PRECISION,  -- normalised corr_long  in [0, 1]
+    score_corr_short DOUBLE PRECISION,  -- normalised corr_short in [0, 1]
+    score_z_depth    DOUBLE PRECISION,  -- z-score depth         in [0, 1]
+    score_coint      DOUBLE PRECISION,  -- normalised coint p-val in [0, 1]
+    score_halflife   DOUBLE PRECISION,  -- normalised half-life   in [0, 1]
+    w_corr_long      DOUBLE PRECISION,  -- weight active at discovery
+    w_corr_short     DOUBLE PRECISION,
+    w_z_depth        DOUBLE PRECISION,
+    w_coint          DOUBLE PRECISION,
+    w_halflife       DOUBLE PRECISION
 );
 
 -- One active configuration per (run, lead, lag, lag_days) triple.
