@@ -44,10 +44,10 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     # =========================================================================
 
     'lookback_window': ParamSpec(
-        'lookback_window', tier=1, default=130, low=60, high=252, dtype='int',
+        'lookback_window', tier=2, default=130, low=60, high=252, dtype='int',
     ),
     'cooldown_days': ParamSpec(
-        'cooldown_days', tier=1, default=7, low=3, high=21, dtype='int',
+        'cooldown_days', tier=2, default=7, low=3, high=21, dtype='int',
     ),
     'pca_variance': ParamSpec(
         'pca_variance', tier=1, default=0.95, low=0.80, high=0.99,
@@ -136,7 +136,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
         'exit_threshold', tier=3, default=0.5, low=0.1, high=1.5,
     ),
     'zscore_window': ParamSpec(
-        'zscore_window', tier=1, default=20, low=10, high=40, dtype='int',
+        'zscore_window', tier=2, default=20, low=10, high=40, dtype='int',
     ),
     'min_position_pct': ParamSpec(
         'min_position_pct', tier=3, default=0.03, low=0.01, high=0.10,
