@@ -196,9 +196,11 @@ terms are comparable. The 0.3 Sharpe component keeps the optimizer grounded: a
 perfectly discriminating set of pairs that all lose badly is still penalised.
 The P&L floor provides a hard backstop against that case.
 
-Studies 2 and 3 revert to pure Sharpe (`discriminatory_weight=0.0`) — by that
-stage the score discriminates by construction and the goal shifts to regime-level
-portfolio optimization.
+Pass B and Studies 2 and 3 all use pure Sharpe (`discriminatory_weight=0.0`).
+Pass B optimizes portfolio construction given a calibrated score; Studies 2 and 3
+optimize regime-conditioned Tier 3 params on top of a fixed Tier 2 foundation.
+In all three cases the score already discriminates by construction — the question
+shifts to how best to exploit it.
 
 **Joint constraints:**
 - `zscore_window ≤ lookback_window / 3` — z-score window must be shorter than a
@@ -218,7 +220,14 @@ Signal params fixed at Pass A best-trial output. Remaining Tier 2 params free.
 | Fixed params | Pass A outputs + all Tier 1 and Tier 3 defaults |
 | Window | Same 2022-01 → 2024-06 |
 | Trials | 150 |
+| Objective | Pure Sharpe (`discriminatory_weight=0.0`) |
 | Wall-clock | ~4 hrs |
+
+**Why pure Sharpe for Pass B:** Pass A calibrates whether the score discriminates.
+Pass B asks a different question — given a working signal, what discovery and position
+sizing params maximize risk-adjusted returns? These params (cluster frequency,
+deployment level, K) affect how the strategy *uses* the score to build a portfolio,
+not whether the score is good. Sharpe is the right objective for portfolio construction.
 
 **Gate:** Pass A best-trial OOS Sharpe must beat the default param baseline on the
 same 3-fold walk-forward. If not — widen to 300 trials before proceeding to Pass B.
