@@ -132,6 +132,13 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     # Tier 3 — Fast-adaptive (re-tune weekly, regime-conditioned)
     # =========================================================================
 
+    # Fraction of long notional to short the lead stock.
+    # 0.0 = long-only (default); 1.0 = full dollar-neutral hedge.
+    # Replaces the deprecated boolean enable_short_leg.
+    # Regime-conditioned: expected to be higher in bear/stress regimes.
+    'short_leg_fraction': ParamSpec(
+        'short_leg_fraction', tier=3, default=0.0, low=0.0, high=1.0,
+    ),
     'entry_threshold': ParamSpec(
         'entry_threshold', tier=3, default=2.0, low=1.0, high=3.5,
     ),

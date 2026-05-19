@@ -71,34 +71,34 @@ _BASE_PARAMS: dict = {
     'min_intra_cluster_corr': 0.3,
 }
 
-# (label, start, end, enable_short_leg, description)
-RUNS: list[tuple[str, datetime, datetime, bool, str]] = [
+# (label, start, end, short_leg_fraction, description)
+RUNS: list[tuple[str, datetime, datetime, float, str]] = [
     (
         '1_sideways_baseline',
         datetime(2022, 2, 1),
         datetime(2022, 4, 30),
-        False,
+        0.0,
         'Sideways 2022 — long-only baseline (warms 2022 cache)',
     ),
     (
         '2_sideways_h1_fixed',
         datetime(2022, 2, 1),
         datetime(2022, 4, 30),
-        True,
+        1.0,
         'Sideways 2022 — H1 fixed (served from 2022 cache)',
     ),
     (
         '3_bull_baseline',
         datetime(2023, 4, 1),
         datetime(2023, 6, 30),
-        False,
+        0.0,
         'Bull 2023 — long-only baseline (warms 2023 cache)',
     ),
     (
         '4_bull_h1_fixed',
         datetime(2023, 4, 1),
         datetime(2023, 6, 30),
-        True,
+        1.0,
         'Bull 2023 — H1 fixed (served from 2023 cache)',
     ),
 ]
@@ -106,11 +106,11 @@ RUNS: list[tuple[str, datetime, datetime, bool, str]] = [
 
 def main() -> None:
     for label, start, end, short_leg, description in RUNS:
-        params = {**_BASE_PARAMS, 'enable_short_leg': short_leg}
+        params = {**_BASE_PARAMS, 'short_leg_fraction': short_leg}
         print('=' * 72)
         print(f'[{label}] {start.date()} -> {end.date()}')
         print(description)
-        print(f'enable_short_leg={short_leg}, budget=10000')
+        print(f'short_leg_fraction={short_leg}, budget=10000')
         print('=' * 72, flush=True)
         result = BobsBrain.backtest(
             YahooDataBacktesting,

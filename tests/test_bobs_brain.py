@@ -169,6 +169,48 @@ class TestCompositeScoreSizing(unittest.TestCase):
         ranked = sorted(pairs, key=lambda p: p['composite_score'], reverse=True)
         self.assertEqual([p['lag_stock'] for p in ranked], ['HIGH', 'MID', 'LOW'])
 
+    # --- short_leg_fraction effective cost ---
+
+    def _effective_cost(self, per_stock_budget, short_leg_fraction):
+        """Mirrors BobsBrain buy-path: effective_cost = budget * (1 + fraction)."""
+        return per_stock_budget * (1.0 + short_leg_fraction)
+
+    def test_effective_cost_long_only(self):
+        """fraction=0 → effective cost equals long budget only."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 0.0), 1_000.0)
+
+    def test_effective_cost_full_hedge(self):
+        """fraction=1 → effective cost doubles (equal notional on both legs)."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 1.0), 2_000.0)
+
+    def test_effective_cost_partial_hedge(self):
+        """fraction=0.5 → short leg costs half the long budget."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 0.5), 1_500.0)
+
+    def test_short_leg_fraction_backward_compat_true(self):
+        """enable_short_leg=True with no short_leg_fraction → defaults to 1.0."""
+        params = {'enable_short_leg': True}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 1.0)
+
+    def test_short_leg_fraction_backward_compat_false(self):
+        """enable_short_leg=False with no short_leg_fraction → defaults to 0.0."""
+        params = {'enable_short_leg': False}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 0.0)
+
+    def test_short_leg_fraction_explicit_overrides_legacy(self):
+        """Explicit short_leg_fraction takes precedence over enable_short_leg."""
+        params = {'enable_short_leg': True, 'short_leg_fraction': 0.4}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 0.4)
+
 
 # ---------------------------------------------------------------------------
 # _composite_score logic (mirrors BobsBrain._composite_score, 5 components)

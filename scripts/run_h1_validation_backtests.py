@@ -59,7 +59,7 @@ PARAMS: dict = {
     'hdbscan_selection_method': 'eom',
     'hdbscan_cluster_selection_epsilon': 0.0,
     'min_intra_cluster_corr': 0.3,
-    'enable_short_leg': True,
+    'short_leg_fraction': 1.0,  # full dollar-neutral hedge (was enable_short_leg=True)
 }
 
 RUNS: list[tuple[str, datetime, datetime, str]] = [
@@ -83,7 +83,7 @@ def main() -> None:
         print('=' * 72)
         print(label, start.date(), '->', end.date())
         print('Baseline note:', baseline_note)
-        print('enable_short_leg=True, budget=10000')
+        print('short_leg_fraction=1.0, budget=10000')
         print('=' * 72, flush=True)
         result = BobsBrain.backtest(
             YahooDataBacktesting,

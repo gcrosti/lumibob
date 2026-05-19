@@ -122,7 +122,7 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `min_position_pct` | Min fraction of portfolio for a new position (low score) | `0.03` |
 | `max_position_pct` | Max fraction of portfolio for a new position (high score) | `0.20` |
 | `target_deployed_pct` | Target deployed fraction; gap boosts per-buy allocation | `0.60` |
-| `enable_short_leg` | When `true`, short the lead in equal notional on pair entry (dollar-neutral book) | `false` |
+| `short_leg_fraction` | Fraction [0.0, 1.0] of long notional to short the lead stock. 0.0 = long-only; 1.0 = full dollar-neutral hedge. Replaces deprecated `enable_short_leg`. | `0.0` |
 
 ### Signal
 

@@ -133,8 +133,17 @@ class BobsBrain(Strategy):
         )
         self.min_intra_cluster_corr = self.parameters.get('min_intra_cluster_corr', 0.3)
 
-        # H1: dollar-neutral pair legs — short lead in equal notional on entry.
-        self.enable_short_leg = bool(self.parameters.get('enable_short_leg', False))
+        # H1: continuous short-leg scaling.
+        # short_leg_fraction ∈ [0.0, 1.0]: fraction of the long notional to short the
+        # lead stock.  0.0 = long-only; 1.0 = full dollar-neutral hedge.
+        # Backward compat: if the deprecated enable_short_leg=True is set and
+        # short_leg_fraction is not explicitly provided, default to 1.0 (full hedge).
+        _enable_short_leg_legacy = bool(self.parameters.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        self.short_leg_fraction = float(
+            self.parameters.get('short_leg_fraction', _slf_default)
+        )
+        self.short_leg_fraction = max(0.0, min(1.0, self.short_leg_fraction))
 
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
@@ -254,7 +263,8 @@ class BobsBrain(Strategy):
                 'hdbscan_selection_method': self.hdbscan_selection_method,
                 'hdbscan_cluster_selection_epsilon': self.hdbscan_cluster_selection_epsilon,
                 'min_intra_cluster_corr': self.min_intra_cluster_corr,
-                'enable_short_leg': self.enable_short_leg,
+                # short_leg_fraction replaces the deprecated enable_short_leg boolean.
+                'short_leg_fraction': self.short_leg_fraction,
             },
         )
 
@@ -633,7 +643,7 @@ class BobsBrain(Strategy):
                     else:
                         print(f"Warning: could not log sell trade for {symbol} — price unavailable.")
 
-                if self.enable_short_leg:
+                if self.short_leg_fraction > 0.0:
                     lead_sym = pair['lead_stock']
                     sq = pair.get('lead_short_qty')
                     if sq is not None and float(sq) > 0:
@@ -703,11 +713,14 @@ class BobsBrain(Strategy):
                     base_budget = min(base_budget + gap_share, self.max_position_pct * portfolio_value)
                 per_stock_budget = base_budget
 
-                effective_cost = per_stock_budget * (2 if self.enable_short_leg else 1)
+                # short_leg_fraction scales the short notional relative to the long leg.
+                # effective_cost = long budget + short budget so the cash gate sees
+                # the full capital required for both legs.
+                effective_cost = per_stock_budget * (1.0 + self.short_leg_fraction)
                 if available_cash < effective_cost:
                     continue  # budget exceeds cash; try the next (cheaper) candidate
 
-                if self.enable_short_leg and (
+                if self.short_leg_fraction > 0.0 and (
                     pair['lag_stock'] in held_short
                     or pair['lead_stock'] in held_long
                     or pair['lag_stock'] in new_short_symbols
@@ -721,12 +734,15 @@ class BobsBrain(Strategy):
 
                 lead_qty: float | None = None
                 lead_px: float | None = None
-                if self.enable_short_leg:
+                if self.short_leg_fraction > 0.0:
                     lp = self.get_last_price(pair['lead_stock'])
                     if not lp or lp <= 0:
                         continue
                     lead_px = float(lp)
-                    lead_qty = round(per_stock_budget / lead_px, 6)
+                    # short notional = per_stock_budget * short_leg_fraction;
+                    # short_qty = that notional / lead price
+                    short_notional = per_stock_budget * self.short_leg_fraction
+                    lead_qty = round(short_notional / lead_px, 6)
                     if lead_qty <= 0:
                         continue
 
@@ -751,7 +767,7 @@ class BobsBrain(Strategy):
                             pair_id=pair.get('pair_id'),
                             leg='long',
                         )
-                        if self.enable_short_leg and lead_qty is not None and lead_qty > 0 and lead_px:
+                        if self.short_leg_fraction > 0.0 and lead_qty is not None and lead_qty > 0 and lead_px:
                             order_s = self.create_order(pair['lead_stock'], lead_qty, 'sell')
                             self.submit_order(order_s)
                             self._db.log_trade(
