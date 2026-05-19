@@ -229,9 +229,17 @@ sizing params maximize risk-adjusted returns? These params (cluster frequency,
 deployment level, K) affect how the strategy *uses* the score to build a portfolio,
 not whether the score is good. Sharpe is the right objective for portfolio construction.
 
-**Gate:** Pass A best-trial OOS Sharpe must beat the default param baseline on the
-same 3-fold walk-forward. If not — widen to 300 trials before proceeding to Pass B.
-Pass B has no independent gate; its output feeds directly into Study 2.
+**Gate (Pass A):** Best-trial Spearman rho must exceed 0.15 in at least 2 of the 3
+OOS folds. This confirms the composite score has directional discriminatory power
+at the chosen timescales — a necessary condition before spending compute on Pass B.
+If the gate fails, the score structure cannot rank pairs correctly regardless of
+portfolio construction choices; investigate root cause before proceeding (candidate
+causes: lookback/zscore mismatch persists, all weights collapsed to one component,
+insufficient trades for reliable rank correlation).
+If rho > 0.15 in fewer than 2 folds but the blended objective improved over
+the default, widen to 300 trials and re-evaluate rather than proceeding immediately.
+
+**Gate (Pass B):** No independent gate — Pass B output feeds directly into Study 2.
 
 ---
 
