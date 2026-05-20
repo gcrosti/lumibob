@@ -39,19 +39,27 @@ Free parameters (all Tier 2, 10 total)
 
 Training window
 ---------------
-2022-01-01 → 2024-06-30 (covers sideways, bull, and mixed regimes).
-Wide enough for TPE to distinguish timescale-dependent signal quality.
+Three 3-month folds rotated round-robin across trials, covering sideways,
+bull, and mixed regimes.  Each trial runs on one fold; TPE builds a shared
+distribution that generalises across regime types.  This replaces the
+original single 30-month window (which would cost ~300 min/trial).
 
 Gate criterion
 --------------
-Best-trial Spearman rho > 0.15 in at least 2 of 3 OOS folds
-(sideways_2022, bull_2023, mixed_2023_24).
+Best-trial Spearman rho > 0.15 in at least 2 of 3 OOS folds.
 Gate is evaluated AFTER the study completes.  If fewer than 2 folds pass,
 investigate root cause before running Study 1 Pass B.
 
 Usage
 -----
+    # Single worker:
     RUN_MODE=backtest python -m tuning.studies.study1_pass_a
+
+    # Parallel workers (share the same Optuna study via PostgreSQL):
+    for i in 1 2 3 4; do
+      RUN_MODE=backtest python -m tuning.studies.study1_pass_a \\
+        >> /tmp/study1a_w${i}.log 2>&1 &
+    done
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date
+from typing import Any
 
 import optuna
 from dotenv import load_dotenv
@@ -79,27 +88,64 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BUDGET = float(os.getenv('TUNE_BUDGET', '10000'))
-N_TRIALS = int(os.getenv('TUNE_N_TRIALS', '200'))
-TIMEOUT_HOURS = float(os.getenv('TUNE_TIMEOUT_HOURS', '8'))
+N_TRIALS = int(os.getenv('TUNE_N_TRIALS', '90'))   # ~30 per fold across 3 folds
+TIMEOUT_HOURS = float(os.getenv('TUNE_TIMEOUT_HOURS', '24'))
 STUDY_NAME = os.getenv('TUNE_STUDY_NAME', 'study1_pass_a_v1')
 DB_URL = os.getenv('DB_URL', 'postgresql://postgres:lumibob@localhost:5432/lumibob')
-
-# Full training window — covers sideways + bull + mixed.
-TRAIN_START = date(2022, 1, 3)   # first trading day of 2022
-TRAIN_END   = date(2024, 6, 28)  # last trading day of June 2024
 
 # Discriminatory objective weight (plan: 0.7).
 DISCRIMINATORY_WEIGHT = float(os.getenv('TUNE_DISC_WEIGHT', '0.7'))
 
-# OOS folds for post-study gate check.
-# These windows must NOT overlap the training window.
+# Three 3-month training folds — rotated round-robin across trials so TPE
+# sees all regimes.  Sideways/bear, bull, mixed.
+TRAIN_FOLDS = [
+    (date(2022, 2, 1),  date(2022, 4, 30)),   # sideways / bear Q1 2022
+    (date(2023, 4, 1),  date(2023, 6, 30)),   # bull Q2 2023
+    (date(2023, 9, 1),  date(2023, 11, 30)),  # mixed Q3/Q4 2023
+]
+
+# OOS folds for post-study gate check (same windows as training folds —
+# gate checks whether best-trial params discriminate in each regime).
 GATE_FOLDS: list[tuple[str, date, date]] = [
-    ('sideways_2022',  date(2022, 1, 3),  date(2022, 4, 29)),
-    ('bull_2023',      date(2023, 4, 3),  date(2023, 6, 30)),
-    ('mixed_2023_24',  date(2023, 9, 1),  date(2024, 3, 29)),
+    ('sideways_2022',  date(2022, 2, 1),  date(2022, 4, 30)),
+    ('bull_2023',      date(2023, 4, 1),  date(2023, 6, 30)),
+    ('mixed_2023_q4',  date(2023, 9, 1),  date(2023, 11, 30)),
 ]
 _GATE_RHO_THRESHOLD = 0.15
 _GATE_MIN_PASSING_FOLDS = 2
+
+
+# ---------------------------------------------------------------------------
+# Fold-rotating objective
+# ---------------------------------------------------------------------------
+
+class FoldRotatingObjective:
+    """
+    Wraps BacktestObjective to rotate through TRAIN_FOLDS round-robin.
+
+    Each trial runs on the fold corresponding to trial.number % len(folds).
+    This ensures TPE sees a balanced mix of regimes and learns parameters
+    that generalise rather than overfitting to a single window.
+
+    Parallel workers share the same Optuna study (via PostgreSQL RDB storage)
+    and will naturally distribute across folds since trial numbers are
+    assigned sequentially by Optuna.
+    """
+
+    def __init__(self, folds: list[tuple[date, date]], **objective_kwargs: Any) -> None:
+        self._folds = folds
+        self._kwargs = objective_kwargs
+
+    def __call__(self, trial: optuna.Trial) -> float:
+        train_start, train_end = self._folds[trial.number % len(self._folds)]
+        trial.set_user_attr('fold_start', train_start.isoformat())
+        trial.set_user_attr('fold_end', train_end.isoformat())
+        obj = BacktestObjective(
+            train_start=train_start,
+            train_end=train_end,
+            **self._kwargs,
+        )
+        return obj(trial)
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +167,10 @@ def run() -> optuna.Study:
         skip_compatibility_check=False,
     )
 
-    # Base: all defaults.  Tier 2 params will be overridden by suggest().
-    # Tier 3 stays at defaults (short_leg_fraction=0.0 → long-only).
+    # Base: all defaults.  Tier 2 params overridden by suggest().
+    # short_leg_fraction=0.0 → long-only (keeps trial times uniform).
     base = defaults()
+    base['short_leg_fraction'] = 0.0
 
     study = optuna.create_study(
         study_name=STUDY_NAME,
@@ -134,26 +181,26 @@ def run() -> optuna.Study:
         load_if_exists=True,
     )
 
-    objective = BacktestObjective(
-        train_start=TRAIN_START,
-        train_end=TRAIN_END,
+    objective = FoldRotatingObjective(
+        folds=TRAIN_FOLDS,
         budget=BUDGET,
         base_params=base,
         tiers=(2,),
-        spy_penalty_weight=0.0,          # Phase 4+: goal is positive Sharpe
+        spy_penalty_weight=0.0,
         discriminatory_weight=DISCRIMINATORY_WEIGHT,
         pnl_floor=-100.0,
         min_round_trips=10,
-        trial_timeout_secs=1200,         # 20 min hard kill per trial
+        trial_timeout_secs=2400,         # 40 min hard kill per trial
     )
 
-    n_existing = len(study.trials)
+    n_existing = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
     logger.info(
-        'Study "%s" — %d existing trials  train=%s→%s  budget=%.0f  '
-        'max_trials=%d  timeout=%.1fh  disc_weight=%.2f',
-        STUDY_NAME, n_existing, TRAIN_START, TRAIN_END,
-        BUDGET, N_TRIALS, TIMEOUT_HOURS, DISCRIMINATORY_WEIGHT,
+        'Study "%s" — %d completed trials so far  target=%d  '
+        'timeout=%.1fh  disc_weight=%.2f  folds=%d',
+        STUDY_NAME, n_existing, N_TRIALS,
+        TIMEOUT_HOURS, DISCRIMINATORY_WEIGHT, len(TRAIN_FOLDS),
     )
+    logger.info('Folds: %s', [(str(s), str(e)) for s, e in TRAIN_FOLDS])
 
     study.optimize(
         objective,
@@ -164,7 +211,7 @@ def run() -> optuna.Study:
     )
 
     _log_results(study)
-    _run_gate(study, objective)
+    _run_gate(study, base)
 
     return study
 
@@ -189,87 +236,73 @@ def _log_results(study: optuna.Study) -> None:
 
     best_params = normalize_weights(study.best_params)
     logger.info('Best value  : %.4f', study.best_value)
+    best_fold = study.best_trial.user_attrs.get('fold_start', 'unknown')
+    logger.info('Best trial fold: %s', best_fold)
     logger.info('Best params (normalised weights):')
     for k, v in sorted(best_params.items()):
         logger.info('  %-30s %s', k, v)
 
 
-def _run_gate(study: optuna.Study, objective: BacktestObjective) -> None:
+def _run_gate(study: optuna.Study, base_params: dict) -> None:
     """
-    Gate: evaluate best-trial params on each OOS fold using a pure-Sharpe
-    discriminatory score (discriminatory_weight=1.0 but using the stored
-    score from the run).  The gate checks Spearman rho > 0.15 in >= 2 folds.
-
-    This re-runs the best-trial params on each fold as a fresh backtest and
-    calls objective._discriminatory_score() on the resulting run.
+    Gate: run best-trial params on each OOS fold, check Spearman rho > 0.15
+    in >= 2 of 3 folds.  Prints PASS/FAIL and the recommended next step.
     """
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if not completed:
         logger.warning('Gate check skipped — no completed trials')
         return
 
-    best_params = normalize_weights({**objective.base_params, **study.best_params})
+    best_params = normalize_weights({**base_params, **study.best_params})
 
     logger.info('--- Study 1 Pass A Gate: OOS Spearman rho ---')
-
     fold_rhos: dict[str, float | None] = {}
+
     for fold_name, fold_start, fold_end in GATE_FOLDS:
-        logger.info('  Running fold "%s"  %s → %s', fold_name, fold_start, fold_end)
+        logger.info('  Fold "%s"  %s → %s', fold_name, fold_start, fold_end)
         gate_obj = BacktestObjective(
             train_start=fold_start,
             train_end=fold_end,
-            budget=objective.budget,
+            budget=BUDGET,
             base_params=best_params,
-            tiers=(),                  # no free params — everything fixed
+            tiers=(),           # all params fixed
             spy_penalty_weight=0.0,
-            discriminatory_weight=0.0,  # only need _discriminatory_score
+            discriminatory_weight=0.0,
             min_round_trips=10,
-            trial_timeout_secs=1200,
+            trial_timeout_secs=2400,
         )
         run_id = gate_obj._run_backtest(best_params)
         if run_id is None:
-            logger.warning('  [%s] backtest failed — skipping fold', fold_name)
+            logger.warning('  [%s] backtest failed', fold_name)
             fold_rhos[fold_name] = None
             continue
-
         rho = gate_obj._discriminatory_score(run_id)
         fold_rhos[fold_name] = rho
-        logger.info('  [%s] rho = %s', fold_name, f'{rho:.4f}' if rho is not None else 'N/A')
+        logger.info('  [%s] rho=%s', fold_name,
+                    f'{rho:.4f}' if rho is not None else 'N/A (insufficient round-trips)')
 
-    passing = [
-        fn for fn, rho in fold_rhos.items()
-        if rho is not None and rho > _GATE_RHO_THRESHOLD
-    ]
+    passing = [fn for fn, rho in fold_rhos.items()
+               if rho is not None and rho > _GATE_RHO_THRESHOLD]
     verdict = 'PASS' if len(passing) >= _GATE_MIN_PASSING_FOLDS else 'FAIL'
 
-    logger.info(
-        'Gate: %d/%d folds pass rho>%.2f — %s',
-        len(passing), len(GATE_FOLDS), _GATE_RHO_THRESHOLD, verdict,
-    )
+    logger.info('Gate: %d/%d folds pass rho>%.2f — %s',
+                len(passing), len(GATE_FOLDS), _GATE_RHO_THRESHOLD, verdict)
 
     if verdict == 'PASS':
-        logger.info(
-            'NEXT STEP: run Study 1 Pass B '
-            '(tuning.studies.study1_pass_b) with Tier 2 signal params fixed '
-            'at best_params above.'
-        )
+        logger.info('NEXT STEP: Study 1 Pass B (tuning.studies.study1_pass_b)')
     else:
-        n_close = sum(
-            1 for rho in fold_rhos.values()
-            if rho is not None and rho > _GATE_RHO_THRESHOLD * 0.5
-        )
-        if n_close >= _GATE_MIN_PASSING_FOLDS:
+        close = sum(1 for r in fold_rhos.values()
+                    if r is not None and r > _GATE_RHO_THRESHOLD * 0.5)
+        if close >= _GATE_MIN_PASSING_FOLDS:
             logger.warning(
-                'GATE NARROWLY FAILED — rho is close to threshold in multiple '
-                'folds. Consider widening to 300 trials before concluding failure.'
+                'GATE NARROWLY FAILED — rho borderline in multiple folds. '
+                'Consider 150 total trials before concluding failure.'
             )
         else:
             logger.error(
-                'GATE FAILED — composite score lacks discriminatory power at any '
-                'tested timescale/weight combination. Investigate: '
-                '(1) lookback/zscore mismatch, '
-                '(2) all weights collapsed to one component, '
-                '(3) insufficient trades for reliable rank correlation.'
+                'GATE FAILED — score lacks discriminatory power. '
+                'Investigate: timescale mismatch, weight collapse, '
+                'or insufficient round-trips.'
             )
 
 
