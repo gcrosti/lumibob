@@ -192,7 +192,7 @@ def run() -> optuna.Study:
         discriminatory_weight=DISCRIMINATORY_WEIGHT,
         pnl_floor=-100.0,
         min_round_trips=25,
-        trial_timeout_secs=7200,         # 2 hr hard kill per trial (3-month window ~75–80 min)
+        trial_timeout_secs=10800,        # 3 hr hard kill per trial (5-month window ~120 min; 50% headroom)
     )
 
     n_existing = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
@@ -271,7 +271,7 @@ def _run_gate(study: optuna.Study, base_params: dict) -> None:
             spy_penalty_weight=0.0,
             discriminatory_weight=0.0,
             min_round_trips=25,
-            trial_timeout_secs=7200,
+            trial_timeout_secs=10800,
         )
         run_id = gate_obj._run_backtest(best_params)
         if run_id is None:
