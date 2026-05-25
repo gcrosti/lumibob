@@ -48,6 +48,7 @@ migrations/
   001_add_exit_reason.sql   ALTER TABLE migration for exit_reason column
   002_coint_cache.sql       Add pair_coint_cache table and coint_pvalue/halflife_days columns to pairs
   003_short_leg.sql         trades.leg (long vs short fills) and pairs.lead_short_qty (H1)
+  004_failed_tickers_windowed.sql  Scope failed_tickers by (window_start, window_end); replaces symbol-only PK
 ```
 
 | Module | Responsibility |
@@ -262,6 +263,7 @@ Apply **`schema.sql`** on a fresh database. For existing databases, apply increm
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/001_add_exit_reason.sql
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/002_coint_cache.sql
 psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/003_short_leg.sql
+psql postgresql://postgres:lumibob@localhost:5432/lumibob -f migrations/004_failed_tickers_windowed.sql
 ```
 
 **`DatabaseClient`** also runs idempotent **`ALTER … IF NOT EXISTS`** migrations at startup for incremental columns/tables.
