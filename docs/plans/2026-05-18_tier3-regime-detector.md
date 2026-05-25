@@ -243,6 +243,80 @@ the default, widen to 300 trials and re-evaluate rather than proceeding immediat
 
 ---
 
+#### Pass A — v1 post-mortem and v2 design
+
+> Completed: 2026-05-21. Study name `study1_pass_a_v1`. 83 trials completed
+> across 3 folds (~28 per fold). Gate result: **FAIL** (rho > 0.15 in 1/3 folds).
+
+**What happened:**
+
+v1 used 3-month folds (~65 trading days each). The gate check ran best-trial params
+(trial 88: `zscore_window=39, cooldown_days=21`) on all three folds:
+
+| Fold | rho | Gate (> 0.15)? |
+|---|---|---|
+| sideways-2022 | +0.28 | ✓ |
+| bull-2023 | < 0.15 | ✗ |
+| mixed-Q4-2023 | < 0.15 | ✗ |
+
+The bull fold produced the highest *training* scores (+0.27) but trial 88's params
+did not transfer to the other folds in the gate check.
+
+**Root cause: insufficient round-trips, not a wrong parameter space.**
+
+With `zscore_window=39` and `cooldown_days=21`, a pair can re-enter at most 2–3
+times in a 65-trading-day window. With `max_k` as low as 5, some trials had fewer
+than 25 round-trips total — too few for reliable Spearman rho estimation (standard
+error ~1/√n; at n=20 that is ±0.22, wider than the 0.15 gate threshold itself).
+The signal may well exist at these timescales; there is no evidence from v1 that
+the parameter space is wrong.
+
+**What was considered but rejected:**
+
+Tightening `zscore_window` [10→40] to [5→20] and `cooldown_days` ceiling to 10
+would mechanically increase round-trip count, but at the cost of forcing the
+optimizer into shorter-timescale signal regimes that may not reflect how the
+composite score actually works. The correct response to a measurement noise
+problem is more data, not a different parameter space.
+
+**v2 changes:**
+
+| | v1 | v2 |
+|---|---|---|
+| Fold length | 3 months (~65 days) | **5 months (~108 days)** |
+| `zscore_window` bounds | [10, 40] | [10, 40] — unchanged |
+| `cooldown_days` bounds | [3, 21] | [3, 21] — unchanged |
+| `max_k` bounds | [5, 50] | [5, 50] — unchanged |
+| `min_round_trips` | 10 | **25** |
+| Execution | Local (4 workers) | **Cloud (EC2, 8 workers)** |
+| Study name | `study1_pass_a_v1` | `study1_pass_a_v2` |
+
+**5-month fold windows (v2):**
+
+| Label | Window | Trading days | Regime |
+|---|---|---|---|
+| `sideways_2022` | 2021-12-01 → 2022-04-30 | ~108 | Sideways / mean-reverting |
+| `bull_2023` | 2023-02-01 → 2023-06-30 | ~107 | Bull trending |
+| `mixed_2023_q4` | 2023-07-01 → 2023-11-30 | ~109 | Mixed / transitional |
+
+With `zscore_window=39` and `cooldown_days=21` (the v1 best-trial values), a pair
+can now re-enter ~4–5 times per fold, and with `max_k≥15` active pairs the
+expected round-trip count exceeds 60 — cutting rho standard error to ~0.13 and
+making the 0.15 gate reliably measurable.
+
+**Raising `min_round_trips` to 25:** Trials that generate fewer than 25 round-trips
+are pruned early rather than contributing noisy rho estimates to the TPE model.
+This is a data-quality filter, not a signal assumption — it does not constrain
+which parameter regions are explored, only prevents near-zero-activity trials
+from polluting the objective surface.
+
+**Cloud execution:** Trial wall-clock time grows ~60% with 5-month vs 3-month
+windows (~120 min vs ~75 min). Running locally with 4 workers would take ~30+ hours.
+EC2 c6i.2xlarge spot instance with 8 workers completes in ~9 hours at ~$0.90 total.
+See `docs/plans/2026-05-19_cloud-tuning-study1-onward.md` for setup steps.
+
+---
+
 ### Study 2: Per-regime Tier 3 joint optimization (Phase 4 coarse equivalent)
 
 **Purpose:** For each regime label, find the jointly optimal Tier 3 parameter set.

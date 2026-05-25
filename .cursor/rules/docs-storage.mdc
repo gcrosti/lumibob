@@ -1,0 +1,13 @@
+---
+description: Documentation storage — folder structure and naming conventions for generated docs
+alwaysApply: true
+---
+
+# Documentation Storage
+
+All generated documents must be saved in `docs/` with the correct subfolder — never at the project root or directly in `docs/`.
+
+| Document type | Folder | Naming convention |
+|---|---|---|
+| Strategy deep dives, findings, deepdive plans | `docs/deepdives/` | `YYYY-MM-DD_<topic-slug>.md` |
+| Implementation plans, feature plans, design plans | `docs/plans/` | `YYYY-MM-DD_<topic-slug>.md` |

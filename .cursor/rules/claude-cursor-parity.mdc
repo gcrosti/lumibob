@@ -1,0 +1,12 @@
+---
+description: Parity rule — keep .claude/skills and .cursor/skills in sync when either is modified
+alwaysApply: true
+---
+
+# .claude / .cursor Parity
+
+`.claude/skills/` and `.cursor/skills/` are mirrors of each other. When any skill file is created or modified in one location, apply the same content change to the counterpart in the other location. Preserve each format's conventions:
+- `.claude/skills/<name>.md` — plain Markdown, no frontmatter
+- `.cursor/skills/<name>/SKILL.md` — Markdown with YAML frontmatter (`name`, `description`)
+
+The same applies to rules: changes to tone, formatting, or other always-on guidelines that live in `.cursor/rules/` should be reflected in CLAUDE.md, and vice versa.
