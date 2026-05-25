@@ -90,26 +90,28 @@ logger = logging.getLogger(__name__)
 BUDGET = float(os.getenv('TUNE_BUDGET', '10000'))
 N_TRIALS = int(os.getenv('TUNE_N_TRIALS', '90'))   # ~30 per fold across 3 folds
 TIMEOUT_HOURS = float(os.getenv('TUNE_TIMEOUT_HOURS', '24'))
-STUDY_NAME = os.getenv('TUNE_STUDY_NAME', 'study1_pass_a_v1')
+STUDY_NAME = os.getenv('TUNE_STUDY_NAME', 'study1_pass_a_v2')
 DB_URL = os.getenv('DB_URL', 'postgresql://postgres:lumibob@localhost:5432/lumibob')
 
 # Discriminatory objective weight (plan: 0.7).
 DISCRIMINATORY_WEIGHT = float(os.getenv('TUNE_DISC_WEIGHT', '0.7'))
 
-# Three 3-month training folds — rotated round-robin across trials so TPE
-# sees all regimes.  Sideways/bear, bull, mixed.
+# Three 5-month training folds — rotated round-robin across trials so TPE
+# sees all regimes.  Extended from 3→5 months (~65→108 trading days) so each
+# fold generates enough round-trips for reliable Spearman rho estimation.
+# Parameter space (zscore_window, cooldown_days, max_k) is unchanged from v1;
+# only the window length changes to improve statistical power.
 TRAIN_FOLDS = [
-    (date(2022, 2, 1),  date(2022, 4, 30)),   # sideways / bear Q1 2022
-    (date(2023, 4, 1),  date(2023, 6, 30)),   # bull Q2 2023
-    (date(2023, 9, 1),  date(2023, 11, 30)),  # mixed Q3/Q4 2023
+    (date(2021, 12, 1), date(2022, 4, 30)),   # sideways / bear (~108 days)
+    (date(2023, 2, 1),  date(2023, 6, 30)),   # bull (~107 days)
+    (date(2023, 7, 1),  date(2023, 11, 30)),  # mixed Q3/Q4 (~109 days)
 ]
 
-# OOS folds for post-study gate check (same windows as training folds —
-# gate checks whether best-trial params discriminate in each regime).
+# OOS folds for post-study gate check (same windows as training folds).
 GATE_FOLDS: list[tuple[str, date, date]] = [
-    ('sideways_2022',  date(2022, 2, 1),  date(2022, 4, 30)),
-    ('bull_2023',      date(2023, 4, 1),  date(2023, 6, 30)),
-    ('mixed_2023_q4',  date(2023, 9, 1),  date(2023, 11, 30)),
+    ('sideways_2022',  date(2021, 12, 1), date(2022, 4, 30)),
+    ('bull_2023',      date(2023, 2, 1),  date(2023, 6, 30)),
+    ('mixed_2023_q4',  date(2023, 7, 1),  date(2023, 11, 30)),
 ]
 _GATE_RHO_THRESHOLD = 0.15
 _GATE_MIN_PASSING_FOLDS = 2
@@ -189,8 +191,8 @@ def run() -> optuna.Study:
         spy_penalty_weight=0.0,
         discriminatory_weight=DISCRIMINATORY_WEIGHT,
         pnl_floor=-100.0,
-        min_round_trips=10,
-        trial_timeout_secs=2400,         # 40 min hard kill per trial
+        min_round_trips=25,
+        trial_timeout_secs=7200,         # 2 hr hard kill per trial (3-month window ~75–80 min)
     )
 
     n_existing = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
@@ -268,8 +270,8 @@ def _run_gate(study: optuna.Study, base_params: dict) -> None:
             tiers=(),           # all params fixed
             spy_penalty_weight=0.0,
             discriminatory_weight=0.0,
-            min_round_trips=10,
-            trial_timeout_secs=2400,
+            min_round_trips=25,
+            trial_timeout_secs=7200,
         )
         run_id = gate_obj._run_backtest(best_params)
         if run_id is None:
