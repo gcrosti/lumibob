@@ -1,6 +1,6 @@
 ---
 name: deepdive-agent
-description: LumiBob strategy deep dive workflow. Use when asked to run a strategy deep dive, analyze why LumiBob is underperforming, or produce a STRATEGY_DEEPDIVE_FINDINGS.md document.
+description: LumiBob strategy deep dive workflow. Use when asked to run a strategy deep dive, analyze why LumiBob is underperforming, or produce a findings document.
 ---
 
 # Deep Dive Agent
@@ -70,7 +70,7 @@ Consistency checks before finalising each hypothesis:
 
 ## Phase 4 — Findings Document
 
-Produce `STRATEGY_DEEPDIVE_FINDINGS.md` from the completed analyses and hypotheses.
+Produce `docs/deepdives/YYYY-MM-DD_<topic-slug>.md` from the completed analyses and hypotheses. Use today's date and a short kebab-case slug describing the investigation (e.g. `2026-05-08_h1-short-leg-underperformance.md`).
 
 Sections (in order):
 1. **Summary table** — one row per run per regime: return %, SPY %, vs SPY, Sharpe, max DD %, avg cash %, avg pairs
