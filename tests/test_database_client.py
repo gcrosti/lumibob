@@ -162,12 +162,12 @@ class TestPairs:
                   short_ma=2, long_ma=5, corr=0.91, initial_cost=None,
                   sim_ret=None, sim_sharpe=None, signal_type=None,
                   zscore_window=None, entry_threshold=None, exit_threshold=None,
-                  coint_pvalue=None, halflife_days=None):
-        """Build a 16-column pairs row matching the SELECT in load_active_pairs."""
+                  coint_pvalue=None, halflife_days=None, lead_short_qty=None):
+        """Build a 17-column pairs row matching the SELECT in load_active_pairs."""
         return (pid, lead, lag, lag_days, short_ma, long_ma, corr, initial_cost,
                 sim_ret, sim_sharpe, signal_type, zscore_window,
                 entry_threshold, exit_threshold,
-                coint_pvalue, halflife_days)
+                coint_pvalue, halflife_days, lead_short_qty)
 
     def test_load_active_pairs_returns_dict_keyed_by_lag(self):
         client, mock_pool = _make_client()
@@ -180,6 +180,15 @@ class TestPairs:
         assert result["MSFT"]["pair_id"] == 1
         assert result["MSFT"]["action"] == "hold"
         assert result["MSFT"]["corr_long"] == 0.91
+        assert result["MSFT"]["lead_short_qty"] is None
+
+    def test_load_active_pairs_includes_lead_short_qty_when_set(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool, fetchall_return=[self._pair_row(lead_short_qty=12.5)])
+
+        result = client.load_active_pairs("run01")
+
+        assert result["MSFT"]["lead_short_qty"] == 12.5
 
     def test_load_active_pairs_filters_by_run_id(self):
         client, mock_pool = _make_client()
@@ -338,6 +347,66 @@ class TestPairs:
         _sql, params = mock_cur.execute.call_args[0]
         assert params[6] is None
 
+    def test_save_pair_stores_composite_score_and_components(self):
+        """Score components and weights must be written to pairs so post-hoc
+        analysis can reconstruct and validate the composite score."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(42,))
+
+        pair = {
+            "lead_stock": "AAPL", "lag_stock": "MSFT",
+            "lag": 1, "short_ma": 2, "long_ma": 5,
+            "composite_score": 0.72,
+            "score_corr_long": 0.85, "score_corr_short": 0.76,
+            "score_z_depth": 0.60,
+            "score_coint": 0.90, "score_halflife": 0.50,
+            "w_corr_long": 0.2143, "w_corr_short": 0.3571,
+            "w_z_depth": 0.1429, "w_coint": 0.1786, "w_halflife": 0.1071,
+        }
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        # composite_score is the 17th param (index 16)
+        assert params[16] == 0.72
+        # component scores follow at indices 17–21
+        assert params[17] == 0.85   # score_corr_long
+        assert params[18] == 0.76   # score_corr_short
+        assert params[19] == 0.60   # score_z_depth
+        assert params[20] == 0.90   # score_coint
+        assert params[21] == 0.50   # score_halflife
+        # weights at indices 22–26
+        assert params[22] == 0.2143  # w_corr_long
+        assert params[23] == 0.3571  # w_corr_short
+        assert params[24] == 0.1429  # w_z_depth
+        assert params[25] == 0.1786  # w_coint
+        assert params[26] == 0.1071  # w_halflife
+
+    def test_save_pair_score_components_default_to_none(self):
+        """Score columns are NULL when not provided — legacy callers stay compatible."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchone_return=(99,))
+
+        pair = {"lead_stock": "AAPL", "lag_stock": "MSFT", "lag": 1}
+        client.save_pair(pair, "run01")
+
+        _sql, params = mock_cur.execute.call_args[0]
+        # composite_score and all component/weight params should be None
+        for idx in range(16, 27):
+            assert params[idx] is None, f"param[{idx}] expected None, got {params[idx]}"
+
+    def test_migrate_pairs_score_components_adds_all_columns(self):
+        """Migration must issue ADD COLUMN IF NOT EXISTS for all 11 score columns."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_pairs_score_components()
+
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        for col in ("composite_score", "score_corr_long", "score_corr_short",
+                    "score_z_depth", "score_coint", "score_halflife",
+                    "w_corr_long", "w_corr_short", "w_z_depth", "w_coint", "w_halflife"):
+            assert col in all_sql, f"Migration missing column: {col}"
+
     def test_update_pair_initial_cost_executes_update(self):
         """update_pair_initial_cost should UPDATE pairs SET initial_cost for the given id."""
         client, mock_pool = _make_client()
@@ -412,9 +481,19 @@ class TestFailedTickers:
 
         client.migrate_failed_tickers()
 
-        sql = mock_cur.execute.call_args[0][0]
-        assert "CREATE TABLE IF NOT EXISTS" in sql
-        assert "failed_tickers" in sql
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        assert "CREATE TABLE IF NOT EXISTS" in all_sql
+        assert "failed_tickers" in all_sql
+
+    def test_migrate_adds_window_columns(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_failed_tickers()
+
+        all_sql = " ".join(call[0][0] for call in mock_cur.execute.call_args_list)
+        assert "window_start" in all_sql
+        assert "window_end" in all_sql
 
     def test_get_failed_tickers_returns_symbol_list(self):
         client, mock_pool = _make_client()
@@ -432,17 +511,31 @@ class TestFailedTickers:
 
         assert result == []
 
-    def test_mark_ticker_failed_inserts_symbol_and_reason(self):
+    def test_get_failed_tickers_for_window_queries_with_overlap(self):
+        from datetime import date
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[("RDN",)])
+
+        result = client.get_failed_tickers_for_window(date(2022, 2, 1), date(2022, 4, 30))
+
+        assert result == ["RDN"]
+        sql = mock_cur.execute.call_args[0][0]
+        assert "window_start" in sql
+        assert "window_end" in sql
+
+    def test_mark_ticker_failed_inserts_symbol_reason_and_window(self):
+        from datetime import date
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
-        client.mark_ticker_failed("T.PRA", "no data from Alpaca")
+        client.mark_ticker_failed("T.PRA", "no data from Alpaca",
+                                  date(2022, 2, 1), date(2022, 4, 30))
 
         sql = mock_cur.execute.call_args[0][0]
         assert "INSERT INTO failed_tickers" in sql
         params = mock_cur.execute.call_args[0][1]
         assert params[0] == "T.PRA"
-        assert params[1] == "no data from Alpaca"
+        assert params[3] == "no data from Alpaca"
 
     def test_mark_ticker_failed_uses_on_conflict_do_nothing(self):
         client, mock_pool = _make_client()
@@ -454,14 +547,16 @@ class TestFailedTickers:
         assert "ON CONFLICT" in sql
         assert "DO NOTHING" in sql
 
-    def test_mark_ticker_failed_default_reason_is_empty_string(self):
+    def test_mark_ticker_failed_sentinel_dates_when_window_omitted(self):
+        from datetime import date
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool)
 
         client.mark_ticker_failed("T.PRA")
 
         params = mock_cur.execute.call_args[0][1]
-        assert params[1] == ""
+        assert params[1] == date(1970, 1, 1)
+        assert params[2] == date(1970, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -507,14 +602,19 @@ class TestLogging:
             daily_buys=2, daily_sells=1,
             daily_topups=3, pairs_scanned=120,
             candidates_found=5, candidates_buy_ready=3,
+            gross_long_pct=0.55, gross_short_pct=0.42,
         )
 
         sql = mock_cur.execute.call_args[0][0]
         assert "INSERT INTO portfolio_snapshots" in sql
+        assert "gross_long_pct" in sql
+        assert "gross_short_pct" in sql
         params = mock_cur.execute.call_args[0][1]
         assert params[0] == ts
         assert params[1] == "abc123"
         assert params[2] == 10500.0
+        assert params[-2] == 0.55   # gross_long_pct
+        assert params[-1] == 0.42   # gross_short_pct
 
     def test_log_snapshot_includes_funnel_and_topup_columns(self):
         client, mock_pool = _make_client()
@@ -537,12 +637,58 @@ class TestLogging:
         assert "avg_watchlist_ttl" in sql
         params = mock_cur.execute.call_args[0][1]
         # avg_watchlist_ttl is now the final param; preceding columns shift by 1
-        assert params[-6] == 3    # daily_topups
-        assert params[-5] == 120  # pairs_scanned
-        assert params[-4] == 5    # candidates_found
-        assert params[-3] == 3    # candidates_buy_ready
-        assert params[-2] is None  # avg_zscore (not passed → None)
-        assert params[-1] is None  # avg_watchlist_ttl (not passed → None)
+        assert params[-8] == 3    # daily_topups
+        assert params[-7] == 120  # pairs_scanned
+        assert params[-6] == 5    # candidates_found
+        assert params[-5] == 3    # candidates_buy_ready
+        assert params[-4] is None  # avg_zscore (not passed → None)
+        assert params[-3] is None  # avg_watchlist_ttl (not passed → None)
+        assert params[-2] is None  # gross_long_pct (not passed → None)
+        assert params[-1] is None  # gross_short_pct (not passed → None)
+
+    def test_update_pair_lead_short_qty_executes_update(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_lead_short_qty(99, 7.5)
+
+        sql = mock_cur.execute.call_args[0][0]
+        assert "UPDATE pairs" in sql
+        assert "lead_short_qty" in sql
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] == 7.5
+        assert params[1] == 99
+
+    def test_update_pair_lead_short_qty_accepts_none(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.update_pair_lead_short_qty(5, None)
+
+        params = mock_cur.execute.call_args[0][1]
+        assert params[0] is None
+
+    def test_migrate_short_leg_issues_alter_for_leg_column(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_short_leg()
+
+        all_calls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        assert any("leg" in sql for sql in all_calls)
+        assert any("lead_short_qty" in sql for sql in all_calls)
+        assert any("ADD COLUMN IF NOT EXISTS" in sql for sql in all_calls)
+
+    def test_migrate_snapshot_deployment_issues_alter_for_gross_columns(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_snapshot_deployment()
+
+        all_calls = [call[0][0] for call in mock_cur.execute.call_args_list]
+        assert any("gross_long_pct" in sql for sql in all_calls)
+        assert any("gross_short_pct" in sql for sql in all_calls)
+        assert any("ADD COLUMN IF NOT EXISTS" in sql for sql in all_calls)
 
     def test_log_trade_inserts_fill_row(self):
         client, mock_pool = _make_client()
@@ -560,3 +706,81 @@ class TestLogging:
         params = mock_cur.execute.call_args[0][1]
         assert "MSFT" in params
         assert "buy" in params
+        assert params[-1] == "long"  # leg
+
+
+# ---------------------------------------------------------------------------
+# Cointegration cache
+# ---------------------------------------------------------------------------
+
+class TestCointegrationCache:
+    """write_coint_cache and load_coint_cache round-trip behaviour."""
+
+    def test_write_coint_cache_calls_execute_values(self):
+        """write_coint_cache must reach execute_values — the silent-drop bug
+        was caused by a column-count mismatch that was swallowed by the broad
+        except clause.  If execute_values is never called the cache stays empty."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.write_coint_cache(
+                entries={("AAPL", "MSFT"): (0.04, 12.5)},
+                window_end_date=date(2022, 2, 1),
+                lookback_window=130,
+            )
+            mock_ev.assert_called_once()
+
+    def test_write_coint_cache_row_has_six_values(self):
+        """Each row passed to execute_values must have exactly 6 values matching
+        the INSERT column list (lead, lag, window_end_date, lookback_window,
+        coint_pvalue, halflife_days).  computed_at is omitted — the DB default
+        fills it.  A 7-value row caused the historic silent write failure."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        captured_rows = []
+
+        def _capture(cur, sql, rows, **kwargs):
+            captured_rows.extend(rows)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values", side_effect=_capture):
+            client.write_coint_cache(
+                entries={("AAPL", "MSFT"): (0.04, 12.5), ("GOOG", "AMZN"): (0.01, None)},
+                window_end_date=date(2022, 2, 1),
+                lookback_window=130,
+            )
+
+        assert len(captured_rows) == 2
+        for row in captured_rows:
+            assert len(row) == 6, f"Expected 6 columns per row, got {len(row)}: {row}"
+
+    def test_write_coint_cache_noop_on_empty_entries(self):
+        """No DB call when entries dict is empty."""
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            client.write_coint_cache({}, date(2022, 2, 1), 130)
+            mock_ev.assert_not_called()
+
+    def test_load_coint_cache_returns_dict_keyed_by_symbol_pair(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(
+            mock_pool,
+            fetchall_return=[("AAPL", "MSFT", 0.04, 12.5), ("GOOG", "AMZN", 0.01, None)],
+        )
+
+        result = client.load_coint_cache(date(2022, 2, 1), 130)
+
+        assert ("AAPL", "MSFT") in result
+        assert result[("AAPL", "MSFT")] == (0.04, 12.5)
+        assert result[("GOOG", "AMZN")] == (0.01, None)
+
+    def test_load_coint_cache_returns_empty_dict_on_no_rows(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[])
+
+        result = client.load_coint_cache(date(2022, 2, 1), 130)
+
+        assert result == {}

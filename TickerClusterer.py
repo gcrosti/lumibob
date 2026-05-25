@@ -27,6 +27,14 @@ import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
+# min_cluster_size scales with universe size so clustering density is consistent
+# regardless of how many symbols the failed_tickers filter removes.
+# Formula: max(_MCS_FLOOR, round(n_symbols * _MCS_FRACTION))
+# At 5 000 symbols → mcs=5 (matches old fixed default).
+# At 3 000 symbols → mcs=3 (prevents over-fragmentation on a smaller universe).
+_MCS_FRACTION: float = 0.001
+_MCS_FLOOR: int = 3
+
 import hdbscan
 import numpy as np
 import pandas as pd
@@ -104,7 +112,7 @@ class TickerClusterer:
         self._db = db
         self._get_prices = get_prices if get_prices is not None else db.get_prices
         self.lookback_days = lookback_days
-        self.min_cluster_size = min_cluster_size
+        self.min_cluster_size = min_cluster_size  # kept for backward compat; actual mcs is dynamic
         self.pca_variance = pca_variance
         self.min_coverage = min_coverage
         self.hdbscan_min_samples = hdbscan_min_samples
@@ -112,6 +120,9 @@ class TickerClusterer:
         self.hdbscan_selection_method = hdbscan_selection_method
         self.hdbscan_cluster_selection_epsilon = hdbscan_cluster_selection_epsilon
         self.min_intra_cluster_corr = min_intra_cluster_corr
+        # Initialised to the configured floor; overwritten each _compute call
+        # with max(_MCS_FLOOR, round(n_symbols * _MCS_FRACTION)).
+        self._dynamic_mcs: int = max(_MCS_FLOOR, min_cluster_size)
 
         self._clusters: list[list[str]] = []
         self._last_computed: datetime | None = None
@@ -253,6 +264,12 @@ class TickerClusterer:
 
         symbols = list(log_returns.columns)
 
+        # Recompute dynamic mcs each run — universe size changes as failed_tickers
+        # accumulates window-specific failures.  hdbscan_min_cluster_size from
+        # parameters is retained for backward compatibility but is no longer the
+        # authoritative value; _MCS_FRACTION drives effective cluster size.
+        self._dynamic_mcs = max(_MCS_FLOOR, round(len(symbols) * _MCS_FRACTION))
+
         # Compute correlation matrix once — used for HDBSCAN distance (precomputed
         # path) and for cluster ranking / get_top_pairs_by_corr.
         corr_df = log_returns[symbols].corr()
@@ -314,7 +331,7 @@ class TickerClusterer:
         print(
             f'TickerClusterer: {total} tickers → {n_clusters} clusters '
             f'across {n_partitions} sector partitions '
-            f'(min_size={self.min_cluster_size}, metric={self.hdbscan_metric}, '
+            f'(min_size={self._dynamic_mcs} [universe={len(symbols)}], metric={self.hdbscan_metric}, '
             f'{n_noise} noise/tail tickers, '
             f'{len(passed)} clusters passed sanity gate)'
         )
@@ -417,13 +434,13 @@ class TickerClusterer:
         else:
             X_hdbscan = X_euclidean
 
-        # First HDBSCAN attempt with configured parameters.
-        labels = self._run_hdbscan(X_hdbscan, self.min_cluster_size, self.hdbscan_min_samples)
+        # First HDBSCAN attempt with universe-scaled min_cluster_size.
+        labels = self._run_hdbscan(X_hdbscan, self._dynamic_mcs, self.hdbscan_min_samples)
         cluster_map, noise = self._labels_to_map(partition_syms, labels)
 
         # Retry with relaxed params if all tickers went to noise.
         if not cluster_map:
-            relaxed_mcs = min(3, self.min_cluster_size)
+            relaxed_mcs = min(3, self._dynamic_mcs)
             print(
                 f'TickerClusterer: HDBSCAN all-noise on partition of {n_sym} tickers; '
                 f'retrying with min_cluster_size={relaxed_mcs}, min_samples=1',

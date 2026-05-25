@@ -120,6 +120,46 @@ class TestCompositeScoreSizing(unittest.TestCase):
         available_cash = 2_000.0
         self.assertTrue(available_cash >= per_stock_budget)
 
+    def _conflict(self, pair, held_long=None, held_short=None,
+                  new_buy=None, new_short=None):
+        hl = held_long or set()
+        hs = held_short or set()
+        nb = new_buy or set()
+        ns = new_short or set()
+        return (
+            pair['lag_stock'] in hs
+            or pair['lead_stock'] in hl
+            or pair['lag_stock'] in ns
+            or pair['lead_stock'] in nb
+        )
+
+    def test_conflict_guard_blocks_lag_already_held_short(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, held_short={'AAPL'}))
+
+    def test_conflict_guard_blocks_lead_already_held_long(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, held_long={'MSFT'}))
+
+    def test_conflict_guard_blocks_lag_shorted_same_iteration(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, new_short={'AAPL'}))
+
+    def test_conflict_guard_blocks_lead_bought_same_iteration(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertTrue(self._conflict(pair, new_buy={'MSFT'}))
+
+    def test_conflict_guard_passes_for_clean_pair(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertFalse(self._conflict(pair))
+
+    def test_conflict_guard_passes_when_different_symbols_in_sets(self):
+        pair = {'lag_stock': 'AAPL', 'lead_stock': 'MSFT'}
+        self.assertFalse(self._conflict(
+            pair, held_long={'GOOG'}, held_short={'TSLA'},
+            new_buy={'AMZN'}, new_short={'META'},
+        ))
+
     def test_candidates_sorted_by_score_descending(self):
         pairs = [
             {'lag_stock': 'LOW', 'composite_score': 0.2},
@@ -128,6 +168,48 @@ class TestCompositeScoreSizing(unittest.TestCase):
         ]
         ranked = sorted(pairs, key=lambda p: p['composite_score'], reverse=True)
         self.assertEqual([p['lag_stock'] for p in ranked], ['HIGH', 'MID', 'LOW'])
+
+    # --- short_leg_fraction effective cost ---
+
+    def _effective_cost(self, per_stock_budget, short_leg_fraction):
+        """Mirrors BobsBrain buy-path: effective_cost = budget * (1 + fraction)."""
+        return per_stock_budget * (1.0 + short_leg_fraction)
+
+    def test_effective_cost_long_only(self):
+        """fraction=0 → effective cost equals long budget only."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 0.0), 1_000.0)
+
+    def test_effective_cost_full_hedge(self):
+        """fraction=1 → effective cost doubles (equal notional on both legs)."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 1.0), 2_000.0)
+
+    def test_effective_cost_partial_hedge(self):
+        """fraction=0.5 → short leg costs half the long budget."""
+        self.assertAlmostEqual(self._effective_cost(1_000.0, 0.5), 1_500.0)
+
+    def test_short_leg_fraction_backward_compat_true(self):
+        """enable_short_leg=True with no short_leg_fraction → defaults to 1.0."""
+        params = {'enable_short_leg': True}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 1.0)
+
+    def test_short_leg_fraction_backward_compat_false(self):
+        """enable_short_leg=False with no short_leg_fraction → defaults to 0.0."""
+        params = {'enable_short_leg': False}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 0.0)
+
+    def test_short_leg_fraction_explicit_overrides_legacy(self):
+        """Explicit short_leg_fraction takes precedence over enable_short_leg."""
+        params = {'enable_short_leg': True, 'short_leg_fraction': 0.4}
+        _enable_short_leg_legacy = bool(params.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        slf = float(params.get('short_leg_fraction', _slf_default))
+        self.assertAlmostEqual(slf, 0.4)
 
 
 # ---------------------------------------------------------------------------

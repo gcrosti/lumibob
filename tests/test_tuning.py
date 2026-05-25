@@ -247,6 +247,57 @@ class TestSuggest:
         result = suggest(trial, tiers=(99,))
         assert result == {}
 
+    # --- Joint timescale constraint tests ---
+
+    def test_zscore_window_constrained_by_lookback(self):
+        """zscore_window must be ≤ lookback_window // 3 when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['zscore_window'] <= result['lookback_window'] // 3, (
+                f"seed={seed}: zscore_window={result['zscore_window']} > "
+                f"lookback_window // 3 = {result['lookback_window'] // 3}"
+            )
+
+    def test_cooldown_days_constrained_by_zscore_window(self):
+        """cooldown_days must be ≥ zscore_window // 2 when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['cooldown_days'] >= result['zscore_window'] // 2, (
+                f"seed={seed}: cooldown_days={result['cooldown_days']} < "
+                f"zscore_window // 2 = {result['zscore_window'] // 2}"
+            )
+
+    def test_corr_short_window_constrained_by_corr_long_window(self):
+        """corr_short_window must be ≤ corr_long_window when both are in tiers."""
+        import optuna
+        for seed in range(20):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,))
+            assert result['corr_short_window'] <= result['corr_long_window'], (
+                f"seed={seed}: corr_short_window={result['corr_short_window']} > "
+                f"corr_long_window={result['corr_long_window']}"
+            )
+
+    def test_constraints_not_applied_when_dependency_missing(self):
+        """When only zscore_window tier is tuned (Tier 2) but lookback is Tier 1
+        and not in the call, zscore_window falls back to its unconstrained range."""
+        import optuna
+        # Tuning only Tier 3 — zscore_window is Tier 2, so it won't appear at all.
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=0))
+        trial = study.ask()
+        result = suggest(trial, tiers=(3,))
+        # zscore_window should not be present since it is Tier 2
+        assert 'zscore_window' not in result
+        # lookback_window should not be present either
+        assert 'lookback_window' not in result
+
 
 # ===========================================================================
 # tuning.objective.BacktestObjective.score_run
@@ -394,3 +445,128 @@ class TestScoreRun:
         with patch('tuning.objective.psycopg2.connect', return_value=conn):
             obj.score_run('run_id', trial=None)
         mock_trial.report.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Discriminatory scoring
+# ---------------------------------------------------------------------------
+
+def _mock_db_for_discriminatory(pv_values, spy_values, n_trades, pair_rows):
+    """
+    Extend the standard score mock to also return pair-level data for the
+    discriminatory score query (composite_score, round_trip_pnl).
+    """
+    import datetime
+
+    snap_rows = [
+        (datetime.date(2024, 1, i + 2), pv, spy)
+        for i, (pv, spy) in enumerate(zip(pv_values, spy_values))
+    ]
+    description = [('time',), ('portfolio_value',), ('spy_value',)]
+
+    call_count = [0]
+
+    mock_cur = MagicMock()
+    mock_cur.description = description
+    mock_cur.__enter__ = lambda s: s
+    mock_cur.__exit__ = MagicMock(return_value=False)
+
+    def fetchall_side_effect():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return snap_rows   # portfolio_snapshots query
+        return pair_rows       # discriminatory score query
+
+    mock_cur.fetchall.side_effect = fetchall_side_effect
+    mock_cur.fetchone.return_value = (n_trades,)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cur
+    mock_conn.__enter__ = lambda s: s
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    return mock_conn
+
+
+class TestDiscriminatoryScore:
+    """Tests for the discriminatory_weight blending and _discriminatory_score helper."""
+
+    def test_pure_sharpe_when_discriminatory_weight_zero(self):
+        """discriminatory_weight=0 must produce identical output to the baseline scorer."""
+        pv  = [10000 + i * 50 for i in range(30)]
+        spy = [10000 + i * 30 for i in range(30)]
+
+        obj_sharpe = _make_objective()
+        obj_disc   = _make_objective(discriminatory_weight=0.0)
+        conn = _mock_db_for_score(pv, spy, 20)
+
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            s1 = obj_sharpe.score_run('run_id')
+        conn2 = _mock_db_for_score(pv, spy, 20)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn2):
+            s2 = obj_disc.score_run('run_id')
+        assert s1 == s2
+
+    def test_positive_rho_scores_higher_than_negative_rho(self):
+        """With the same portfolio trajectory, perfect positive rank correlation
+        (composite_score predicts P&L) must score higher than perfect inverse
+        correlation (score predicts the wrong pairs)."""
+        pv  = [10000 + i * 10 for i in range(30)]
+        spy = [10000] * 30
+        n = 15
+
+        # Perfect positive rank order: highest score → highest P&L
+        positive_pairs = [(float(i) / n, float(i * 10)) for i in range(1, n + 1)]
+        # Perfect inverse rank order: highest score → lowest P&L
+        negative_pairs = [(float(n - i) / n, float(i * 10)) for i in range(1, n + 1)]
+
+        obj = _make_objective(discriminatory_weight=0.7, pnl_floor=-1000.0)
+
+        conn_pos = _mock_db_for_discriminatory(pv, spy, 20, positive_pairs)
+        conn_neg = _mock_db_for_discriminatory(pv, spy, 20, negative_pairs)
+
+        with patch('tuning.objective.psycopg2.connect', return_value=conn_pos):
+            score_pos = obj.score_run('run_id')
+        with patch('tuning.objective.psycopg2.connect', return_value=conn_neg):
+            score_neg = obj.score_run('run_id')
+
+        assert score_pos > score_neg
+
+    def test_pnl_floor_triggers_penalty(self):
+        """When mean P&L is below pnl_floor, _discriminatory_score returns -1.0."""
+        pv  = [10000] * 30
+        spy = [10000] * 30
+        # All pairs lose heavily
+        pair_rows = [(0.8, -500.0), (0.9, -600.0), (0.7, -700.0),
+                     (0.6, -800.0), (0.5, -900.0), (0.4, -400.0),
+                     (0.3, -300.0), (0.2, -200.0), (0.1, -100.0),
+                     (0.95, -1000.0), (0.85, -850.0)]
+
+        obj = _make_objective(discriminatory_weight=0.7, pnl_floor=-100.0,
+                              min_trades=1)
+        conn = _mock_db_for_discriminatory(pv, spy, 10, pair_rows)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            score = obj.score_run('run_id')
+
+        # Score should be penalised: 0.7 * (-1.0) + 0.3 * sharpe_norm
+        assert score < -0.5
+
+    def test_insufficient_round_trips_falls_back_to_sharpe(self):
+        """Fewer than min_round_trips matched pairs → _discriminatory_score returns
+        None → score_run falls back to pure Sharpe."""
+        pv  = [10000 + i * 50 for i in range(30)]
+        spy = [10000 + i * 30 for i in range(30)]
+        # Only 3 pairs — below default min_round_trips=10
+        pair_rows = [(0.8, 50.0), (0.5, 20.0), (0.3, -10.0)]
+
+        obj_disc   = _make_objective(discriminatory_weight=0.7)
+        obj_sharpe = _make_objective(discriminatory_weight=0.0)
+
+        conn_disc   = _mock_db_for_discriminatory(pv, spy, 20, pair_rows)
+        conn_sharpe = _mock_db_for_score(pv, spy, 20)
+
+        with patch('tuning.objective.psycopg2.connect', return_value=conn_disc):
+            disc_score = obj_disc.score_run('run_id')
+        with patch('tuning.objective.psycopg2.connect', return_value=conn_sharpe):
+            sharpe_score = obj_sharpe.score_run('run_id')
+
+        assert disc_score == pytest.approx(sharpe_score)

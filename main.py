@@ -34,6 +34,11 @@ STRATEGY_PARAMETERS = {
     'w_halflife': 0.1071,
     'max_halflife_days': 60,
 
+    # --- Execution (H1 dollar-neutral) ---
+    # short_leg_fraction in [0.0, 1.0]: fraction of long notional to short the lead.
+    # 0.0 = long-only; 1.0 = full dollar-neutral hedge.  Replaces enable_short_leg.
+    'short_leg_fraction': 0.0,
+
     # --- Discovery ---
     'max_daily_candidates': 200,
     'cooldown_days': 7,

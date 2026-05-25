@@ -133,6 +133,18 @@ class BobsBrain(Strategy):
         )
         self.min_intra_cluster_corr = self.parameters.get('min_intra_cluster_corr', 0.3)
 
+        # H1: continuous short-leg scaling.
+        # short_leg_fraction ∈ [0.0, 1.0]: fraction of the long notional to short the
+        # lead stock.  0.0 = long-only; 1.0 = full dollar-neutral hedge.
+        # Backward compat: if the deprecated enable_short_leg=True is set and
+        # short_leg_fraction is not explicitly provided, default to 1.0 (full hedge).
+        _enable_short_leg_legacy = bool(self.parameters.get('enable_short_leg', False))
+        _slf_default = 1.0 if _enable_short_leg_legacy else 0.0
+        self.short_leg_fraction = float(
+            self.parameters.get('short_leg_fraction', _slf_default)
+        )
+        self.short_leg_fraction = max(0.0, min(1.0, self.short_leg_fraction))
+
         self._run_mode = os.getenv('RUN_MODE', 'backtest')
         self._spy_start_price = None
         self._starting_portfolio_value = None
@@ -161,9 +173,12 @@ class BobsBrain(Strategy):
         self._db.migrate_pairs_simulated_return()
         self._db.migrate_zscore_columns()
         self._db.migrate_pairs_sim_sharpe()
+        self._db.migrate_pairs_score_components()
         self._db.migrate_ticker_metadata()
         self._db.migrate_failed_tickers()
         self._db.migrate_coint_cache()
+        self._db.migrate_short_leg()
+        self._db.migrate_snapshot_deployment()
         self._alpaca = AlpacaClient(
             api_key=api_key,
             secret_key=secret_key,
@@ -248,6 +263,8 @@ class BobsBrain(Strategy):
                 'hdbscan_selection_method': self.hdbscan_selection_method,
                 'hdbscan_cluster_selection_epsilon': self.hdbscan_cluster_selection_epsilon,
                 'min_intra_cluster_corr': self.min_intra_cluster_corr,
+                # short_leg_fraction replaces the deprecated enable_short_leg boolean.
+                'short_leg_fraction': self.short_leg_fraction,
             },
         )
 
@@ -448,6 +465,18 @@ class BobsBrain(Strategy):
                         'coint_pvalue': coint_pvalue,
                         'halflife_days': halflife_days,
                         'composite_score': score,
+                        # Normalised [0,1] component scores — stored for post-hoc analysis
+                        'score_corr_long': min(max(corr_long, 0.0), 1.0),
+                        'score_corr_short': min(max(corr_short, 0.0), 1.0),
+                        'score_z_depth': z_depth,
+                        'score_coint': coint_score,
+                        'score_halflife': halflife_score,
+                        # Weights active at discovery time
+                        'w_corr_long': self.w_corr_long,
+                        'w_corr_short': self.w_corr_short,
+                        'w_z_depth': self.w_z_depth,
+                        'w_coint': self.w_coint,
+                        'w_halflife': self.w_halflife,
                     })
 
                 clusters_tried += 1
@@ -533,7 +562,19 @@ class BobsBrain(Strategy):
                     'zscore_window': self.zscore_window,
                     'entry_threshold': self.entry_threshold,
                     'exit_threshold': self.exit_threshold,
+                    # Score components and weights — forwarded from candidate for DB storage
+                    'score_corr_long': cand_data.get('score_corr_long'),
+                    'score_corr_short': cand_data.get('score_corr_short'),
+                    'score_z_depth': cand_data.get('score_z_depth'),
+                    'score_coint': cand_data.get('score_coint'),
+                    'score_halflife': cand_data.get('score_halflife'),
+                    'w_corr_long': cand_data.get('w_corr_long'),
+                    'w_corr_short': cand_data.get('w_corr_short'),
+                    'w_z_depth': cand_data.get('w_z_depth'),
+                    'w_coint': cand_data.get('w_coint'),
+                    'w_halflife': cand_data.get('w_halflife'),
                 }
+                new_pair['lead_short_qty'] = None
                 new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
                 self.pairs[symbol] = new_pair
                 target_portfolio[symbol] = new_pair
@@ -597,9 +638,36 @@ class BobsBrain(Strategy):
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
                             exit_reason=pair.get('exit_reason'),
+                            leg='long',
                         )
                     else:
                         print(f"Warning: could not log sell trade for {symbol} — price unavailable.")
+
+                if self.short_leg_fraction > 0.0:
+                    lead_sym = pair['lead_stock']
+                    sq = pair.get('lead_short_qty')
+                    if sq is not None and float(sq) > 0:
+                        cover_qty = float(sq)
+                        order_lead = self.create_order(lead_sym, cover_qty, 'buy')
+                        self.submit_order(order_lead)
+                        lead_px = self.get_last_price(lead_sym)
+                        if lead_px and lead_px > 0:
+                            self._db.log_trade(
+                                run_id=self._run_id,
+                                symbol=lead_sym,
+                                side='buy',
+                                quantity=cover_qty,
+                                price=float(lead_px),
+                                filled_at=now,
+                                pair_id=pair.get('pair_id'),
+                                exit_reason=pair.get('exit_reason'),
+                                leg='short',
+                            )
+                        else:
+                            print(
+                                f"Warning: could not log cover trade for {lead_sym} — price unavailable."
+                            )
+
                 self._db.deactivate_pair(symbol, self._run_id)
                 to_remove.append(symbol)
 
@@ -607,18 +675,26 @@ class BobsBrain(Strategy):
             self.pairs.pop(symbol)
 
         # --- Execute buys ---
-        existing_position_symbols = {p.symbol for p in self.get_positions()}
+        existing_positions = self.get_positions()
+        existing_position_symbols = {p.symbol for p in existing_positions}
+        held_long = {p.symbol for p in existing_positions if p.quantity > 0}
+        held_short = {p.symbol for p in existing_positions if p.quantity < 0}
         buy_pairs = [
             pair for symbol, pair in self.pairs.items()
             if pair['action'] == 'buy' and symbol not in existing_position_symbols
         ]
 
         new_buy_symbols: set[str] = set()
+        new_short_symbols: set[str] = set()
         no_price_symbols: list[str] = []
         daily_new_buys = 0
         if buy_pairs:
             portfolio_value = self.portfolio_value
-            available_cash = self.get_cash()
+            gross_short_notional = sum(
+                abs(pos.quantity) * (self.get_last_price(pos.symbol) or 0)
+                for pos in existing_positions if pos.quantity < 0
+            )
+            available_cash = self.get_cash() - gross_short_notional
             current_deployed = portfolio_value - available_cash
             deployment_gap = max(0.0, self.target_deployed_pct * portfolio_value - current_deployed)
             n_candidates = len(buy_pairs)
@@ -637,8 +713,38 @@ class BobsBrain(Strategy):
                     base_budget = min(base_budget + gap_share, self.max_position_pct * portfolio_value)
                 per_stock_budget = base_budget
 
-                if available_cash < per_stock_budget:
+                # short_leg_fraction scales the short notional relative to the long leg.
+                # effective_cost = long budget + short budget so the cash gate sees
+                # the full capital required for both legs.
+                effective_cost = per_stock_budget * (1.0 + self.short_leg_fraction)
+                if available_cash < effective_cost:
                     continue  # budget exceeds cash; try the next (cheaper) candidate
+
+                if self.short_leg_fraction > 0.0 and (
+                    pair['lag_stock'] in held_short
+                    or pair['lead_stock'] in held_long
+                    or pair['lag_stock'] in new_short_symbols
+                    or pair['lead_stock'] in new_buy_symbols
+                ):
+                    print(
+                        f"Skipping {pair['lag_stock']}/{pair['lead_stock']}: "
+                        f"mirror-pair conflict — same stock held in opposite direction."
+                    )
+                    continue
+
+                lead_qty: float | None = None
+                lead_px: float | None = None
+                if self.short_leg_fraction > 0.0:
+                    lp = self.get_last_price(pair['lead_stock'])
+                    if not lp or lp <= 0:
+                        continue
+                    lead_px = float(lp)
+                    # short notional = per_stock_budget * short_leg_fraction;
+                    # short_qty = that notional / lead price
+                    short_notional = per_stock_budget * self.short_leg_fraction
+                    lead_qty = round(short_notional / lead_px, 6)
+                    if lead_qty <= 0:
+                        continue
 
                 price = self.get_last_price(pair['lag_stock'])
                 if price and price > 0:
@@ -646,8 +752,8 @@ class BobsBrain(Strategy):
                     if quantity > 0:
                         order = self.create_order(pair['lag_stock'], quantity, 'buy')
                         self.submit_order(order)
-                        available_cash -= per_stock_budget
-                        deployment_gap = max(0.0, deployment_gap - per_stock_budget)
+                        available_cash -= effective_cost
+                        deployment_gap = max(0.0, deployment_gap - effective_cost)
                         n_candidates -= 1
                         new_buy_symbols.add(pair['lag_stock'])
                         daily_new_buys += 1
@@ -659,7 +765,26 @@ class BobsBrain(Strategy):
                             price=float(price),
                             filled_at=now,
                             pair_id=pair.get('pair_id'),
+                            leg='long',
                         )
+                        if self.short_leg_fraction > 0.0 and lead_qty is not None and lead_qty > 0 and lead_px:
+                            order_s = self.create_order(pair['lead_stock'], lead_qty, 'sell')
+                            self.submit_order(order_s)
+                            self._db.log_trade(
+                                run_id=self._run_id,
+                                symbol=pair['lead_stock'],
+                                side='sell',
+                                quantity=float(lead_qty),
+                                price=float(lead_px),
+                                filled_at=now,
+                                pair_id=pair.get('pair_id'),
+                                leg='short',
+                            )
+                            pair['lead_short_qty'] = float(lead_qty)
+                            new_short_symbols.add(pair['lead_stock'])
+                            pid = pair.get('pair_id')
+                            if pid is not None:
+                                self._db.update_pair_lead_short_qty(int(pid), float(lead_qty))
                 else:
                     # Price permanently unavailable — record and evict from queue
                     # so this pair stops consuming cash budget each day.
@@ -703,6 +828,18 @@ class BobsBrain(Strategy):
         ]
         avg_zscore = round(sum(zscore_pairs) / len(zscore_pairs), 4) if zscore_pairs else None
 
+        end_positions = self.get_positions()
+        gross_long = sum(
+            pos.quantity * (self.get_last_price(pos.symbol) or 0)
+            for pos in end_positions if pos.quantity > 0
+        )
+        gross_short = sum(
+            abs(pos.quantity) * (self.get_last_price(pos.symbol) or 0)
+            for pos in end_positions if pos.quantity < 0
+        )
+        gross_long_pct = round(gross_long / portfolio_value, 4) if portfolio_value else 0.0
+        gross_short_pct = round(gross_short / portfolio_value, 4) if portfolio_value else 0.0
+
         self.add_line("active_pairs",         float(len(active_pairs)))
         self.add_line("avg_corr",             round(avg_corr, 4))
         self.add_line("cash_ratio",           round(self.cash / portfolio_value, 4))
@@ -713,6 +850,8 @@ class BobsBrain(Strategy):
         self.add_line("candidates_buy_ready", float(self._candidates_buy_ready))
         if avg_zscore is not None:
             self.add_line("avg_zscore", avg_zscore)
+        self.add_line("gross_long_pct",  gross_long_pct)
+        self.add_line("gross_short_pct", gross_short_pct)
 
         self._db.log_snapshot(
             run_id=self._run_id,
@@ -731,6 +870,8 @@ class BobsBrain(Strategy):
             candidates_buy_ready=self._candidates_buy_ready,
             avg_zscore=avg_zscore,
             avg_watchlist_ttl=None,
+            gross_long_pct=gross_long_pct,
+            gross_short_pct=gross_short_pct,
         )
 
     def on_strategy_end(self):

@@ -76,7 +76,22 @@ CREATE TABLE IF NOT EXISTS pairs (
     active        BOOLEAN     NOT NULL DEFAULT TRUE,
     -- H5: cointegration quality (stored at discovery for post-hoc analysis)
     coint_pvalue  DOUBLE PRECISION,
-    halflife_days DOUBLE PRECISION
+    halflife_days DOUBLE PRECISION,
+    -- H1: open short quantity on lead (paper restart / analytics); NULL when long-only
+    lead_short_qty NUMERIC,
+    -- Composite score and per-component breakdown recorded at discovery time.
+    -- Allows post-hoc analysis of score discriminatory power and weight tuning.
+    composite_score  DOUBLE PRECISION,
+    score_corr_long  DOUBLE PRECISION,  -- normalised corr_long  in [0, 1]
+    score_corr_short DOUBLE PRECISION,  -- normalised corr_short in [0, 1]
+    score_z_depth    DOUBLE PRECISION,  -- z-score depth         in [0, 1]
+    score_coint      DOUBLE PRECISION,  -- normalised coint p-val in [0, 1]
+    score_halflife   DOUBLE PRECISION,  -- normalised half-life   in [0, 1]
+    w_corr_long      DOUBLE PRECISION,  -- weight active at discovery
+    w_corr_short     DOUBLE PRECISION,
+    w_z_depth        DOUBLE PRECISION,
+    w_coint          DOUBLE PRECISION,
+    w_halflife       DOUBLE PRECISION
 );
 
 -- One active configuration per (run, lead, lag, lag_days) triple.
@@ -138,7 +153,9 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     daily_topups         INT,     -- top-up buy orders submitted
     pairs_scanned        INT,     -- combinations evaluated through quality gates
     candidates_found     INT,     -- passed all quality gates (penny/corr/coint/sim)
-    candidates_buy_ready INT      -- subset of candidates_found with a buy signal
+    candidates_buy_ready INT,     -- subset of candidates_found with a buy signal
+    gross_long_pct       NUMERIC, -- sum(long notional) / portfolio_value
+    gross_short_pct      NUMERIC  -- sum(short notional) / portfolio_value
 );
 
 SELECT create_hypertable('portfolio_snapshots', 'time', if_not_exists => TRUE);
@@ -161,7 +178,8 @@ CREATE TABLE IF NOT EXISTS trades (
     price       NUMERIC     NOT NULL,
     slippage    NUMERIC     NOT NULL DEFAULT 0,
     filled_at   TIMESTAMPTZ NOT NULL,
-    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing'))
+    exit_reason VARCHAR(20) CHECK (exit_reason IN ('zscore_exit', 'displaced', 'data_missing')),
+    leg         VARCHAR(5)  NOT NULL DEFAULT 'long' CHECK (leg IN ('long', 'short'))
 );
 
 CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
@@ -173,10 +191,16 @@ CREATE INDEX IF NOT EXISTS trades_run_id_symbol_idx
 -- fetch attempt is skipped on every subsequent day, eliminating repeated
 -- API calls and log noise for delisted or invalid tickers.
 -- ---------------------------------------------------------------------------
+-- window_start / window_end scope each failure to the fetch window that
+-- produced it.  A symbol failed for a 2022 window is not excluded from a
+-- 2023 window.  See migrations/004_failed_tickers_windowed.sql.
 CREATE TABLE IF NOT EXISTS failed_tickers (
-    symbol     VARCHAR(20) PRIMARY KEY,
-    reason     TEXT,
-    failed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    symbol       VARCHAR(20)  NOT NULL,
+    window_start DATE         NOT NULL,
+    window_end   DATE         NOT NULL,
+    reason       TEXT,
+    failed_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (symbol, window_start, window_end)
 );
 
 -- ---------------------------------------------------------------------------

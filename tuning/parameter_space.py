@@ -44,10 +44,10 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     # =========================================================================
 
     'lookback_window': ParamSpec(
-        'lookback_window', tier=1, default=130, low=60, high=252, dtype='int',
+        'lookback_window', tier=2, default=130, low=60, high=252, dtype='int',
     ),
     'cooldown_days': ParamSpec(
-        'cooldown_days', tier=1, default=7, low=3, high=21, dtype='int',
+        'cooldown_days', tier=2, default=7, low=3, high=21, dtype='int',
     ),
     'pca_variance': ParamSpec(
         'pca_variance', tier=1, default=0.95, low=0.80, high=0.99,
@@ -109,8 +109,11 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'max_halflife_days': ParamSpec(
         'max_halflife_days', tier=2, default=60, low=20, high=120, dtype='int',
     ),
+    # Dynamic: TickerClusterer._compute() overwrites this with max(_MCS_FLOOR,
+    # round(universe_size * _MCS_FRACTION)) on every cluster rebuild, so Optuna
+    # suggestions have no effect on clustering.  Tier 1 — structural, not tunable.
     'hdbscan_min_cluster_size': ParamSpec(
-        'hdbscan_min_cluster_size', tier=2, default=5, low=3, high=15, dtype='int',
+        'hdbscan_min_cluster_size', tier=1, default=5, low=3, high=15, dtype='int',
     ),
     'hdbscan_min_samples': ParamSpec(
         'hdbscan_min_samples', tier=2, default=2, low=1, high=5, dtype='int',
@@ -129,6 +132,13 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     # Tier 3 — Fast-adaptive (re-tune weekly, regime-conditioned)
     # =========================================================================
 
+    # Fraction of long notional to short the lead stock.
+    # 0.0 = long-only (default); 1.0 = full dollar-neutral hedge.
+    # Replaces the deprecated boolean enable_short_leg.
+    # Regime-conditioned: expected to be higher in bear/stress regimes.
+    'short_leg_fraction': ParamSpec(
+        'short_leg_fraction', tier=3, default=0.0, low=0.0, high=1.0,
+    ),
     'entry_threshold': ParamSpec(
         'entry_threshold', tier=3, default=2.0, low=1.0, high=3.5,
     ),
@@ -136,7 +146,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
         'exit_threshold', tier=3, default=0.5, low=0.1, high=1.5,
     ),
     'zscore_window': ParamSpec(
-        'zscore_window', tier=3, default=20, low=10, high=40, dtype='int',
+        'zscore_window', tier=2, default=20, low=10, high=40, dtype='int',
     ),
     'min_position_pct': ParamSpec(
         'min_position_pct', tier=3, default=0.03, low=0.01, high=0.10,
@@ -200,11 +210,32 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
     w_halflife) are suggested freely and then normalised so they sum to 1.0.
     If only a subset of the five weights is being tuned, the others take their
     defaults before normalisation.
+
+    Joint timescale constraints (Study 1 Pass A):
+    When the following pairs are both being tuned in the same call, the
+    dependent parameter is suggested with a derived bound so the combination
+    is always coherent:
+
+        zscore_window  ≤ lookback_window // 3
+            → zscore_window sampled from [10, min(40, lookback_window // 3)]
+
+        cooldown_days  ≥ zscore_window // 2
+            → cooldown_days sampled from [max(3, zscore_window // 2), 21]
+
+        corr_short_window ≤ corr_long_window
+            → corr_short_window sampled from [5, min(40, corr_long_window)]
+
+    These constraints are enforced by skipping the three dependent params in
+    the main loop and suggesting them afterwards in dependency order.
     """
+    # Params whose valid range depends on another param suggested in the same
+    # call.  They are excluded from the main loop and handled below.
+    _DEFER = frozenset({'zscore_window', 'cooldown_days', 'corr_short_window'})
+
     params: dict[str, Any] = {}
 
     for name, spec in PARAMETER_SPACE.items():
-        if spec.tier not in tiers:
+        if spec.tier not in tiers or name in _DEFER:
             continue
         if spec.dtype == 'int':
             params[name] = trial.suggest_int(name, spec.low, spec.high, log=spec.log)
@@ -213,7 +244,45 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
         elif spec.dtype == 'categorical':
             params[name] = trial.suggest_categorical(name, spec.choices)
 
-    # Normalise composite score weights when any of them was suggested.
+    # --- Joint constraints: suggest deferred params in dependency order ---
+
+    # 1. zscore_window depends on lookback_window.
+    zw_spec = PARAMETER_SPACE['zscore_window']
+    if zw_spec.tier in tiers:
+        if 'lookback_window' in params:
+            zw_high = min(zw_spec.high, params['lookback_window'] // 3)
+            zw_high = max(zw_high, zw_spec.low)  # guard against degenerate range
+        else:
+            zw_high = zw_spec.high
+        params['zscore_window'] = trial.suggest_int(
+            'zscore_window', zw_spec.low, zw_high,
+        )
+
+    # 2. cooldown_days depends on zscore_window (which may have just been set).
+    cd_spec = PARAMETER_SPACE['cooldown_days']
+    if cd_spec.tier in tiers:
+        if 'zscore_window' in params:
+            cd_low = max(cd_spec.low, params['zscore_window'] // 2)
+            cd_low = min(cd_low, cd_spec.high)  # guard against degenerate range
+        else:
+            cd_low = cd_spec.low
+        params['cooldown_days'] = trial.suggest_int(
+            'cooldown_days', cd_low, cd_spec.high,
+        )
+
+    # 3. corr_short_window depends on corr_long_window.
+    csw_spec = PARAMETER_SPACE['corr_short_window']
+    if csw_spec.tier in tiers:
+        if 'corr_long_window' in params:
+            csw_high = min(csw_spec.high, params['corr_long_window'])
+            csw_high = max(csw_high, csw_spec.low)  # guard against degenerate range
+        else:
+            csw_high = csw_spec.high
+        params['corr_short_window'] = trial.suggest_int(
+            'corr_short_window', csw_spec.low, csw_high,
+        )
+
+    # --- Normalise composite score weights when any of them was suggested ---
     tuned_weights = _WEIGHT_NAMES & set(params)
     if tuned_weights:
         all_weights = {
