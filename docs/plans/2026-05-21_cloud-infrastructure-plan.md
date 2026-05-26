@@ -717,6 +717,65 @@ Do not proceed past a gate failure without investigating root cause.
 
 ---
 
+## Log Files
+
+Lumibot writes flat files to the `logs/` directory as a side effect of every backtest run. The naming pattern is:
+
+```
+logs/BobsBrain_<YYYY-MM-DD>_<HH-MM>_<6-char-run-id>_<type>.<ext>
+```
+
+Where `<type>` is one of `settings` (JSON), `stats` (CSV), `trade_events` (CSV), or `indicators` (CSV).
+
+How completely each file is covered by the DB:
+
+| Log file | DB equivalent | Complete? |
+|---|---|---|
+| `_settings.json` | `backtest_runs.settings` (JSONB) | ✓ Full |
+| `_stats.csv` | `portfolio_snapshots` | ✓ Full |
+| `_indicators.csv` | N/A — currently empty | ✓ (nothing to store) |
+| `_trade_events.csv` | `trades` | ⚠ Partial — see below |
+
+**The `_trade_events.csv` gap.** Lumibot writes one row per order lifecycle event: `submitted`, `partial_fill`, `fill`, `cancelled`, etc. The `trades` table records only `fill` events. Order submissions, cancellations, and partial fills that did not complete exist only in the log file. For tuning and strategy analysis this is acceptable — what actually executed is all that matters. For Phase 3 live trading, a cancelled live order has financial significance and the order lifecycle should be persisted to the DB. This is a Phase 3 pre-flight item, not a Phase 1 concern.
+
+### Tuning instance (Phase 1)
+
+During a study, each trial executes a full backtest, producing four log files per trial. A 90-trial study generates ~360 files in `logs/`. When the tuning instance is terminated at the end of a study, all of these are destroyed — the EBS volume is set to `DeleteOnTermination:true` intentionally.
+
+**This is acceptable.** Every piece of data those files contain is already in the cloud DB:
+- `_settings.json` → `backtest_runs.settings` (JSONB)
+- `_stats.csv` → `portfolio_snapshots`
+- `_trade_events.csv` → `trades`
+- `_indicators.csv` → currently empty
+
+If a specific trial fails and you need to diagnose it from logs, SSH into the tuning instance and inspect `logs/` before terminating. Optuna also records the failure reason in the `trials` table.
+
+The Optuna worker stdout logs (`/tmp/study1a_w*.log`, redirected in the launch command) are also ephemeral. To monitor a running study, use the Optuna DB query or the Python snippet in the monitoring section above — those read from the persistent DB, not from instance logs.
+
+### DB instance (Phase 2/3)
+
+When the strategy runs daily on the DB instance for paper or live trading, it writes log files to `logs/` on the DB instance's persistent EBS volume. Unlike the tuning instance, this accumulates indefinitely.
+
+Set up log rotation before starting paper trading:
+
+```bash
+# On the DB instance
+sudo tee /etc/logrotate.d/lumibob << 'EOF'
+/home/ec2-user/lumibob/logs/*.csv
+/home/ec2-user/lumibob/logs/*.json {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+}
+EOF
+```
+
+This keeps 8 weeks of compressed logs (~2 months of history) and deletes older ones automatically. Adjust `rotate` if you want a longer tail.
+
+---
+
 ## Cost
 
 ### Ongoing (Phase 1)
