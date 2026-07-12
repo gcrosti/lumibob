@@ -21,6 +21,18 @@ Never write a bare `$` character in chat responses. Dollar signs break markdown 
 
 Dollar signs inside fenced SQL or shell code blocks are acceptable only when they are genuinely part of the syntax, but prefer plain names even there when possible.
 
+## Secrets Handling
+
+Never print the full contents of files that are likely to contain secrets (`.env`, `*.pem`, `*credentials*`, `*secret*`, `*key*`). When you need to inspect a value in such a file, use a targeted `grep` for the specific key:
+
+```bash
+grep DB_URL /home/ec2-user/lumibob/.env
+```
+
+If a full read is genuinely required, state why before running the command and give the user the chance to object.
+
+---
+
 ## Verify Before Proceeding
 
 The most common source of wasted work is accepting an initial result, hypothesis, or proposed fix at face value.
