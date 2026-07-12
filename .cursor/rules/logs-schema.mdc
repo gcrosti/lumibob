@@ -9,7 +9,15 @@ alwaysApply: false
 ## Primary Store — PostgreSQL / TimescaleDB
 
 All run data, price history, and pair state are stored in a TimescaleDB database.
-Connection string: env var `DB_URL` (default: `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+Since PR #44 (merged 2026-07-12), the **authoritative database lives on an EC2 instance** (SSH alias `lumibob-db`). The local postgres is empty — do not query it expecting run data.
+
+To connect, open the SSH tunnel first, then query through it:
+
+```bash
+ssh -f -N -L 5433:localhost:5432 lumibob-db
+```
+
+Connection string: `postgresql://lumibob:lumibob@localhost:5433/lumibob` (set as env var `DB_URL`).
 Schema is defined in `schema.sql`. Apply once via: `psql` with `DB_URL` set, e.g. `psql "postgresql://..." -f schema.sql`.
 
 ### `backtest_runs`
