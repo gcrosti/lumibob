@@ -14,6 +14,16 @@ CREATE TABLE IF NOT EXISTS tickers (
     last_updated DATE NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ticker_metadata (
+    symbol      TEXT        PRIMARY KEY,
+    sector      TEXT,
+    is_etf      BOOLEAN     NOT NULL DEFAULT FALSE,
+    fetched_at  TIMESTAMPTZ NOT NULL,
+    sic_code    INT,
+    sic_sector  TEXT,
+    source      TEXT        DEFAULT 'sec_edgar'
+);
+
 -- ---------------------------------------------------------------------------
 -- OHLCV price cache
 -- One row per symbol per trading day. TimescaleDB hypertable partitions the
@@ -48,6 +58,19 @@ SELECT add_compression_policy('stock_prices', INTERVAL '90 days',
 
 SELECT add_retention_policy('stock_prices', INTERVAL '2 years',
     if_not_exists => TRUE);
+
+-- ---------------------------------------------------------------------------
+-- Backtest / paper run metadata
+-- Every other table foreign-keys here so all data for a specific run can be
+-- isolated in a single query. Replaces the Lumibot-generated _settings.json.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    run_id       VARCHAR(10) PRIMARY KEY,
+    mode         VARCHAR(10) NOT NULL CHECK (mode IN ('backtest', 'paper')),
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    settings     JSONB
+);
 
 -- ---------------------------------------------------------------------------
 -- Discovered lead/lag pairs
@@ -118,19 +141,6 @@ CREATE TABLE IF NOT EXISTS pair_coint_cache (
     halflife_days   DOUBLE PRECISION,
     computed_at     TIMESTAMP         NOT NULL DEFAULT NOW(),
     PRIMARY KEY (lead_symbol, lag_symbol, lookback_window, window_end_date)
-);
-
--- ---------------------------------------------------------------------------
--- Backtest / paper run metadata
--- Every other table foreign-keys here so all data for a specific run can be
--- isolated in a single query. Replaces the Lumibot-generated _settings.json.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS backtest_runs (
-    run_id       VARCHAR(10) PRIMARY KEY,
-    mode         VARCHAR(10) NOT NULL CHECK (mode IN ('backtest', 'paper')),
-    started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ,
-    settings     JSONB
 );
 
 -- ---------------------------------------------------------------------------

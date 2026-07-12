@@ -339,7 +339,7 @@ class DatabaseClient:
             """,
             "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS sic_code INT",
             "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS sic_sector TEXT",
-            "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'yfinance'",
+            "ALTER TABLE ticker_metadata ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'sec_edgar'",
         ]
         with self._conn() as conn:
             with conn.cursor() as cur:
