@@ -351,7 +351,7 @@ aws iam add-role-to-instance-profile \
 
 ```bash
 DB_INSTANCE=$(aws ec2 run-instances \
-  --image-id ami-0c02fb55956c7d316 \
+  --image-id ami-02b2c1b57c5105166 \
   --instance-type t3.medium \
   --key-name lumibob-key \
   --security-group-ids $DB_SG \
@@ -458,7 +458,7 @@ scp .env lumibob-db:~/lumibob/.env
 On EC2, open `~/lumibob/.env` and set `DB_URL` to the local database (the DB instance talks to its own PostgreSQL, not through the network):
 
 ```
-DB_URL=postgresql://lumibob@localhost:5432/lumibob
+DB_URL=postgresql://lumibob:lumibob@localhost:5432/lumibob
 ```
 
 ---
@@ -510,7 +510,7 @@ This opens a text editor (nano by default). Add the following lines. Times are U
 0 3 * * * pg_dump -h localhost -U lumibob -F c lumibob 2>/tmp/pgdump_err.log | aws s3 cp - s3://lumibob-backups-<ACCOUNT_ID>/lumibob-$(date +\%Y\%m\%d).dump && echo "Backup OK $(date)" >> /tmp/backup.log
 
 # Nightly ticker and price refresh at 4:00 AM UTC (after backup)
-0 4 * * * cd /home/ec2-user/lumibob && DB_URL=postgresql://lumibob@localhost:5432/lumibob python3.12 -m scripts.refresh_data >> /tmp/refresh.log 2>&1
+0 4 * * * cd /home/ec2-user/lumibob && DB_URL=postgresql://lumibob:lumibob@localhost:5432/lumibob python3.12 -m scripts.refresh_data >> /tmp/refresh.log 2>&1
 ```
 
 **What these do:**
@@ -546,19 +546,19 @@ This makes EC2's PostgreSQL (port 5432) available on your laptop as port 5433.
 **Connect:**
 
 ```bash
-psql postgresql://lumibob@localhost:5433/lumibob
+psql postgresql://lumibob:lumibob@localhost:5433/lumibob
 ```
 
 **Update `DB_URL` for local analysis sessions:**
 
 ```bash
-export DB_URL=postgresql://lumibob@localhost:5433/lumibob
+export DB_URL=postgresql://lumibob:lumibob@localhost:5433/lumibob
 ```
 
 You can add this to your shell profile with a toggle alias if you switch between local and cloud contexts frequently:
 
 ```bash
-alias db-cloud='export DB_URL=postgresql://lumibob@localhost:5433/lumibob && ssh -L 5433:localhost:5432 lumibob-db -N &'
+alias db-cloud='export DB_URL=postgresql://lumibob:lumibob@localhost:5433/lumibob && ssh -L 5433:localhost:5432 lumibob-db -N &'
 ```
 
 ---
@@ -571,7 +571,7 @@ The tuning instance is started fresh for each study and stopped when done. You p
 
 ```bash
 TUNING_INSTANCE=$(aws ec2 run-instances \
-  --image-id ami-0c02fb55956c7d316 \
+  --image-id ami-02b2c1b57c5105166 \
   --instance-type c6i.2xlarge \
   --key-name lumibob-key \
   --security-group-ids $TUNING_SG \
@@ -621,7 +621,7 @@ scp .env lumibob-tuning:~/lumibob/.env
 On the tuning instance, open `~/lumibob/.env` and set:
 
 ```
-DB_URL=postgresql://lumibob@<DB_PRIVATE_IP>:5432/lumibob
+DB_URL=postgresql://lumibob:lumibob@<DB_PRIVATE_IP>:5432/lumibob
 ```
 
 This is the private IP of the DB instance. Workers connect to the DB over the VPC's internal network — no public internet hop.
@@ -655,7 +655,7 @@ Workers run in the background on EC2. You can close your SSH session — they'll
 The SSH tunnel to the DB instance gives you access to trial progress at any time. Open the tunnel (if not already open), then:
 
 ```bash
-psql postgresql://lumibob@localhost:5433/lumibob -c "
+psql postgresql://lumibob:lumibob@localhost:5433/lumibob -c "
   SELECT state, COUNT(*)
   FROM trials
   WHERE study_id = (
@@ -668,7 +668,7 @@ psql postgresql://lumibob@localhost:5433/lumibob -c "
 Or with Python:
 
 ```bash
-DB_URL=postgresql://lumibob@localhost:5433/lumibob python3 - << 'EOF'
+DB_URL=postgresql://lumibob:lumibob@localhost:5433/lumibob python3 - << 'EOF'
 import os, optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 study = optuna.load_study(

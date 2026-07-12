@@ -35,7 +35,7 @@ def main() -> None:
     paper = os.getenv('ALPACA_IS_PAPER', 'true').lower() == 'true'
 
     db = DatabaseClient(DB_URL)
-    alpaca = AlpacaClient(api_key=api_key, secret_key=secret_key, paper=paper, mode='paper')
+    alpaca = AlpacaClient(api_key=api_key, secret_key=secret_key, paper=paper, mode='backtest')
     cache = StockDataCache(db, alpaca)
 
     print('[refresh] Fetching tradeable universe from Alpaca...')
