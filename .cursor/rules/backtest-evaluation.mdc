@@ -9,7 +9,7 @@ Before evaluating, read README.md in the project root for high-level context, bu
 
 ## Data Storage
 
-Run data is stored in a **PostgreSQL/TimescaleDB database** (connection string env var `DB_URL`, default `postgresql://postgres:lumibob@localhost:5432/lumibob`).
+Run data is stored in a **PostgreSQL/TimescaleDB database** on an EC2 instance (SSH alias `lumibob-db`) — the local postgres is empty. Open the tunnel first (`ssh -f -N -L 5433:localhost:5432 lumibob-db`), then connect via `postgresql://lumibob:lumibob@localhost:5433/lumibob` (env var `DB_URL`). See the `logs-schema` rule for details.
 
 | Need | Primary source | Fallback (older runs only) |
 |---|---|---|
