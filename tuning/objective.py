@@ -75,6 +75,9 @@ class BacktestObjective:
         full canonical default set from parameter_space.defaults().
     tiers : tuple[int, ...]
         Which parameter tiers the trial should suggest values for.
+    param_names : frozenset[str] | None
+        Optional allowlist restricting which params within *tiers* are
+        suggested.  None (default) frees every param in the tiers.
     penalty_dd : float
         λ — weight on max-drawdown penalty in the composite score.
     penalty_trades : float
@@ -110,6 +113,7 @@ class BacktestObjective:
         budget: float = 10_000,
         base_params: dict[str, Any] | None = None,
         tiers: tuple[int, ...] = (2,),
+        param_names: frozenset[str] | None = None,
         penalty_dd: float = 0.5,
         penalty_trades: float = 0.01,
         min_trades: int = 5,
@@ -124,6 +128,7 @@ class BacktestObjective:
         self.budget = budget
         self.base_params = base_params if base_params is not None else defaults()
         self.tiers = tiers
+        self.param_names = param_names
         self.penalty_dd = penalty_dd
         self.penalty_trades = penalty_trades
         self.min_trades = min_trades
@@ -140,7 +145,7 @@ class BacktestObjective:
     def __call__(self, trial: optuna.Trial) -> float:
         from tuning.parameter_space import suggest
 
-        trial_params = suggest(trial, self.tiers)
+        trial_params = suggest(trial, self.tiers, param_names=self.param_names)
         full_params = {**self.base_params, **trial_params}
 
         logger.info('Trial %d starting — suggested: %s', trial.number, trial_params)

@@ -24,7 +24,7 @@ regime luck.  A well-discriminating score in a losing regime produces bad
 Sharpe; the optimizer would discard those params even if the score is
 doing exactly the right thing.
 
-Free parameters (all Tier 2, 10 total)
+Free parameters (10 signal-construction params — PASS_A_PARAMS)
 ---------------------------------------
     lookback_window    [60, 252]
     zscore_window      [10, min(40, lookback_window // 3)]   — constrained
@@ -116,6 +116,16 @@ GATE_FOLDS: list[tuple[str, date, date]] = [
 _GATE_RHO_THRESHOLD = 0.15
 _GATE_MIN_PASSING_FOLDS = 2
 
+# The 10 signal-construction params this study frees (see module docstring).
+# Tier 2 also contains discovery/sizing params (max_k, target_deployed_pct,
+# max_daily_candidates, HDBSCAN params, ...) — those stay at defaults here
+# and are optimized in Pass B on top of this study's output.
+PASS_A_PARAMS = frozenset({
+    'lookback_window', 'zscore_window', 'cooldown_days',
+    'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife',
+    'corr_long_window', 'corr_short_window',
+})
+
 
 # ---------------------------------------------------------------------------
 # Fold-rotating objective
@@ -188,6 +198,7 @@ def run() -> optuna.Study:
         budget=BUDGET,
         base_params=base,
         tiers=(2,),
+        param_names=PASS_A_PARAMS,
         spy_penalty_weight=0.0,
         discriminatory_weight=DISCRIMINATORY_WEIGHT,
         pnl_floor=-100.0,

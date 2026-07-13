@@ -202,9 +202,19 @@ def normalize_weights(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
+def suggest(
+    trial: optuna.Trial,
+    tiers: tuple[int, ...],
+    param_names: frozenset[str] | set[str] | None = None,
+) -> dict[str, Any]:
     """
     Ask an Optuna trial to suggest values for parameters in *tiers*.
+
+    param_names : optional allowlist
+        When given, only parameters whose name is in this set are suggested
+        (still restricted to *tiers*).  Lets a study free a subset of a tier
+        — e.g. Study 1 Pass A frees only the 10 signal-construction params
+        even though Tier 2 contains discovery/sizing params as well.
 
     Composite score weights (w_corr_long, w_corr_short, w_z_depth, w_coint,
     w_halflife) are suggested freely and then normalised so they sum to 1.0.
@@ -232,10 +242,13 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
     # call.  They are excluded from the main loop and handled below.
     _DEFER = frozenset({'zscore_window', 'cooldown_days', 'corr_short_window'})
 
+    def _allowed(name: str) -> bool:
+        return param_names is None or name in param_names
+
     params: dict[str, Any] = {}
 
     for name, spec in PARAMETER_SPACE.items():
-        if spec.tier not in tiers or name in _DEFER:
+        if spec.tier not in tiers or name in _DEFER or not _allowed(name):
             continue
         if spec.dtype == 'int':
             params[name] = trial.suggest_int(name, spec.low, spec.high, log=spec.log)
@@ -248,7 +261,7 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
 
     # 1. zscore_window depends on lookback_window.
     zw_spec = PARAMETER_SPACE['zscore_window']
-    if zw_spec.tier in tiers:
+    if zw_spec.tier in tiers and _allowed('zscore_window'):
         if 'lookback_window' in params:
             zw_high = min(zw_spec.high, params['lookback_window'] // 3)
             zw_high = max(zw_high, zw_spec.low)  # guard against degenerate range
@@ -260,7 +273,7 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
 
     # 2. cooldown_days depends on zscore_window (which may have just been set).
     cd_spec = PARAMETER_SPACE['cooldown_days']
-    if cd_spec.tier in tiers:
+    if cd_spec.tier in tiers and _allowed('cooldown_days'):
         if 'zscore_window' in params:
             cd_low = max(cd_spec.low, params['zscore_window'] // 2)
             cd_low = min(cd_low, cd_spec.high)  # guard against degenerate range
@@ -272,7 +285,7 @@ def suggest(trial: optuna.Trial, tiers: tuple[int, ...]) -> dict[str, Any]:
 
     # 3. corr_short_window depends on corr_long_window.
     csw_spec = PARAMETER_SPACE['corr_short_window']
-    if csw_spec.tier in tiers:
+    if csw_spec.tier in tiers and _allowed('corr_short_window'):
         if 'corr_long_window' in params:
             csw_high = min(csw_spec.high, params['corr_long_window'])
             csw_high = max(csw_high, csw_spec.low)  # guard against degenerate range
