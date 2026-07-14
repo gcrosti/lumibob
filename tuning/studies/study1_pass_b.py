@@ -64,6 +64,7 @@ from dotenv import load_dotenv
 
 from tuning.parameter_space import defaults, normalize_weights
 from tuning.studies.study1_pass_a import (
+    PASS_A_PARAMS,
     TRAIN_FOLDS,
     FoldRotatingObjective,
 )
@@ -99,6 +100,12 @@ PASS_B_PARAMS = frozenset({
     'max_k',
     'max_halflife_days',
 })
+
+# A param cannot be both fixed from Pass A and free here.  Module-level so
+# any import (workers, tests) trips it immediately if the sets drift.
+assert not (PASS_B_PARAMS & PASS_A_PARAMS), (
+    'PASS_B_PARAMS overlaps PASS_A_PARAMS'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -154,12 +161,6 @@ def run() -> optuna.Study:
     best_value programmatically.
     """
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    from tuning.studies.study1_pass_a import PASS_A_PARAMS
-    assert not (PASS_B_PARAMS & PASS_A_PARAMS), (
-        'PASS_B_PARAMS overlaps PASS_A_PARAMS — a param cannot be both '
-        'fixed from Pass A and free in Pass B'
-    )
 
     storage = optuna.storages.RDBStorage(
         url=DB_URL,

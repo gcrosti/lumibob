@@ -301,6 +301,55 @@ class TestSuggest:
         assert 0 < result['w_corr_long'] <= 1
         assert 0 < result['w_z_depth'] <= 1
 
+    def test_find_run_id_token_path(self):
+        """With a token, run recovery queries by settings token — the
+        parallel-worker-safe path."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ('abc123',)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(
+                datetime.now(timezone.utc), token='tok-42')
+        assert rid == 'abc123'
+        sql, params = cur.execute.call_args[0]
+        assert 'tuning_trial_token' in sql
+        assert params == ('tok-42',)
+
+    def test_find_run_id_token_missing_returns_none(self):
+        """No run carries the token → None (no silent fallback to the
+        timestamp heuristic that cross-attributes runs)."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = None
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(
+                datetime.now(timezone.utc), token='tok-42')
+        assert rid is None
+        assert cur.execute.call_count == 1
+        assert 'tuning_trial_token' in cur.execute.call_args[0][0]
+
+    def test_find_run_id_legacy_timestamp_path(self):
+        """Without a token, the legacy most-recent-run heuristic is used."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ('zzz999',)
+        ts = datetime.now(timezone.utc)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(ts)
+        assert rid == 'zzz999'
+        sql, params = cur.execute.call_args[0]
+        assert 'started_at >=' in sql
+        assert params == (ts,)
+
     def test_suggest_no_tier_returns_empty(self):
         import optuna
         study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=1))
