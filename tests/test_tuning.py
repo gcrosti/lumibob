@@ -334,6 +334,29 @@ class TestSuggest:
         assert cur.execute.call_count == 1
         assert 'tuning_trial_token' in cur.execute.call_args[0][0]
 
+    def test_load_pass_a_base_missing_study_exits(self):
+        """Pass B must fail loudly when the Pass A study does not exist."""
+        from unittest.mock import patch
+        import pytest
+        from tuning.studies import study1_pass_b
+        with patch('optuna.load_study', side_effect=KeyError('no study')):
+            with pytest.raises(SystemExit, match='not found in storage'):
+                study1_pass_b.load_pass_a_base(storage=object())
+
+    def test_load_pass_a_base_no_completed_trials_exits(self):
+        """Pass B must fail loudly when Pass A has zero completed trials."""
+        from unittest.mock import MagicMock, patch
+        import optuna
+        import pytest
+        from tuning.studies import study1_pass_b
+        fake = MagicMock()
+        running = MagicMock()
+        running.state = optuna.trial.TrialState.RUNNING
+        fake.trials = [running]
+        with patch('optuna.load_study', return_value=fake):
+            with pytest.raises(SystemExit, match='no completed trials'):
+                study1_pass_b.load_pass_a_base(storage=object())
+
     def test_find_run_id_legacy_timestamp_path(self):
         """Without a token, the legacy most-recent-run heuristic is used."""
         from datetime import datetime, timezone

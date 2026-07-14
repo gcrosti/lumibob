@@ -67,7 +67,7 @@ Do not proceed past a failed gate without a root-cause investigation.
 | Study 1 Pass A v1 | `study1_pass_a_v1` | **Deprecated** | 83 trials completed locally (2026-05-20/21, best blended score 0.270), but 3-month folds produced too few round-trips for reliable Spearman rho. Superseded by v2 (5-month folds). Do not use its results. |
 | Study 00 — cloud pipe check | `cloud_smoke_v1` | **Done** (2026-07-14) | **Passed** — after catching and fixing a run-attribution bug: under concurrent workers, `_find_run_id`'s most-recent-run heuristic scored the same run for two trials. Fixed via `tuning_trial_token` in `backtest_runs.settings` (branch `feat/study1-pass-b`); rerun verified 3 workers → 3 distinct correctly-matched runs. Also required opening postgres on the DB instance to the VPC subnet (listen_addresses + pg_hba scoped to lumibob/172.31.0.0/16). Measured c6i.4xlarge trial times: 31–95 min per 5-month fold (median ~43). |
 | Study 1 Pass A v2 | `study1_pass_a_v2` | Ready — merge `feat/study1-pass-b` first | Script committed; instance `lumibob-tuning` is warm and validated. |
-| Study 1 Pass B | `study1_pass_b_v1` | **Blocked** — script not yet written | See prerequisites. |
+| Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) | Runs after the Pass A gate passes; loads Pass A best-trial params from Optuna storage at startup. |
 | Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | Not started | |
 | Study 3 — dense walk-forward | `study3_v1` | Not started | |
 
@@ -130,14 +130,16 @@ structure is broken.
 
 ### Study 1 Pass B — discovery + portfolio construction
 
-**Script must be created** (`tuning/studies/study1_pass_b.py`) — same
-fold-rotating pattern as Pass A, same three 5-month folds (keep windows
-identical so Pass A's best params transfer cleanly).
+Implemented in `tuning/studies/study1_pass_b.py` — same fold-rotating
+pattern as Pass A, same three 5-month folds (identical windows so Pass A's
+best params transfer cleanly). Base params are loaded from the completed
+Pass A study in Optuna storage at startup (fails loudly if Pass A has no
+completed trials).
 
 | Setting | Value |
 |---|---|
-| Free params | `hdbscan_min_cluster_size` [3, 15], `hdbscan_min_samples` [1, 5], `hdbscan_cluster_selection_epsilon` [0, 0.5], `cluster_recompute_days`, `max_daily_candidates` [50, 300], `target_deployed_pct` [0.3, 0.9], `max_k` |
-| Fixed params | Pass A best-trial signal params + Tier 1/Tier 3 defaults |
+| Free params (8, `PASS_B_PARAMS`) | `hdbscan_min_samples` [1, 5], `hdbscan_cluster_selection_epsilon` [0, 0.5], `min_intra_cluster_corr` [0.1, 0.6], `cluster_recompute_days` [14, 90], `max_daily_candidates` [50, 300], `target_deployed_pct` [0.4, 0.9], `max_k` [5, 50], `max_halflife_days` [20, 120] — note `hdbscan_min_cluster_size` is excluded: Tier 1, computed dynamically at runtime |
+| Fixed params | Pass A best-trial signal params (weights re-normalised) + Tier 1/Tier 3 defaults |
 | Folds | Same three 5-month folds as Pass A |
 | Trials | 75 (~25/fold) — 8 free params want a little more than the plan's original 60 |
 | Objective | Pure Sharpe |
@@ -287,10 +289,12 @@ retrieval step.
 
 ### Pipe check before the first study (Study 00)
 
-The infra has never carried a tuning study end-to-end — PR #44 validated data
+The infra had never carried a tuning study end-to-end — PR #44 validated data
 migration, not the worker → cloud-DB write path. Before Pass A, run a smoke
-study on the freshly launched tuning instance. No new code; env overrides on
-the real Pass A runner:
+study on the freshly launched tuning instance. Env overrides on the real
+Pass A runner (in practice a thin driver reusing the Pass A objective was
+used instead, to skip the post-study gate check — with `TUNE_N_TRIALS=1` the
+gate would add 3 full backtests):
 
 ```bash
 # 1. One solo trial — full chain: VPC → DB private IP, cached prices
@@ -385,12 +389,9 @@ window or stagger worker starts.
 
 ## Prerequisites before the next launch
 
-1. **Write `tuning/studies/study1_pass_b.py`** — fold-rotating pattern copied
-   from Pass A, Pass B free params, pure Sharpe. Only outstanding code work
-   for Study 1.
-2. **Point local `.env` `DB_URL` at the tunnel** (or re-apply `schema.sql`
-   locally) — it currently targets the empty local postgres, so any locally
-   launched worker or analysis silently sees no data.
+1. ~~Write `tuning/studies/study1_pass_b.py`~~ — **done** (PR #46).
+2. ~~Point local `.env` `DB_URL` at the tunnel~~ — **done** (2026-07-14);
+   local analysis sessions now hit the cloud DB via port 5433.
 3. **Build regime detector v2** (before Study 2, not before Pass A): daily,
    backward-looking, FRED-based, per `2026-05-18_tier3-regime-detector.md`
    Step 2 — with publication-lag-safe features, the < 1 flip/week stability

@@ -89,7 +89,7 @@ PASS_A_STUDY = os.getenv('TUNE_PASS_A_STUDY', 'study1_pass_a_v2')
 DB_URL = os.getenv('DB_URL', 'postgresql://postgres:lumibob@localhost:5432/lumibob')
 
 # Discovery / portfolio-construction params this study frees.  All Tier 2;
-# disjoint from PASS_A_PARAMS by construction (asserted in run()).
+# disjoint from PASS_A_PARAMS by construction (asserted below).
 PASS_B_PARAMS = frozenset({
     'hdbscan_min_samples',
     'hdbscan_cluster_selection_epsilon',
