@@ -240,6 +240,139 @@ class TestSuggest:
         tier1_names = {n for n, s in PARAMETER_SPACE.items() if s.tier == 1}
         assert set(result.keys()) == tier1_names
 
+    # --- param_names allowlist tests ---
+
+    def test_param_names_restricts_to_allowlist(self):
+        import optuna
+        allow = frozenset({'max_k', 'target_deployed_pct'})
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=3))
+        trial = study.ask()
+        result = suggest(trial, tiers=(2,), param_names=allow)
+        assert set(result.keys()) == allow
+
+    def test_param_names_none_frees_whole_tier(self):
+        import optuna
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=3))
+        trial = study.ask()
+        result = suggest(trial, tiers=(2,), param_names=None)
+        tier2_names = {n for n, s in PARAMETER_SPACE.items() if s.tier == 2}
+        assert set(result.keys()) == tier2_names
+
+    def test_param_names_excludes_deferred_params(self):
+        """Deferred (joint-constraint) params respect the allowlist too."""
+        import optuna
+        allow = frozenset({'lookback_window'})   # zscore_window NOT allowed
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=5))
+        trial = study.ask()
+        result = suggest(trial, tiers=(2,), param_names=allow)
+        assert 'zscore_window' not in result
+        assert 'cooldown_days' not in result
+        assert 'corr_short_window' not in result
+
+    def test_param_names_deferred_constraint_still_holds(self):
+        """When both members of a constrained pair are allowed, the joint
+        constraint applies."""
+        import optuna
+        allow = frozenset({'lookback_window', 'zscore_window'})
+        for seed in range(10):
+            study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=seed))
+            trial = study.ask()
+            result = suggest(trial, tiers=(2,), param_names=allow)
+            assert result['zscore_window'] <= max(10, result['lookback_window'] // 3)
+
+    def test_pass_a_and_pass_b_param_sets_partition_tier2(self):
+        """Pass A + Pass B free sets are disjoint and cover Tier 2 exactly."""
+        from tuning.studies.study1_pass_a import PASS_A_PARAMS
+        from tuning.studies.study1_pass_b import PASS_B_PARAMS
+        tier2_names = {n for n, s in PARAMETER_SPACE.items() if s.tier == 2}
+        assert not (PASS_A_PARAMS & PASS_B_PARAMS)
+        assert PASS_A_PARAMS | PASS_B_PARAMS == tier2_names
+
+    def test_suggest_weights_normalised_with_partial_allowlist(self):
+        """When only some weights are suggested, they are normalised against
+        the defaults of the others: suggested + default weights sum to 1
+        under the shared normaliser, so each suggested weight lies in (0, 1]."""
+        import optuna
+        allow = frozenset({'w_corr_long', 'w_z_depth'})
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=11))
+        trial = study.ask()
+        result = suggest(trial, tiers=(2,), param_names=allow)
+        assert set(result.keys()) == allow
+        assert 0 < result['w_corr_long'] <= 1
+        assert 0 < result['w_z_depth'] <= 1
+
+    def test_find_run_id_token_path(self):
+        """With a token, run recovery queries by settings token — the
+        parallel-worker-safe path."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ('abc123',)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(
+                datetime.now(timezone.utc), token='tok-42')
+        assert rid == 'abc123'
+        sql, params = cur.execute.call_args[0]
+        assert 'tuning_trial_token' in sql
+        assert params == ('tok-42',)
+
+    def test_find_run_id_token_missing_returns_none(self):
+        """No run carries the token → None (no silent fallback to the
+        timestamp heuristic that cross-attributes runs)."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = None
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(
+                datetime.now(timezone.utc), token='tok-42')
+        assert rid is None
+        assert cur.execute.call_count == 1
+        assert 'tuning_trial_token' in cur.execute.call_args[0][0]
+
+    def test_load_pass_a_base_missing_study_exits(self):
+        """Pass B must fail loudly when the Pass A study does not exist."""
+        from unittest.mock import patch
+        import pytest
+        from tuning.studies import study1_pass_b
+        with patch('optuna.load_study', side_effect=KeyError('no study')):
+            with pytest.raises(SystemExit, match='not found in storage'):
+                study1_pass_b.load_pass_a_base(storage=object())
+
+    def test_load_pass_a_base_no_completed_trials_exits(self):
+        """Pass B must fail loudly when Pass A has zero completed trials."""
+        from unittest.mock import MagicMock, patch
+        import optuna
+        import pytest
+        from tuning.studies import study1_pass_b
+        fake = MagicMock()
+        running = MagicMock()
+        running.state = optuna.trial.TrialState.RUNNING
+        fake.trials = [running]
+        with patch('optuna.load_study', return_value=fake):
+            with pytest.raises(SystemExit, match='no completed trials'):
+                study1_pass_b.load_pass_a_base(storage=object())
+
+    def test_find_run_id_legacy_timestamp_path(self):
+        """Without a token, the legacy most-recent-run heuristic is used."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+        from tuning.objective import BacktestObjective
+        conn = MagicMock()
+        cur = conn.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = ('zzz999',)
+        ts = datetime.now(timezone.utc)
+        with patch('tuning.objective.psycopg2.connect', return_value=conn):
+            rid = BacktestObjective._find_run_id(ts)
+        assert rid == 'zzz999'
+        sql, params = cur.execute.call_args[0]
+        assert 'started_at >=' in sql
+        assert params == (ts,)
+
     def test_suggest_no_tier_returns_empty(self):
         import optuna
         study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=1))

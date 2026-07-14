@@ -31,11 +31,12 @@ this wall-clock budget, the trial is pruned rather than blocking the study.
 Set to 1200 (20 min) for Phase 4 coarse to guard against pathological runs.
 
 Scoring uses the portfolio_snapshots, pairs, and trades tables written by
-BobsBrain during the run.  The run_id is recovered by querying backtest_runs
-for the most recently completed run started after this call's invocation
-timestamp.  This is safe for single-threaded (n_jobs=1) Optuna studies;
-parallel workers must use a DB-level mechanism (e.g. passing a deterministic
-run_id) instead.
+BobsBrain during the run.  The run_id is recovered via a unique
+tuning_trial_token injected into the backtest's parameters and written by
+BobsBrain into backtest_runs.settings — exact attribution that is safe under
+parallel workers (the previous most-recent-run timestamp heuristic
+cross-attributed runs when concurrent workers finished out of order; caught
+by the Study 00 cloud pipe check, 2026-07-14).
 """
 
 from __future__ import annotations
@@ -75,6 +76,9 @@ class BacktestObjective:
         full canonical default set from parameter_space.defaults().
     tiers : tuple[int, ...]
         Which parameter tiers the trial should suggest values for.
+    param_names : frozenset[str] | None
+        Optional allowlist restricting which params within *tiers* are
+        suggested.  None (default) frees every param in the tiers.
     penalty_dd : float
         λ — weight on max-drawdown penalty in the composite score.
     penalty_trades : float
@@ -110,6 +114,7 @@ class BacktestObjective:
         budget: float = 10_000,
         base_params: dict[str, Any] | None = None,
         tiers: tuple[int, ...] = (2,),
+        param_names: frozenset[str] | None = None,
         penalty_dd: float = 0.5,
         penalty_trades: float = 0.01,
         min_trades: int = 5,
@@ -124,6 +129,7 @@ class BacktestObjective:
         self.budget = budget
         self.base_params = base_params if base_params is not None else defaults()
         self.tiers = tiers
+        self.param_names = param_names
         self.penalty_dd = penalty_dd
         self.penalty_trades = penalty_trades
         self.min_trades = min_trades
@@ -140,7 +146,7 @@ class BacktestObjective:
     def __call__(self, trial: optuna.Trial) -> float:
         from tuning.parameter_space import suggest
 
-        trial_params = suggest(trial, self.tiers)
+        trial_params = suggest(trial, self.tiers, param_names=self.param_names)
         full_params = {**self.base_params, **trial_params}
 
         logger.info('Trial %d starting — suggested: %s', trial.number, trial_params)
@@ -151,6 +157,7 @@ class BacktestObjective:
             logger.error('Trial %d: backtest failed, pruning', trial.number)
             raise optuna.exceptions.TrialPruned()
 
+        trial.set_user_attr('run_id', run_id)
         score = self.score_run(run_id, trial=trial)
         logger.info('Trial %d  score=%.4f  run_id=%s', trial.number, score, run_id)
         return score
@@ -171,8 +178,15 @@ class BacktestObjective:
         """
         start_ts = datetime.now(timezone.utc)
 
+        # Unique token written into backtest_runs.settings by BobsBrain so
+        # this worker recovers exactly its own run.  Timestamp-based recovery
+        # cross-attributes runs when multiple workers finish out of order.
+        import uuid
+        token = uuid.uuid4().hex
+        params = {**params, 'tuning_trial_token': token}
+
         if self.trial_timeout_secs is not None:
-            return self._run_backtest_subprocess(params, start_ts)
+            return self._run_backtest_subprocess(params, start_ts, token)
 
         from lumibot.backtesting import YahooDataBacktesting
         from BobsBrain import BobsBrain
@@ -192,12 +206,13 @@ class BacktestObjective:
             logger.exception('BobsBrain.backtest raised an exception')
             return None
 
-        return self._find_run_id(after_ts=start_ts)
+        return self._find_run_id(after_ts=start_ts, token=token)
 
     def _run_backtest_subprocess(
         self,
         params: dict[str, Any],
         start_ts: datetime,
+        token: str,
     ) -> str | None:
         """
         Run BobsBrain.backtest in a child process so the OS-level timeout
@@ -265,25 +280,47 @@ class BacktestObjective:
             except OSError:
                 pass
 
-        return self._find_run_id(after_ts=start_ts)
+        return self._find_run_id(after_ts=start_ts, token=token)
 
     @staticmethod
-    def _find_run_id(after_ts: datetime) -> str | None:
-        """Query the DB for the most recently completed run started after *after_ts*."""
+    def _find_run_id(after_ts: datetime, token: str | None = None) -> str | None:
+        """
+        Recover the run_id this trial's backtest wrote to backtest_runs.
+
+        With *token* (always set on the tuning path): match the token BobsBrain
+        wrote into settings — exact attribution, safe under parallel workers.
+        No fallback to the timestamp heuristic: a missing token means the
+        backtest did not complete a run, and silently scoring some other
+        worker's run would corrupt the study.
+
+        Without *token*: legacy most-recent-run heuristic (single-worker only).
+        """
         with psycopg2.connect(_DB_URL) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT run_id
-                    FROM backtest_runs
-                    WHERE started_at >= %s
-                      AND mode = 'backtest'
-                      AND completed_at IS NOT NULL
-                    ORDER BY started_at DESC
-                    LIMIT 1
-                    """,
-                    (after_ts,),
-                )
+                if token is not None:
+                    cur.execute(
+                        """
+                        SELECT run_id
+                        FROM backtest_runs
+                        WHERE settings->>'tuning_trial_token' = %s
+                          AND completed_at IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (token,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT run_id
+                        FROM backtest_runs
+                        WHERE started_at >= %s
+                          AND mode = 'backtest'
+                          AND completed_at IS NOT NULL
+                        ORDER BY started_at DESC
+                        LIMIT 1
+                        """,
+                        (after_ts,),
+                    )
                 row = cur.fetchone()
         return row[0] if row else None
 

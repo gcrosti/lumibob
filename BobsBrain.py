@@ -66,6 +66,10 @@ class BobsBrain(Strategy):
 
     def initialize(self):
         self.sleeptime = '1D'
+        # Opaque token set by the tuning engine so a parallel Optuna worker can
+        # recover exactly its own run from backtest_runs.settings. Not a
+        # strategy parameter; None outside tuning runs.
+        self.tuning_trial_token = self.parameters.get('tuning_trial_token', None)
         # Calendar days of price history for scoring (must span corr windows in bars).
         self.lookback_window = self.parameters.get('lookback_window', 130)
         # Min days between cluster recomputes; None = recompute only when cache cold.
@@ -265,6 +269,8 @@ class BobsBrain(Strategy):
                 'min_intra_cluster_corr': self.min_intra_cluster_corr,
                 # short_leg_fraction replaces the deprecated enable_short_leg boolean.
                 'short_leg_fraction': self.short_leg_fraction,
+                # Tuning-run attribution (null outside Optuna studies).
+                'tuning_trial_token': self.tuning_trial_token,
             },
         )
 
