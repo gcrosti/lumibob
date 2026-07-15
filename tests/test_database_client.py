@@ -495,19 +495,26 @@ class TestFailedTickers:
         assert "window_start" in all_sql
         assert "window_end" in all_sql
 
-    def test_get_failed_tickers_returns_symbol_list(self):
+    def test_get_failed_tickers_global_returns_symbol_list(self):
         client, mock_pool = _make_client()
-        _mock_conn(mock_pool, fetchall_return=[("T.PRA",), ("ACHR.WS",)])
+        _, mock_cur = _mock_conn(mock_pool, fetchall_return=[("T.PRA",), ("ACHR.WS",)])
 
-        result = client.get_failed_tickers()
+        result = client.get_failed_tickers_global()
 
         assert result == ["T.PRA", "ACHR.WS"]
+        # Must filter to sentinel-window rows only — window-scoped failures
+        # are handled per-fetch by StockDataCache, not as a global blocklist.
+        # The IS NULL arm keeps pre-migration-004 legacy rows (nullable ADD
+        # COLUMN, no default) covered as window-independent marks.
+        sql = mock_cur.execute.call_args[0][0]
+        assert "1970-01-01" in sql
+        assert "window_start IS NULL" in sql
 
-    def test_get_failed_tickers_returns_empty_list_when_none(self):
+    def test_get_failed_tickers_global_returns_empty_list_when_none(self):
         client, mock_pool = _make_client()
         _mock_conn(mock_pool, fetchall_return=[])
 
-        result = client.get_failed_tickers()
+        result = client.get_failed_tickers_global()
 
         assert result == []
 

@@ -66,7 +66,8 @@ Do not proceed past a failed gate without a root-cause investigation.
 | Study 0 — short-leg viability | `study0_sideways_2022`, `study0_bull_2023` | **Done** (2026-05-19, local) | **Gate passed**: best `short_leg_fraction` = 0.96 (sideways), 0.058 (bull) — > 0.05 in ≥ 1 fold. Note: best objective was negative in both folds (−0.48, −0.26); the short leg earned its place as a *parameter*, not yet as a profit source. |
 | Study 1 Pass A v1 | `study1_pass_a_v1` | **Deprecated** | 83 trials completed locally (2026-05-20/21, best blended score 0.270), but 3-month folds produced too few round-trips for reliable Spearman rho. Superseded by v2 (5-month folds). Do not use its results. |
 | Study 00 — cloud pipe check | `cloud_smoke_v1` | **Done** (2026-07-14) | **Passed** — after catching and fixing a run-attribution bug: under concurrent workers, `_find_run_id`'s most-recent-run heuristic scored the same run for two trials. Fixed via `tuning_trial_token` in `backtest_runs.settings` (branch `feat/study1-pass-b`); rerun verified 3 workers → 3 distinct correctly-matched runs. Also required opening postgres on the DB instance to the VPC subnet (listen_addresses + pg_hba scoped to lumibob/172.31.0.0/16). Measured c6i.4xlarge trial times: 31–95 min per 5-month fold (median ~43). |
-| Study 1 Pass A v2 | `study1_pass_a_v2` | Ready — merge `feat/study1-pass-b` first | Script committed; instance `lumibob-tuning` is warm and validated. |
+| Study 1 Pass A v2 | `study1_pass_a_v2` | **Invalid — do not use** (2026-07-14) | Fleet of 12 workers launched 16:01 UTC; at 16:17 one worker's mass Alpaca fetch failure wrote 4,607 false `failed_tickers` rows, and the global blocklist in `BobsBrain.initialize()` then emptied the universe of every subsequent run: 89 of 100 trials completed degenerate (0 pairs scanned, 0 trades, penalty scores) and the gate's "FAIL 0/3" ran on 0-trade backtests. 11 healthy trials (best 0.2061) are salvageable. Poison rows deleted 2026-07-15 (backup kept); root causes fixed in `fix/failed-ticker-poisoning`. |
+| Study 1 Pass A v3 | `study1_pass_a_v3` | Ready — after poisoning fix merges | Same design as v2 (design unchanged; v-bump is data pollution). Seed the 11 healthy v2 trials via `study.add_trial`, then run to 90 completed. **8 workers, not 12** — the incident occurred under 12-way concurrency; 8 also keeps worker-count ≲ trials/8 guidance intact. |
 | Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) | Runs after the Pass A gate passes; loads Pass A best-trial params from Optuna storage at startup. |
 | Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | Not started | |
 | Study 3 — dense walk-forward | `study3_v1` | Not started | |
@@ -346,7 +347,11 @@ ordinary runs under the scratch study name; no cleanup needed.
 
 The old warm-up step existed to stop 8 workers from hammering Alpaca for
 uncached prices. **Prices are no longer the issue** — the PR #44 backfill
-cached the full 2019–2025 history. What still benefits from warming is
+cached the full 2019–2025 history, and since the 2026-07-14 incident fix,
+**tuning trials run price-cache-only** (`price_cache_only=True` injected by
+`BacktestObjective`): they never call Alpaca at all. Symbols without DB rows
+for a window are simply absent from that run. New price data enters the cache
+only via the nightly refresh cron or an explicit backfill — never via trials. What still benefits from warming is
 `pair_coint_cache` (keyed by `lookback_window` + `window_end_date`):
 
 - **Pass A**: warm-up has limited value — `lookback_window` is a free

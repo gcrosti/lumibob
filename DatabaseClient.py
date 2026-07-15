@@ -725,11 +725,27 @@ class DatabaseClient:
                 cur.execute(sql, (window_end, window_start))
                 return [row[0] for row in cur.fetchall()]
 
-    def get_failed_tickers(self) -> list[str]:
-        """Return all symbols that appear in failed_tickers (any window)."""
+    def get_failed_tickers_global(self) -> list[str]:
+        """
+        Return symbols marked failed WITHOUT a window (sentinel 1970-01-01) —
+        window-independent judgments such as penny-stock or dead-quote marks.
+
+        Window-scoped failures ('no data from Alpaca' for a specific fetch
+        window) are deliberately excluded: they are handled per-window by
+        StockDataCache at fetch time. Using them as a universe-wide blocklist
+        let a single mass fetch failure (2026-07-14 incident: 4,607 symbols
+        marked in 13 s) silently empty the universe of every later run.
+        """
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT DISTINCT symbol FROM failed_tickers")
+                # IS NULL arm: rows created before migration 004 on databases
+                # upgraded by the runtime shim (ADD COLUMN without default)
+                # have NULL windows — they are window-independent marks too.
+                cur.execute(
+                    "SELECT DISTINCT symbol FROM failed_tickers "
+                    "WHERE window_start = DATE '1970-01-01' "
+                    "   OR window_start IS NULL"
+                )
                 return [row[0] for row in cur.fetchall()]
 
     def mark_ticker_failed(
