@@ -738,9 +738,13 @@ class DatabaseClient:
         """
         with self._conn() as conn:
             with conn.cursor() as cur:
+                # IS NULL arm: rows created before migration 004 on databases
+                # upgraded by the runtime shim (ADD COLUMN without default)
+                # have NULL windows — they are window-independent marks too.
                 cur.execute(
                     "SELECT DISTINCT symbol FROM failed_tickers "
-                    "WHERE window_start = DATE '1970-01-01'"
+                    "WHERE window_start = DATE '1970-01-01' "
+                    "   OR window_start IS NULL"
                 )
                 return [row[0] for row in cur.fetchall()]
 
