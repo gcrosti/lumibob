@@ -590,5 +590,28 @@ class TestDailyBudget(unittest.TestCase):
         self.assertEqual(scored, 0)
 
 
+class TestCheckUniverseHealth(unittest.TestCase):
+    """_check_universe_health — fail-loud guard against universe collapse."""
+
+    def test_healthy_universe_passes(self):
+        BobsBrain._check_universe_health(8204, 4500)  # no raise
+
+    def test_small_universe_with_some_filtering_passes(self):
+        BobsBrain._check_universe_health(100, 15)  # raw < 500 → no pct guard
+
+    def test_empty_universe_raises(self):
+        with self.assertRaisesRegex(RuntimeError, 'empty universe'):
+            BobsBrain._check_universe_health(100, 0)
+
+    def test_collapsed_universe_raises(self):
+        # 2026-07-14 incident shape: >8k raw, near-zero survivors.
+        with self.assertRaisesRegex(RuntimeError, 'poisoned failed_tickers'):
+            BobsBrain._check_universe_health(8204, 40)
+
+    def test_zero_raw_passes(self):
+        # Empty tickers table is handled upstream (Alpaca refetch).
+        BobsBrain._check_universe_health(0, 0)  # no raise
+
+
 if __name__ == '__main__':
     unittest.main()

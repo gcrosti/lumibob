@@ -260,6 +260,59 @@ class TestFailedTickerFiltering:
         assert "MSFT" in window_failed
         assert mock_db.mark_ticker_failed.call_count == 2
 
+    def test_cache_only_never_calls_alpaca(self):
+        """cache_only mode returns DB data as-is: no fetch, no marking."""
+        db_data = _close_df(["AAPL"], ["2025-01-02"])
+        mock_db = MagicMock()
+        mock_alpaca = MagicMock()
+        mock_db.get_prices.return_value = db_data
+        cache = StockDataCache(mock_db, mock_alpaca, cache_only=True)
+
+        result = cache.get_prices(["AAPL", "MSFT"], START, END)
+
+        assert list(result.columns) == ["AAPL"]
+        mock_alpaca.get_historical_bars.assert_not_called()
+        mock_db.mark_ticker_failed.assert_not_called()
+
+    def test_cache_only_empty_db_returns_empty_without_fetch(self):
+        mock_db = MagicMock()
+        mock_alpaca = MagicMock()
+        mock_db.get_prices.return_value = pd.DataFrame()
+        cache = StockDataCache(mock_db, mock_alpaca, cache_only=True)
+
+        result = cache.get_prices(["AAPL"], START, END)
+
+        assert result.empty
+        mock_alpaca.get_historical_bars.assert_not_called()
+
+    def test_mass_empty_fetch_raises_instead_of_marking(self):
+        """A large batch returning nothing is an infrastructure failure —
+        the run must die loudly, and no symbol may be marked failed
+        (2026-07-14 incident: 4,607 false failure rows in 13 s)."""
+        symbols = [f"SYM{i}" for i in range(60)]
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=pd.DataFrame()
+        )
+
+        with pytest.raises(RuntimeError, match="infrastructure failure"):
+            cache.get_prices(symbols, START, END)
+
+        mock_db.mark_ticker_failed.assert_not_called()
+
+    def test_mass_partial_fetch_still_marks_missing(self):
+        """A large batch with SOME data is normal — genuinely missing
+        symbols are marked as before."""
+        symbols = [f"SYM{i}" for i in range(60)]
+        fresh = _close_df(symbols[:59], ["2025-01-02"])
+        cache, mock_db, mock_alpaca = _make_cache(
+            db_prices=pd.DataFrame(), alpaca_bars=fresh
+        )
+
+        cache.get_prices(symbols, START, END)
+
+        mock_db.mark_ticker_failed.assert_called_once()
+        assert mock_db.mark_ticker_failed.call_args[0][0] == "SYM59"
+
 
 # ---------------------------------------------------------------------------
 # _find_missing_symbols

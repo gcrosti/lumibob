@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 from AlpacaClient import AlpacaClient
 from DatabaseClient import DatabaseClient
 
+# A fetch batch at least this large that returns zero rows is treated as an
+# infrastructure failure (raise) rather than per-symbol data gaps (mark).
+_MASS_FAILURE_MIN_BATCH = 50
+
 
 class StockDataCache:
     """
@@ -38,9 +42,23 @@ class StockDataCache:
     market-open scan always finds a fully warm cache.
     """
 
-    def __init__(self, db: DatabaseClient, alpaca: AlpacaClient):
+    def __init__(
+        self,
+        db: DatabaseClient,
+        alpaca: AlpacaClient,
+        cache_only: bool = False,
+    ):
+        """
+        cache_only=True disables all Alpaca access: symbols without DB rows
+        for the requested window are simply absent from the result, and no
+        failed_tickers rows are written. Used by tuning studies — the price
+        cache is fully backfilled, so the only thing live fetches can add
+        during a study is rate-limit exposure and failure-marking risk
+        (2026-07-14 incident).
+        """
         self._db = db
         self._alpaca = alpaca
+        self._cache_only = cache_only
         # Ensure the table exists / columns are up-to-date (idempotent).
         db.migrate_failed_tickers()
         # Per-window failed-symbol cache: keyed by (window_start, window_end)
@@ -71,6 +89,10 @@ class StockDataCache:
             return pd.DataFrame()
 
         cached = self._db.get_prices(symbols, start, end)
+
+        if self._cache_only:
+            return cached
+
         missing_symbols = self._find_missing_symbols(symbols, cached, start, end)
 
         # Filter out symbols already known to be unfetchable for this window.
@@ -87,6 +109,21 @@ class StockDataCache:
             returned = set(fresh.columns) if not fresh.empty else set()
             ws = start.date() if hasattr(start, 'date') else start
             we = end.date()   if hasattr(end,   'date') else end
+
+            # Circuit breaker: a large batch returning NOTHING is an
+            # infrastructure failure (rate limit, network, auth) — not
+            # evidence about each individual symbol. Recording it as
+            # thousands of per-symbol failures poisons every later run
+            # that overlaps this window (2026-07-14: 4,607 symbols marked
+            # in 13 s). Fail the run loudly instead.
+            if len(fetchable) >= _MASS_FAILURE_MIN_BATCH and not returned:
+                raise RuntimeError(
+                    f'StockDataCache: Alpaca returned no data for ALL '
+                    f'{len(fetchable)} requested symbols ({ws} → {we}) — '
+                    f'treating as infrastructure failure, not marking '
+                    f'symbols failed.'
+                )
+
             for symbol in fetchable:
                 if symbol not in returned:
                     window_failed.add(symbol)

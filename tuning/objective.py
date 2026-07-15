@@ -105,6 +105,11 @@ class BacktestObjective:
     min_round_trips : int
         Minimum matched buy/sell round-trips needed for a valid discriminatory
         score.  Runs below this threshold return a heavy penalty.  Default 10.
+    price_cache_only : bool
+        Default True: trial backtests read prices from the DB cache only and
+        never call Alpaca (the cache is fully backfilled; live fetches during
+        a study add only rate-limit exposure and failure-marking risk).  Set
+        False only for a deliberate cache-warming run.
     """
 
     def __init__(
@@ -123,6 +128,7 @@ class BacktestObjective:
         discriminatory_weight: float = 0.0,
         pnl_floor: float = -100.0,
         min_round_trips: int = 10,
+        price_cache_only: bool = True,
     ) -> None:
         self.train_start = datetime(train_start.year, train_start.month, train_start.day)
         self.train_end = datetime(train_end.year, train_end.month, train_end.day)
@@ -138,6 +144,7 @@ class BacktestObjective:
         self.discriminatory_weight = discriminatory_weight
         self.pnl_floor = pnl_floor
         self.min_round_trips = min_round_trips
+        self.price_cache_only = price_cache_only
 
     # ------------------------------------------------------------------
     # Optuna interface
@@ -183,7 +190,15 @@ class BacktestObjective:
         # cross-attributes runs when multiple workers finish out of order.
         import uuid
         token = uuid.uuid4().hex
-        params = {**params, 'tuning_trial_token': token}
+        # price_cache_only: trials never touch Alpaca — the cache is fully
+        # backfilled, and live fetches during a study only add rate-limit
+        # exposure and failure-marking risk. Set False only for a deliberate
+        # cache-warming run.
+        params = {
+            **params,
+            'tuning_trial_token': token,
+            'price_cache_only': self.price_cache_only,
+        }
 
         if self.trial_timeout_secs is not None:
             return self._run_backtest_subprocess(params, start_ts, token)

@@ -70,6 +70,9 @@ class BobsBrain(Strategy):
         # recover exactly its own run from backtest_runs.settings. Not a
         # strategy parameter; None outside tuning runs.
         self.tuning_trial_token = self.parameters.get('tuning_trial_token', None)
+        # True during tuning studies: prices come from the DB cache only, no
+        # Alpaca fetches or failure-marking. Operational param, not tunable.
+        self.price_cache_only = bool(self.parameters.get('price_cache_only', False))
         # Calendar days of price history for scoring (must span corr windows in bars).
         self.lookback_window = self.parameters.get('lookback_window', 130)
         # Min days between cluster recomputes; None = recompute only when cache cold.
@@ -189,7 +192,9 @@ class BobsBrain(Strategy):
             paper=os.getenv('ALPACA_IS_PAPER', 'true').lower() == 'true',
             mode=self._run_mode,
         )
-        self._cache = StockDataCache(self._db, self._alpaca)
+        self._cache = StockDataCache(
+            self._db, self._alpaca, cache_only=self.price_cache_only,
+        )
         self._clusterer = TickerClusterer(
             db=self._db,
             get_prices=self._cache.get_prices,
@@ -203,7 +208,11 @@ class BobsBrain(Strategy):
             hdbscan_cluster_selection_epsilon=self.hdbscan_cluster_selection_epsilon,
             min_intra_cluster_corr=self.min_intra_cluster_corr,
         )
-        self._failed_tickers: set[str] = set(self._db.get_failed_tickers())
+        # Window-independent failures only (penny stocks, dead quotes).
+        # Window-scoped 'no data' rows are applied per-fetch by StockDataCache
+        # — loading them globally here poisoned the whole universe once a mass
+        # fetch failure was recorded (2026-07-14 incident).
+        self._failed_tickers: set[str] = set(self._db.get_failed_tickers_global())
 
         self._run_id = secrets.token_hex(3)
         self.pairs: dict[str, dict] = self._db.load_active_pairs(self._run_id)
@@ -213,7 +222,9 @@ class BobsBrain(Strategy):
             print("[BobsBrain] Tickers table empty, fetching tradeable assets from Alpaca...")
             tickers = self._alpaca.get_tradeable_assets()
             self._db.upsert_tickers(tickers, 'ALPACA')
+        raw_universe_count = len(tickers)
         tickers = [t for t in tickers if t not in self._failed_tickers]
+        self._check_universe_health(raw_universe_count, len(tickers))
 
         self._load_ticker_metadata(tickers)
         self._metadata_loaded = True
@@ -271,8 +282,32 @@ class BobsBrain(Strategy):
                 'short_leg_fraction': self.short_leg_fraction,
                 # Tuning-run attribution (null outside Optuna studies).
                 'tuning_trial_token': self.tuning_trial_token,
+                'price_cache_only': self.price_cache_only,
             },
         )
+
+    @staticmethod
+    def _check_universe_health(raw_count: int, filtered_count: int) -> None:
+        """
+        Abort startup when the failed-ticker filter collapses the universe.
+
+        A run with a near-empty universe scans nothing, trades nothing, and
+        still *completes* — a silent failure that poisons downstream analysis
+        and, in tuning studies, burns trial quota on meaningless scores
+        (2026-07-14 incident: 89 of 100 trials). Failing loudly here turns
+        that into an immediately visible crash instead.
+        """
+        if raw_count > 0 and filtered_count == 0:
+            raise RuntimeError(
+                f'Universe collapsed: 0 of {raw_count} tickers survived the '
+                f'failed-ticker filter — refusing to run with an empty universe.'
+            )
+        if raw_count >= 500 and filtered_count < 0.2 * raw_count:
+            raise RuntimeError(
+                f'Universe collapsed: only {filtered_count} of {raw_count} '
+                f'tickers survived the failed-ticker filter (<20%). This '
+                f'indicates poisoned failed_tickers state, not real data gaps.'
+            )
 
     def before_market_opens(self):
         """
