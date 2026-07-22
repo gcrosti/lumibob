@@ -67,10 +67,22 @@ Do not proceed past a failed gate without a root-cause investigation.
 | Study 1 Pass A v1 | `study1_pass_a_v1` | **Deprecated** | 83 trials completed locally (2026-05-20/21, best blended score 0.270), but 3-month folds produced too few round-trips for reliable Spearman rho. Superseded by v2 (5-month folds). Do not use its results. |
 | Study 00 — cloud pipe check | `cloud_smoke_v1` | **Done** (2026-07-14) | **Passed** — after catching and fixing a run-attribution bug: under concurrent workers, `_find_run_id`'s most-recent-run heuristic scored the same run for two trials. Fixed via `tuning_trial_token` in `backtest_runs.settings` (branch `feat/study1-pass-b`); rerun verified 3 workers → 3 distinct correctly-matched runs. Also required opening postgres on the DB instance to the VPC subnet (listen_addresses + pg_hba scoped to lumibob/172.31.0.0/16). Measured c6i.4xlarge trial times: 31–95 min per 5-month fold (median ~43). |
 | Study 1 Pass A v2 | `study1_pass_a_v2` | **Invalid — do not use** (2026-07-14) | Fleet of 12 workers launched 16:01 UTC; at 16:17 one worker's mass Alpaca fetch failure wrote 4,607 false `failed_tickers` rows, and the global blocklist in `BobsBrain.initialize()` then emptied the universe of every subsequent run: 89 of 100 trials completed degenerate (0 pairs scanned, 0 trades, penalty scores) and the gate's "FAIL 0/3" ran on 0-trade backtests. 11 healthy trials (best 0.2061) are salvageable. Poison rows deleted 2026-07-15 (backup kept); root causes fixed in `fix/failed-ticker-poisoning`. |
-| Study 1 Pass A v3 | `study1_pass_a_v3` | Ready — after poisoning fix merges | Same design as v2 (design unchanged; v-bump is data pollution). Seed the 11 healthy v2 trials via `study.add_trial`, then run to 90 completed. **8 workers, not 12** — the incident occurred under 12-way concurrency; 8 also keeps worker-count ≲ trials/8 guidance intact. |
-| Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) | Runs after the Pass A gate passes; loads Pass A best-trial params from Optuna storage at startup. |
-| Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | Not started | |
-| Study 3 — dense walk-forward | `study3_v1` | Not started | |
+| Study 1 Pass A v3 | `study1_pass_a_v3` | **Done** (2026-07-17) — **GATE FAILED** | 97 healthy completed trials (11 seeded + 86 new; 0 failed/pruned, all runs with real fills — incident fixes verified). Best value 0.2061 (a *seeded* v2 trial; 86 new trials did not beat it). Gate re-ran best params on all 3 folds with full backtests: rho = **−0.040 (sideways), −0.111 (bull), −0.046 (mixed)** — 0/3 pass, not borderline. Per sequencing: **do not run Pass B**; investigate score structure first. Note: the best trial's own fold re-run produced negative rho vs its positive in-sample score — in-sample rho estimates may be noise-dominated. Trial times ~54 min avg on c6a.4xlarge with `price_cache_only` (vs ~100 min v2). Ran on spot (reclaimed 2026-07-15 after 10 trials) then on-demand to completion. |
+| Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) — **blocked** | Blocked with Studies 2/3 by the 2026-07-17 deepdive (see below). |
+| Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | **Blocked — structural NO-GO** | |
+| Study 3 — dense walk-forward | `study3_v1` | **Blocked — structural NO-GO** | |
+
+> **Sequencing halt (2026-07-17)**: the Pass A root-cause deepdive
+> (`docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md`,
+> computations in `notebooks/pass_a_v3_score_signal_retroactive.ipynb`) found the
+> score works as a filter (persistence rho +0.66; 82–87% reversion hit-rate) but
+> the harvested dollar-neutral edge (median ~13 bps, mean ≤ ~9 bps gross per
+> round trip, exit-policy-robust) does not clear realistic costs — and the
+> simulator models zero slippage. Studies resume after: (1) exit redesign
+> (divergence/health/time stops) validates retroactively, (2) entry magnitude
+> floor validates retroactively, (3) simulator cost model lands, and (4) Pass A
+> is re-gated with the v4 full-pool P&L-free objective. See the deepdive's
+> execution checklist.
 
 ---
 
