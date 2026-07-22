@@ -6,6 +6,19 @@
 > Entry redesign (H-C) and the simulator cost model (H-D) are explicitly out of
 > scope for this pass — see "Deferred."
 
+> **OUTCOME (2026-07-18): Phase 1 retro-validation = NO-GO. H-B falsified.**
+> No loss-side stop (divergence, health, time, hard-level, wide-z) beats the
+> stopless pooled gross mean; most are worse. The mean ≪ median gap is not
+> "losers held too long" — every fold's median is positive (+9 to +24); the mean
+> is dragged by a few rare catastrophic non-converters (bull: one pair −1554 bps).
+> On the way down these are indistinguishable from the many pairs that dip and
+> revert, so any stop tight enough to catch them sacrifices more winners than it
+> saves. Phase 2 (implement stops) is **cancelled** — no strategy code from this
+> pass. Redirect: entry / pair-quality screening (can the catastrophic pairs be
+> identified *at entry*?), then position sizing. Evidence:
+> `notebooks/pass_a_v3_score_signal_retroactive.ipynb` §Phase 1. The phased plan
+> below is retained as the record of what was tested.
+
 ---
 
 ## Why
