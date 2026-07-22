@@ -72,17 +72,24 @@ Do not proceed past a failed gate without a root-cause investigation.
 | Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | **Blocked — structural NO-GO** | |
 | Study 3 — dense walk-forward | `study3_v1` | **Blocked — structural NO-GO** | |
 
-> **Sequencing halt (2026-07-17)**: the Pass A root-cause deepdive
-> (`docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md`,
+> **Sequencing halt (2026-07-17, updated 2026-07-18)**: the Pass A root-cause
+> deepdive (`docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md`,
 > computations in `notebooks/pass_a_v3_score_signal_retroactive.ipynb`) found the
 > score works as a filter (persistence rho +0.66; 82–87% reversion hit-rate) but
 > the harvested dollar-neutral edge (median ~13 bps, mean ≤ ~9 bps gross per
-> round trip, exit-policy-robust) does not clear realistic costs — and the
-> simulator models zero slippage. Studies resume after: (1) exit redesign
-> (divergence/health/time stops) validates retroactively, (2) entry magnitude
-> floor validates retroactively, (3) simulator cost model lands, and (4) Pass A
-> is re-gated with the v4 full-pool P&L-free objective. See the deepdive's
-> execution checklist.
+> round trip) does not clear realistic costs — and the simulator models zero
+> slippage.
+>
+> **2026-07-18:** the exit redesign was retro-tested and **rejected** — the mean
+> ≪ median gap is concentrated catastrophic outliers (worst-3 pairs = 45–80% of
+> all losses per regime), not held-too-long losers, and no stop recovers it.
+> Median is positive in every regime; removing the ~8% catastrophic pairs makes
+> gross mean +22 to +45. Studies now resume after: (1) **determine whether the
+> catastrophic pairs are identifiable at entry** (new lead question) → an entry
+> screen if so, position sizing if not; (2) entry magnitude floor (H-C); (3)
+> simulator cost model (H-D); (4) Pass A re-gated with the v4 full-pool P&L-free
+> objective (H-A). Exit-mechanics work is closed. See the deepdive's Update
+> section.
 
 ---
 
