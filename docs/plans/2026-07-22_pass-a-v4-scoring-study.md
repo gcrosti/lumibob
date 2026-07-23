@@ -1,181 +1,224 @@
-# Implementation Plan — Pass A v4 Scoring Study
+# Implementation Plan — Pass A v4 Scoring-Quality Study
 
 > Created 2026-07-22. Source analysis:
 > `docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md`
-> (Update 2026-07-22). Supersedes the ad-hoc "raise `w_corr_short`" idea.
+> (Update 2026-07-22). Supersedes the ad-hoc "raise `w_corr_short`" idea **and** the
+> earlier backtest-objective framing of this plan — the study runs a scoring script,
+> not a backtest.
 
 ## Problem
 
-The composite score's weights are **noise-selected**. The Pass A objective is
-`0.7 × Spearman(score, P&L) + 0.3 × clip(sharpe/3)`; the deep dive proved the rho
-term ≈ 0 (noise, se 0.13–0.19), and the Sharpe term is computed on a **zero-cost**
-simulator. Across `study1_pass_a_v3`'s 97 trials the objective is statistically
-indifferent to 4 of 5 weights (`w_corr_short` p=0.12, `w_coint` p=0.65,
-`w_halflife` p=0.60). The frozen best-trial weights put **40% on a dead half-life
-component** (constant 0.962) and **0.2% on `corr_short`** — the one input shown to
-separate the catastrophic tail out-of-fold. The winning vector is a lucky draw; a
-near-opposite vector scored the same.
+The composite score's weights are **noise-selected**. The old Pass A objective was
+`0.7 × Spearman(score, round_trip_P&L) + 0.3 × clip(sharpe/3)`, evaluated over the
+~30–60 *entered* pairs per run. Three defects made it noise: **range restriction**
+(you only observe outcomes for pairs the score already selected → attenuated rho),
+**P&L noise** (round-trip P&L conflates ranking with beta, exit, sizing, and zero
+costs), and **small n** (se(rho) ≈ 0.13–0.19). Across `study1_pass_a_v3`'s 97 trials
+the objective is statistically indifferent to 4 of 5 weights (`w_corr_short` p=0.12)
+**and to `corr_short_window`** (p=1.00). The frozen best-trial weights put 40% on a
+dead half-life component and 0.2% on `corr_short` — the one input shown (Phase 2) to
+separate the catastrophic tail out-of-fold. The winning vector is a lucky draw.
 
-We cannot fix this by hand-setting a weight — the objective that would justify any
-weight is broken. Three prerequisites must land before a retrain means anything.
+## Core idea — evaluate the score, not a portfolio
+
+The score's job is **admission ranking**. Evaluating that does not require a trading
+simulator, costs, or portfolio accounting. Replace the backtest objective with a
+**scoring-quality study**: score the full candidate pool, and optimize the weights so
+the score ranks pairs by their **future spread behavior**. This fixes all three
+defects at once — full pool (no range restriction), P&L-free spread outcome (no
+beta/sizing noise), thousands of pairs (tight CI), seconds per trial. Economics
+(cost-clearance) is confirmed **once at the end**, not tuned in the loop.
+
+Two things make or break it (see WS3): the outcome must be **tail-sensitive and
+edge-aligned** (a plain rank correlation is blind to the catastrophic ~8% and would
+recreate the original failure), and gross ranking must be **confirmed against costs**
+exactly once, outside the tuning loop.
 
 ## Goal / success criteria
 
-A retrained composite whose weights are set by a **signal-bearing, cost-aware
-objective**, validated in a comparative backtest with costs on.
-
-- **G1** — the new objective is deterministic and discriminating: weight↔objective
-  Spearman significant (p<0.05) for the components that carry signal; CI width on
-  the gate metric ≤ ±0.05 (vs the old ±0.13–0.19).
-- **G2** — post-cost mean per round trip is **positive in every fold** at a
-  defensible cost assumption (≥15 bps round-trip), vs the current negative-under-cost
-  baseline.
-- **G3** — the retrained `w_corr_short` is set by the objective (expected materially
+- **G1 (power)** — the scoring metric resolves weight vectors: the best clearly
+  separates from the field; metric stable across folds (vs the old ±0.13–0.19 noise).
+- **G2 (tail + edge)** — the retrained weights raise the **top-K mean gross forward
+  spread P&L, positive in every fold**, materially above the current noise-weight
+  baseline (Phase 2 baseline pooled mean +2.0).
+- **G3 (weight by signal)** — `w_corr_short` is set by the metric (expected materially
   above 0.002), not by hand.
+- **G-window** — the tuned corr windows generalize (stable across folds, not overfit);
+  `corr_short_window` landing near the Phase 2 25-day horizon corroborates that finding
+  (a large divergence is a flag to investigate, not auto-accept).
+- **G-cost (final gate)** — one post-cost comparative backtest shows net-positive
+  economics in the folds, or quantifies the residual gap (→ H-C / sizing).
 
 ## Workstreams (ordered by dependency)
 
 ### WS1 — Fix the half-life component *(prerequisite; small)*
 
-**Change.** Replace the linear ceiling map
+Unchanged rationale: a near-constant component (`score_halflife` = 0.962 ± 0.029)
+holds dead weight *and* flattens the composite's spread, so no weight is interpretable
+until it is fixed. Replace the linear ceiling map
 `halflife_score = max(0, 1 − halflife_days / max_halflife_days)` with a
-**cross-sectional percentile transform**: score each pair by the rank of its
-half-life within the current candidate pool (lower half-life → higher score). This
-guarantees real [0,1] variance regardless of the absolute clustering (~1–3 d today)
-and is invariant to the systematic 3–5× optimism. Apply the measured **2.09×**
-calibration constant (`HL_CAL`) only where the half-life *level* is consumed (honest
-reporting; the rejected time-stop) — it does **not** fix variance and is irrelevant
-to the ranker.
+**cross-sectional percentile transform** (rank within the scored pool → real [0,1]
+variance, invariant to the 3–5× optimism). Apply the measured **2.09×** calibration
+constant only where the half-life *level* is consumed (reporting) — it does not fix
+variance.
 
-**Files.** `StockEvaluator.py:265` (fresh-compute path), `BobsBrain.py:377-378`
-(stored-hl path) and `BobsBrain.py:488-490` (fresh path) — all three must use the
-same transform. Persist the transformed value into `pairs.score_halflife` as today.
+- **Files:** `StockEvaluator.py:265`; `BobsBrain.py:377-378` and `:488-490` (all three
+  scoring paths must use the same transform).
+- **Tuning-engine:** `max_halflife_days` (`parameter_space.py:109`) becomes a no-op
+  under a percentile transform — deprecate or repurpose. `w_halflife` stays registered.
+- **Validation:** recomputed `score_halflife` shows std ≫ 0.03 on the gate-run pool.
 
-**Tuning-engine.** `max_halflife_days` (`parameter_space.py:109`, Tier 2) becomes a
-no-op under a percentile transform — deprecate it or repurpose as a floor below which
-half-life is treated as pathological. `w_halflife` stays registered; its range is
-unchanged. No new score weight added.
+### WS2 — Scoring-quality replay harness + cache *(the core new build; medium)*
 
-**Validation.** On the three gate runs' pairs, recomputed `score_halflife` must show
-variance (std ≫ 0.03, vs today's 0.029). Confirm the composite's cross-sectional
-spread widens.
+An **offline script** — no lumibot, no portfolio, no orders — that emits, per fold,
+the pooled pairs with their **window-independent** artifacts (forward outcome, coint,
+half-life) plus everything needed to compute the corr components at a trial's chosen
+windows:
 
-**Why, not just what.** A near-constant component with any weight is dead weight
-*and* — because the composite is a weighted average — it flattens the spread of every
-other component. No weight allocation is interpretable until this is fixed. (Rescue,
-not delete: half-life *rank* carries weak reversion-timing signal, +0.24, that a real
-objective may still choose to use.)
+1. **Candidate pool.** Reconstruct the admitted pool once per fold with **fixed,
+   evidence-grounded clustering params** (clustering *gates*; the composite *ranks*).
+   Cheaper fallback if pool reconstruction is heavy: a broad hard-gated pair sample
+   (penny/coverage gates only). Decision default: fixed-clustering, computed once.
+2. **Component matrix.** `corr_long, corr_short, z_depth, coint_pvalue, halflife` for
+   **every** pooled pair (not just selected), at the scoring date — from
+   `StockDataCache` / `stock_prices`.
+3. **Forward outcome.** Per-pair **gross forward spread P&L** under the **frozen
+   outcome contract** (below) — this is "future behavior" in units of harvestable
+   edge, P&L-free of costs/sizing.
 
-### WS2 — Cost model in the simulator *(prerequisite; small/infra)*
+**Outcome contract (frozen — never in the search space):** `zscore_window`, the exit
+rule (`sim_exit(exit_z=0.5)` convention), and the hedge/coint lookbacks. These *define
+the target*; tuning any of them is target leakage (§Risks). Freezing them keeps the
+forward outcome cacheable regardless of which corr windows a trial picks.
 
-**Change.** Inject a slippage + commission model into the backtest fill path so every
-fill records a non-zero, realistic cost, and P&L/Sharpe reflect it. Costs are
-**exogenous environment config, not tunable** — do NOT add them to the Optuna search
-space (you cannot optimize your way out of costs). Fix a defensible default
-(bid-ask + impact; target ~15 bps round-trip) and expose a sensitivity dial for
-10/20/30 bps runs.
+Cache the **window-independent** artifacts — forward gross outcome, `coint_pvalue`,
+`halflife`, and the raw price windows — **once per fold**; the expensive pass (forward
+path building, ADF/coint) never repeats. The corr components (`corr_long`,
+`corr_short`) depend on the tuned corr windows (WS3), so compute them either **on the
+fly per trial** (cheap Pearson over the cached price windows) or from a **precomputed
+component tensor over a discretized window grid**. Because the corr windows feed only
+the score — confirmed absent from `TickerClusterer.py`, so they touch neither the pool
+nor the outcome — this stays light.
 
-**Files.** Backtest execution path invoked from `BobsBrain.backtest(...)`
-(`main.py:90`); `DatabaseClient.record_trade` already carries a `slippage` column
-(`DatabaseClient.py:863`) — populate it with the modeled value instead of 0.0.
+- **Reuses:** existing scoring/clustering code paths in "score-all, trade-none" mode.
+- **No live-strategy persistence change** — scores are recomputed per trial, never
+  stored (a stored score is frozen to one weight vector, useless for the study).
+- **Validation:** the cached matrix reproduces the Phase 2 numbers (catastrophic
+  counts, quintile table) when scored with the gate-run weights **and windows**.
 
-**Validation (H-D).** Re-run one known run with costs on; assert recorded
-`slippage > 0` on every fill and that Sharpe/total-return move down as expected.
+### WS3 — The scoring-quality study *(depends on WS1 + WS2; small once cached)*
 
-**Why.** The entire measured edge (median ~13, mean ≤9 bps) lives *inside* the
-10–30 bps cost band, so profitability is decided by this model — currently "zero."
-Decisively, it is the **only** thing that makes the `corr_short` trade-off visible to
-the tuner: under real costs, high-corr_short pairs' ~5.5 bps median wins go
-net-negative while low-corr_short fat medians survive but carry the tail — so costs
-determine which direction `corr_short` should be weighted. Without WS2, G3 is
-undefined.
+Optuna optimizes the composite **weights and the two predictor windows**
+(`corr_long_window`, `corr_short_window`) over the cached matrix to maximize a
+**tail-sensitive, edge-aligned** ranking metric.
 
-### WS3 — New objective *(depends on WS1 + WS2; medium/large — the design piece)*
+- **Metric (primary):** mean **top-K gross forward P&L** (rank pool by score, take the
+  top-K the strategy would select, average their forward gross), **averaged across
+  folds with a per-fold floor** (every fold positive — the LORO discipline). This is
+  directly tail-sensitive (a mean the −1554 can move) and operationally faithful
+  (top-K selection). **Do NOT use Spearman** — rank correlation ignores outlier
+  magnitude and would re-optimize the median while ignoring the tail.
+- **Tuned as predictor dims:** `corr_long_window`, `corr_short_window`. They feed only
+  the score, not the outcome or the pool, so tuning them is leakage-free and cheap (WS2
+  recomputes the two correlations per trial / from a window tensor). This replaces the
+  earlier fixed-value-plus-sensitivity-grid workaround — the old 25 / 84 values were
+  noise-selected (p=1.00 for corr_short) and are no longer imposed; the study sets them.
+  The +2 dims are controlled by the per-fold floor + held-out discipline. The Phase 2
+  evidence (25-day horizon) is a **prior/sanity check** on where corr_short lands, not
+  a constraint.
+- **Frozen (outcome contract, never tuned):** K, exit convention, `zscore_window`,
+  hedge/coint lookbacks — see WS2.
+- **Files:** new `tuning/studies/study1_pass_a_v4.py` + a scoring objective in
+  `tuning/objective.py`; confirm `_WEIGHT_NAMES` / `normalize_weights` cover the weight
+  set and that `corr_long_window` / `corr_short_window` are in the v4 search space
+  (already registered Tier 2 in `parameter_space.py:84,87`).
 
-**Change.** Replace `0.7 × Spearman(score, P&L) + 0.3 × clip(sharpe/3)` with:
+### WS4 — Single post-cost confirmation backtest *(depends on WS3; the only backtest)*
 
-- **(a) P&L-free full-pool gate** (H-A): a discovery-replay that scores the *entire*
-  candidate pool each day and correlates `score` with a P&L-free forward outcome
-  (e.g. realized forward `corr_short`, spread ADF, calibrated reversion) over all
-  scored pairs — removing the range restriction that crushed the old gate's power
-  (n ×10–20, minutes per trial, no trading sim).
-- **(b) post-cost expectancy term** (needs WS2): mean net bps per round trip on the
-  entered subset, so the objective rewards economics that survive frictions.
+Take the retrained weights and run **one** comparative backtest — current vs new
+weights — across the three folds, **costs on**. This is the economics gate the scoring
+study deliberately does not tune.
 
-Combine (a) and (b) explicitly (weights TBD in design); (a) supplies discrimination
-power, (b) anchors it to money.
+- **Cost model (demoted from prerequisite to here):** implement a slippage/commission
+  model in the fill path so `trades.slippage > 0` (`DatabaseClient.record_trade`
+  already carries the column). Costs are **exogenous config, not tunable**. Run
+  10/20/30 bps sensitivity.
+- **Files:** backtest fill path via `BobsBrain.backtest(...)` (`main.py:90`).
+- **Validation (G-cost):** net-positive per fold, or a quantified residual gap that
+  routes to H-C (entry magnitude) / sizing — *not* back into the scoring loop.
 
-**Files.** `tuning/objective.py` (`BacktestObjective` / `score_run`);
-`tuning/studies/study1_pass_a.py` (new `study1_pass_a_v4`, new objective string in the
-module docstring). Build the discovery-replay harness (does not exist yet).
+### WS5 — Soft corr_short floor *(conditional; only if WS3 shows a linear weight can't express the threshold)*
 
-**Validation (G1).** On a fixed weight sweep, the new objective's weight↔objective
-Spearman is significant for signal-bearing components and its gate-metric CI ≤ ±0.05.
-
-### WS4 — Retrain + comparative backtest *(depends on WS1–WS3)*
-
-Run `study1_pass_a_v4` (register in `parameter_space` unchanged weight set; confirm
-`_WEIGHT_NAMES` and `normalize_weights` cover the set). Extract best weights. Then a
-**comparative backtest** — current mechanics vs new (fixed half-life + costs + new
-weights) — across the three folds, costs on, per the backtest-agent workflow.
-
-**Validation (G2/G3).** Post-cost mean positive in every fold; retrained
-`w_corr_short` materially > 0.002 and set by the objective.
-
-### WS5 — Soft corr_short floor *(conditional; only if WS4 shows a linear weight can't express the threshold)*
-
-If the retrained linear weight still can't cut Q1 without over-rotating into
-low-median Q5, add a **deployment-safe nonlinear transform**: steep score penalty
-below a `corr_short` knee, flat above — pairs below the knee still deploy when they're
-the best available (no hard gate, no stranded capital). New tunable
-(`corr_short_knee` or similar) → **must** be registered in `parameter_space.py`
-(correct tier), added to `create_run()` settings, and — if it enters the composite —
-reflected in `normalize_weights`.
+The Phase 2 signal is threshold-shaped (Q1 disastrous, Q2–Q5 flat) with an adverse
+median gradient, so a linear weight may over-rotate into low-median Q5. If WS3's best
+linear weights still can't cut Q1 cleanly, add a **deployment-safe nonlinear
+transform**: steep score penalty below a `corr_short` knee, flat above — pairs below
+the knee still deploy when they are the best available (no hard gate, no stranded
+capital). New tunable → register in `parameter_space.py` (correct tier) +
+`create_run()` settings + `normalize_weights`.
 
 ## Dependency graph
 
 ```
 WS1 (half-life) ─┐
-                 ├─► WS3 (objective) ─► WS4 (retrain + comparative bt) ─► WS5 (cond.)
-WS2 (cost model)─┘
+                 ├─► WS3 (scoring study + window grid) ─► WS4 (one post-cost backtest) ─► WS5 (cond.)
+WS2 (harness+cache)┘
 ```
 
-WS1 and WS2 are independent and can proceed in parallel. WS3 needs both. WS5 is
-gated on WS4's result.
+WS1 and WS2 are independent. WS3 is cheap once WS2's cache exists. WS4 is the single
+backtest and the only place the cost model is needed. WS5 is gated on WS3's result.
+
+## What this design deliberately drops or defers
+
+- **No trading simulator in the tuning loop** — the scoring study is a ranking script.
+- **No cost model in the objective** — one confirmation backtest at the end (WS4).
+- **No clustering replay per trial** — pool built once per fold (WS2); the tuned corr
+  windows feed only the score, so the pool is invariant to them.
+- **Portfolio-level effects (K interactions, capital allocation, held-pair
+  correlations) are out of scope for the *weights* question** — per-pair ranking is
+  the correct unit; portfolio construction is the separate sizing/diversification
+  layer the deep dive named as the complement for the residual irreducible tail.
 
 ## Risks / open questions
 
-- **Cost magnitude is a modeling choice.** 15 bps is defensible but not measured;
-  run 10/20/30 bps sensitivity so conclusions aren't knife-edge on the assumption.
-- **Discovery-replay harness is net-new** (WS3a) — the largest build item; scope it
-  before committing to WS3's timeline.
-- **Range restriction persists in retro.** The +2→+13 screen lift is removal-only; a
-  reweight *substitutes* pairs we can't see retro. WS4's full-pool backtest is the
-  only honest test of the reweight — treat the retro number as motivation, not proof.
-- **Percentile half-life changes the composite distribution** and may shift other
-  tuned params; the retrain absorbs this, but don't compare pre/post weights
-  component-by-component as if the scale were unchanged.
-- **Residual irreducible tail.** Even a perfect corr_short weight leaves NET/SNOW,
-  JSMD, VONG-type blowups (normal corr_short). Position sizing / diversification is a
-  separate, complementary workstream — not covered here.
+- **Metric mis-specification is the #1 risk.** A tail-blind metric (Spearman, or a
+  top-K *median*) silently recreates the original failure. The metric must be a
+  tail-sensitive **mean** of an edge-aligned outcome. Lock this in review before build.
+- **Gross ranking ≠ profitability (H-C).** The study optimizes gross; if WS4's
+  post-cost gate fails, the lever moves to entry magnitude / sizing, not more weight
+  tuning. WS4 is a real gate, not a rubber stamp.
+- **Pool definition conditions results** — fixed-clustering (faithful) vs broad sample
+  (simple). Default to fixed-clustering-once; note the choice in results.
+- **Target leakage via the outcome contract.** Any param that defines the forward
+  outcome (`zscore_window`, exit rule, hedge/coint lookbacks) must stay **out of the
+  search space** — tuning it would improve the metric by making the outcome
+  predictable, not by ranking better. `zscore_window` is the trap: it has a dual role
+  (feeds `z_depth` *and* the exit), so it is frozen; `z_depth` is then evaluated at a
+  fixed window but still carries a tunable weight.
+- **Overfit from the +2 predictor window dims.** Controlled by the per-fold positivity
+  floor (a window that only helps one regime can't win) and held-out validation.
+- **Forward outcome depends on the frozen exit convention.** Held at current values;
+  optional sensitivity to the exit rule if WS3 conclusions look fragile.
 
 ## Execution checklist
 
 - [ ] WS1: percentile half-life transform in `StockEvaluator.py` + both `BobsBrain.py`
-      paths; deprecate/repurpose `max_halflife_days`; add `HL_CAL` where level is used
-- [ ] WS1 validation: `score_halflife` variance restored on gate-run pairs
-- [ ] WS2: slippage/commission model in fill path; populate `trades.slippage`; costs
-      as fixed config (NOT in Optuna space)
-- [ ] WS2 validation (H-D): known run with costs on → `slippage > 0`, Sharpe moves
-- [ ] WS3a: build full-pool discovery-replay gate (P&L-free)
-- [ ] WS3b: post-cost expectancy term; combine into new objective
-- [ ] WS3 validation (G1): weight↔objective significance; gate-metric CI ≤ ±0.05
-- [ ] WS4: run `study1_pass_a_v4`; extract best weights; comparative backtest 3 folds,
-      costs on (backtest-agent workflow)
-- [ ] WS4 validation (G2/G3): post-cost mean positive per fold; `w_corr_short` > 0.002
-      by objective
-- [ ] WS5 (conditional): soft corr_short floor; register param in `parameter_space.py`
-      + `create_run()` settings + `normalize_weights`
-- [ ] Commit notebook §Phase 2 (entry-discriminability analysis) alongside these docs
-- [ ] Update `docs/plans/2026-07-12_cloud-tuning-studies.md` ledger: Study 2/3 remain
-      blocked until WS4 validates
+      paths; deprecate/repurpose `max_halflife_days`; wire `HL_CAL` where level is used
+- [ ] WS1 validation: `score_halflife` variance restored on the gate-run pool
+- [ ] WS2: build the score-all/trade-none replay harness; cache the window-independent
+      artifacts (forward_gross, coint, half-life, price windows) per fold; corr
+      components computed per trial / from a window tensor
+- [ ] WS2 validation: cached matrix reproduces Phase 2 numbers under gate-run weights
+- [ ] WS3: scoring objective = cross-fold mean of top-K gross forward P&L, per-fold
+      floor; **not** Spearman; outcome contract (K, exit, `zscore_window`, hedge/coint
+      lookbacks) frozen out of the search space
+- [ ] WS3: tune `corr_long_window` + `corr_short_window` as predictor dims; verify
+      they generalize across folds (G-window)
+- [ ] WS3 validation (G1/G2/G3): metric resolves weights; top-K mean gross positive per
+      fold; `w_corr_short` > 0.002 by the metric
+- [ ] WS4: implement cost model (fill path; `trades.slippage > 0`; not tunable); one
+      comparative backtest current vs new weights, costs on, 10/20/30 bps sensitivity
+- [ ] WS4 validation (G-cost): net-positive per fold, or quantified residual → H-C/sizing
+- [ ] WS5 (conditional): soft corr_short floor; register param + settings + normalize
+- [ ] Update `docs/plans/2026-07-12_cloud-tuning-studies.md` ledger: Study 2/3 blocked
+      until WS4 validates
