@@ -75,7 +75,18 @@ cluster now spreads 1.00→0.80 (was 0.98→0.96).
 - **2.09× calibration constant** — deferred to reporting/half-life-level use only; not
   needed for the ranker.
 
-### WS2 — Scoring-quality replay harness + cache *(the core new build; medium)*
+### WS2 — Scoring-quality replay harness + cache *(the core new build; medium)* — **DONE**
+
+**Implemented** as `tuning/scoring_replay.py`. Reconstructs the real candidate pool via
+the strategy's own `TickerClusterer` at sampled dates (4/fold), scores with the real
+`StockEvaluator`, and computes the P&L-free forward gross outcome under the frozen exit.
+Look-ahead controls: position-based alignment to the last close ≤ T, hedge frozen
+pre-T, outcome from (T, T+40td] only. Dislocation-first gate (|z|≥2) keeps only
+tradeable pairs and skips ~90% of the ADF cost. Cache: `tuning/_scoring_cache/*.parquet`
+(gitignored; regenerable). **Built: 3,104 tradeable observations** (sideways 1,164 /
+bull 1,293 / mixed 647). `score_halflife` std 0.18 on this pool (WS1 variance confirmed
+at scale). Trailing log-returns stored per obs for WS3 corr re-windowing.
+
 
 An **offline script** — no lumibot, no portfolio, no orders — that emits, per fold,
 the pooled pairs with their **window-independent** artifacts (forward outcome, coint,
@@ -113,7 +124,38 @@ nor the outcome — this stays light.
 - **Validation:** the cached matrix reproduces the Phase 2 numbers (catastrophic
   counts, quintile table) when scored with the gate-run weights **and windows**.
 
-### WS3 — The scoring-quality study *(depends on WS1 + WS2; small once cached)*
+### WS3 — The scoring-quality study *(depends on WS1 + WS2; small once cached)* — **DONE (first pass)**
+
+**Implemented** as `tuning/scoring_study.py` (Optuna, top-K mean forward gross with the
+0.5·mean + 0.5·min per-fold floor; corr windows tuned; corr recomputed per trial from
+cached returns).
+
+**Result (2026-07-23, 300 trials):**
+
+| | objective | corr_long | **corr_short** | coint | halflife | per-fold (side/bull/mixed) |
+|---|---|---|---|---|---|---|
+| Baseline (gate weights) | +36.7 | 0.19 | **0.002** | 0.41 | 0.41 | +39 / +33 / +49 |
+| Best trial | **+52.2** | 0.32 | **0.187** | 0.38 | 0.11 | +55 / +73 / +46 |
+
+- **G1 (power) — met.** The objective resolves weights (best +52 vs baseline +37, all
+  folds positive), unlike the old noise gate (p>0.1 on 4 of 5 weights).
+- **G2 (tail+edge) — met.** Top-K mean gross positive in every fold, materially above
+  baseline.
+- **G3 (weight by signal) — met, with nuance.** `w_corr_short` rises from 0.002 to
+  **~0.1–0.23** (seed-dependent: 0.09 / 0.21 / 0.23; always ≫ 0.002). The exact value
+  isn't pinned because corr_short/corr_long are 0.73-collinear (a ridge) — the robust
+  statement is *correlation quality is badly underweighted by the noise gate*. Half-life,
+  freed to vary by WS1, earns **~0.11** (vs its noise-selected 0.41) — confirming Phase 2
+  that it does not discriminate.
+- **G-window — partial.** `corr_short_window` lands consistently low (~14–19);
+  `corr_long_window` is not pinned (115–205). Windows need the fuller sensitivity pass.
+
+**Caveats (honest):** metric is **gross** (costs = WS4); pool sampled at 4 dates/fold
+(not daily); forward outcome uses the frozen exit; `z_depth` excluded as inert among
+tradeable pairs (all dislocated → constant — its *live* weight is untouched). Not yet a
+persistent Optuna study in the DB (`study1_pass_a_v4`) — this is a standalone harness
+run; promoting it to the shared study store is the remaining WS3 productionization.
+
 
 Optuna optimizes the composite **weights and the two predictor windows**
 (`corr_long_window`, `corr_short_window`) over the cached matrix to maximize a
