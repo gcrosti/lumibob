@@ -51,22 +51,29 @@ exactly once, outside the tuning loop.
 
 ## Workstreams (ordered by dependency)
 
-### WS1 — Fix the half-life component *(prerequisite; small)*
+### WS1 — Fix the half-life component *(prerequisite; small)* — **DONE**
 
-Unchanged rationale: a near-constant component (`score_halflife` = 0.962 ± 0.029)
-holds dead weight *and* flattens the composite's spread, so no weight is interpretable
-until it is fixed. Replace the linear ceiling map
-`halflife_score = max(0, 1 − halflife_days / max_halflife_days)` with a
-**cross-sectional percentile transform** (rank within the scored pool → real [0,1]
-variance, invariant to the 3–5× optimism). Apply the measured **2.09×** calibration
-constant only where the half-life *level* is consumed (reporting) — it does not fix
-variance.
+A near-constant component (`score_halflife` = 0.962 ± 0.029) holds dead weight *and*
+flattens the composite's spread, so no weight is interpretable until it is fixed.
 
-- **Files:** `StockEvaluator.py:265`; `BobsBrain.py:377-378` and `:488-490` (all three
-  scoring paths must use the same transform).
-- **Tuning-engine:** `max_halflife_days` (`parameter_space.py:109`) becomes a no-op
-  under a percentile transform — deprecate or repurpose. `w_halflife` stays registered.
-- **Validation:** recomputed `score_halflife` shows std ≫ 0.03 on the gate-run pool.
+**Design decision — log transform, not percentile.** The plan originally called for a
+cross-sectional percentile transform, but the live scoring is **per-pair** with a
+**variable-size daily candidate pool** (gated by `max_daily_candidates`); a
+percentile-within-today's-pool would be unstable and non-comparable across days and
+would force a two-pass restructure of both scoring loops. A per-pair **log-spaced**
+map achieves the same goal (restore variance) while staying a drop-in and stable:
+`score = clip((ln(ceiling) − ln(hl)) / ln(ceiling), 0, 1)`. It *repurposes*
+`max_halflife_days` as the log-space ceiling (no dead param). Result: the 1–3 day
+cluster now spreads 1.00→0.80 (was 0.98→0.96).
+
+- **Implemented:** shared `halflife_to_score()` in `StockEvaluator.py`, called from
+  `compute_spread_scores` and both `BobsBrain` scoring paths (re-score + discovery).
+- **Tuning-engine:** `max_halflife_days` retained (now the log ceiling); `w_halflife`
+  unchanged. No new/removed params.
+- **Tests:** `TestHalflifeToScore` (range, endpoints, monotonicity, variance-restore);
+  full suite green (128 passed).
+- **2.09× calibration constant** — deferred to reporting/half-life-level use only; not
+  needed for the ranker.
 
 ### WS2 — Scoring-quality replay harness + cache *(the core new build; medium)*
 

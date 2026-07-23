@@ -13,7 +13,7 @@ from lumibot.strategies import Strategy
 from AlpacaClient import AlpacaClient
 from DatabaseClient import DatabaseClient
 from StockDataCache import StockDataCache
-from StockEvaluator import StockEvaluator
+from StockEvaluator import StockEvaluator, halflife_to_score
 from TickerClusterer import TickerClusterer
 
 load_dotenv()
@@ -374,11 +374,7 @@ class BobsBrain(Strategy):
             stored_pvalue = pair.get('coint_pvalue', 1.0)
             coint_score = max(0.0, 1.0 - stored_pvalue / _COINT_PVALUE_CEILING)
             stored_hl = pair.get('halflife_days')
-            halflife_score = (
-                max(0.0, 1.0 - stored_hl / self.max_halflife_days)
-                if stored_hl is not None and np.isfinite(stored_hl)
-                else 0.0
-            )
+            halflife_score = halflife_to_score(stored_hl, self.max_halflife_days)
 
             pair['corr_long'] = corr_long
             pair['corr_short'] = corr_short
@@ -485,11 +481,7 @@ class BobsBrain(Strategy):
                         self._coint_cache_new[cache_key] = (coint_pvalue, halflife_days)
 
                     coint_score = max(0.0, 1.0 - coint_pvalue / _COINT_PVALUE_CEILING)
-                    halflife_score = (
-                        max(0.0, 1.0 - halflife_days / self.max_halflife_days)
-                        if halflife_days is not None and np.isfinite(halflife_days)
-                        else 0.0
-                    )
+                    halflife_score = halflife_to_score(halflife_days, self.max_halflife_days)
                     score = self._composite_score(
                         corr_long, corr_short, z_depth, coint_score, halflife_score,
                     )

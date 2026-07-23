@@ -9,7 +9,40 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from StockEvaluator import StockEvaluator, SpreadScores
+from StockEvaluator import StockEvaluator, SpreadScores, halflife_to_score
+
+
+class TestHalflifeToScore(unittest.TestCase):
+    """The log-spaced half-life transform (WS1: restore component variance)."""
+
+    def test_range_and_endpoints(self):
+        self.assertEqual(halflife_to_score(1.0, 60), 1.0)      # floor -> max score
+        self.assertEqual(halflife_to_score(60.0, 60), 0.0)     # ceiling -> 0
+        self.assertEqual(halflife_to_score(100.0, 60), 0.0)    # above ceiling -> 0
+        for hl in (1, 2, 5, 15, 45, 60):
+            s = halflife_to_score(hl, 60)
+            self.assertGreaterEqual(s, 0.0)
+            self.assertLessEqual(s, 1.0)
+
+    def test_missing_or_degenerate_is_zero(self):
+        self.assertEqual(halflife_to_score(None, 60), 0.0)
+        self.assertEqual(halflife_to_score(float('nan'), 60), 0.0)
+        self.assertEqual(halflife_to_score(2.0, 1.0), 0.0)     # log ceiling collapses
+
+    def test_monotonic_decreasing_in_halflife(self):
+        prev = 1.1
+        for hl in (1, 2, 3, 5, 10, 30):
+            s = halflife_to_score(hl, 60)
+            self.assertLess(s, prev)
+            prev = s
+
+    def test_restores_variance_across_low_cluster(self):
+        """The whole point of WS1: half-lives clustered at 1-5 days must NOT all
+        collapse to ~0.96 as the old linear map did — they must spread out."""
+        low = [halflife_to_score(hl, 60) for hl in (1, 2, 3, 4, 5)]
+        self.assertGreater(max(low) - min(low), 0.30)          # log spread
+        old_linear = [max(0.0, 1.0 - hl / 60) for hl in (1, 2, 3, 4, 5)]
+        self.assertLess(max(old_linear) - min(old_linear), 0.10)  # what we replaced
 
 
 class TestGetCorrelation(unittest.TestCase):
