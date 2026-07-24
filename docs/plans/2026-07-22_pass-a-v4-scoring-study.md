@@ -196,15 +196,19 @@ study deliberately does not tune.
 - **Validation (G-cost):** net-positive per fold, or a quantified residual gap that
   routes to H-C (entry magnitude) / sizing — *not* back into the scoring loop.
 
-### WS5 — Soft corr_short floor *(conditional; only if WS3 shows a linear weight can't express the threshold)*
+### WS5 — Soft corr_short floor *(conditional)* — **RESOLVED: NOT NEEDED (2026-07-23)**
 
-The Phase 2 signal is threshold-shaped (Q1 disastrous, Q2–Q5 flat) with an adverse
-median gradient, so a linear weight may over-rotate into low-median Q5. If WS3's best
-linear weights still can't cut Q1 cleanly, add a **deployment-safe nonlinear
-transform**: steep score penalty below a `corr_short` knee, flat above — pairs below
-the knee still deploy when they are the best available (no hard gate, no stranded
-capital). New tunable → register in `parameter_space.py` (correct tier) +
-`create_run()` settings + `normalize_weights`.
+Tested directly on the WS2 cache (no new data). A knee transform on `score_corr_short`
+strictly contains the linear case (knee=0 ≡ linear), yet with equal budget it scored
+**+54.7 vs the linear +56.4 (−1.7 bps)** and chose a large knee (0.627) that fits noise.
+Diagnostic under the best linear weights: only **11%** of top-K picks are in the bottom
+corr_short quintile (the linear `w_corr_short`≈0.21 already excludes them), and those
+are *not* the catastrophic drivers (+33 bps / 2 catastrophic vs the rest +64 / 27). The
+Phase 2 threshold-shape was a property of the *removal screen on entered pairs*; in the
+top-K *selection* framework the linear weight subsumes it. **Do not build the floor.**
+
+Caveat: verdict is on gross outcomes; if WS4's cost model materially reshapes the tail,
+re-check — but there is no current evidence for a floor.
 
 ## Dependency graph
 
