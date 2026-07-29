@@ -77,12 +77,12 @@ cluster now spreads 1.00→0.80 (was 0.98→0.96).
 
 ### WS2 — Scoring-quality replay harness + cache *(the core new build; medium)* — **DONE**
 
-**Implemented** as `tuning/scoring_replay.py`. Reconstructs the real candidate pool via
+**Implemented** as `tuning/studies/scoring_replay.py`. Reconstructs the real candidate pool via
 the strategy's own `TickerClusterer` at sampled dates (4/fold), scores with the real
 `StockEvaluator`, and computes the P&L-free forward gross outcome under the frozen exit.
 Look-ahead controls: position-based alignment to the last close ≤ T, hedge frozen
 pre-T, outcome from (T, T+40td] only. Dislocation-first gate (|z|≥2) keeps only
-tradeable pairs and skips ~90% of the ADF cost. Cache: `tuning/_scoring_cache/*.parquet`
+tradeable pairs and skips ~90% of the ADF cost. Cache: `tuning/studies/_scoring_cache/*.parquet`
 (gitignored; regenerable). **Built: 3,104 tradeable observations** (sideways 1,164 /
 bull 1,293 / mixed 647). `score_halflife` std 0.18 on this pool (WS1 variance confirmed
 at scale). Trailing log-returns stored per obs for WS3 corr re-windowing.
@@ -126,7 +126,7 @@ nor the outcome — this stays light.
 
 ### WS3 — The scoring-quality study *(depends on WS1 + WS2; small once cached)* — **DONE (first pass)**
 
-**Implemented** as `tuning/scoring_study.py` (Optuna, top-K mean forward gross with the
+**Implemented** as `tuning/studies/scoring_study.py` (Optuna, top-K mean forward gross with the
 0.5·mean + 0.5·min per-fold floor; corr windows tuned; corr recomputed per trial from
 cached returns).
 

@@ -24,9 +24,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from scoring_replay import CACHE_DIR, FOLDS, DEF_CORR_LONG, DEF_CORR_SHORT
+from tuning.studies.scoring_replay import CACHE_DIR, FOLDS, DEF_CORR_LONG, DEF_CORR_SHORT
 
 # z_depth is excluded: every tradeable pair is dislocated past the entry threshold, so
 # score_z_depth == 1.0 for all of them — a constant that cannot affect the ranking.

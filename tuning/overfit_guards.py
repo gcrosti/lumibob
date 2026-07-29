@@ -13,7 +13,7 @@ The root cause: evaluation happened at the level with few independent units (3 f
 instead of where the independent units actually are (hundreds of pairs).  These guards
 make each of those symptoms impossible to miss on a future study.
 
-Data contract (matches ``tuning/scoring_study.py`` / ``scoring_replay.py``): a pandas
+Data contract (matches ``tuning/studies/scoring_study.py`` / ``scoring_replay.py``): a pandas
 DataFrame with a group column (e.g. ``fold``), a set of component columns (e.g.
 ``COMPONENTS``), a ``forward_gross`` outcome column, and a ``date`` column.
 

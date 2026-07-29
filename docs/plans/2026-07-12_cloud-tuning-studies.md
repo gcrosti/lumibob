@@ -170,8 +170,8 @@ measure for that.
 
 ### Study 1 Pass A v4 — scoring quality (cache-based, ranking params only)
 
-Cache harness: `tuning/scoring_replay.py` (builds the full-pool observation cache) +
-`tuning/scoring_study.py` (Optuna over the cache). No backtests, no cloud fleet —
+Cache harness: `tuning/studies/scoring_replay.py` (builds the full-pool observation cache) +
+`tuning/studies/scoring_study.py` (Optuna over the cache). No backtests, no cloud fleet —
 runs in seconds locally. Plan: `docs/plans/2026-07-22_pass-a-v4-scoring-study.md`.
 
 | Setting | Value |

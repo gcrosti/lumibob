@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from DatabaseClient import DatabaseClient
 from StockEvaluator import StockEvaluator, halflife_to_score
