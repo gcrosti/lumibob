@@ -14,13 +14,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tuning'))
 
 from tuning.overfit_guards import (
+    WalkForwardWindow,
     all_null,
+    assert_causal,
     complexity_ratio,
     holdout_gap,
     null_baseline,
     report_panel,
     seed_stability,
     unit_level_signal,
+    walk_forward_splits,
 )
 
 
@@ -301,6 +304,83 @@ class TestReportPanel(unittest.TestCase):
         self.assertIn('GREEN', text)
         self.assertIn('PASS', text)
         self.assertNotIn('FAIL', text)
+
+
+class TestWalkForwardSplits(unittest.TestCase):
+    def test_valid_schedule_is_causal_and_ordered(self):
+        wins = walk_forward_splits('2022-01-01', '2023-01-01', train_span='120D',
+                                   eval_span='30D', embargo='5D')
+        self.assertGreater(len(wins), 0)
+        # assert_causal must accept the generated schedule (no raise).
+        assert_causal(wins, '5D')
+        for w in wins:
+            self.assertLess(w.train_start, w.train_end)          # train well-formed
+            self.assertLess(w.eval_start, w.eval_end)            # eval well-formed
+            self.assertGreater(w.eval_start, w.train_end)        # eval strictly after train
+            self.assertEqual(w.gap, pd.Timedelta('5D'))          # gap == embargo exactly
+
+    def test_default_step_gives_non_overlapping_eval_windows(self):
+        wins = walk_forward_splits('2022-01-01', '2024-01-01', train_span='180D',
+                                   eval_span='60D', embargo='10D')
+        self.assertGreater(len(wins), 1)
+        for a, b in zip(wins, wins[1:]):
+            # Default step == eval_span, so consecutive eval windows do not overlap.
+            self.assertGreaterEqual(b.eval_start, a.eval_end)
+
+    def test_eval_never_runs_past_end(self):
+        end = pd.Timestamp('2022-12-31')
+        wins = walk_forward_splits('2022-01-01', end, train_span='90D',
+                                   eval_span='30D', embargo='5D')
+        for w in wins:
+            self.assertLessEqual(w.eval_end, end)
+
+    def test_range_too_short_returns_empty(self):
+        wins = walk_forward_splits('2022-01-01', '2022-02-01', train_span='120D',
+                                   eval_span='30D', embargo='5D')
+        self.assertEqual(wins, [])
+
+    def test_eval_before_train_raises(self):
+        # Hand-built leaky window: eval sits BEFORE train (future→past leakage).
+        leaky = WalkForwardWindow(
+            train_start=pd.Timestamp('2022-06-01'), train_end=pd.Timestamp('2022-09-01'),
+            eval_start=pd.Timestamp('2022-03-01'), eval_end=pd.Timestamp('2022-04-01'))
+        with self.assertRaises(ValueError):
+            assert_causal([leaky], '5D')
+
+    def test_zero_gap_between_train_and_eval_raises(self):
+        # Eval abuts train with no embargo gap: must be rejected when an embargo is required.
+        abutting = WalkForwardWindow(
+            train_start=pd.Timestamp('2022-01-01'), train_end=pd.Timestamp('2022-04-01'),
+            eval_start=pd.Timestamp('2022-04-01'), eval_end=pd.Timestamp('2022-05-01'))
+        with self.assertRaises(ValueError):
+            assert_causal([abutting], '5D')
+
+    def test_zero_embargo_argument_raises(self):
+        good = WalkForwardWindow(
+            train_start=pd.Timestamp('2022-01-01'), train_end=pd.Timestamp('2022-04-01'),
+            eval_start=pd.Timestamp('2022-05-01'), eval_end=pd.Timestamp('2022-06-01'))
+        with self.assertRaises(ValueError):
+            assert_causal([good], '0D')                          # zero-embargo rejected
+        with self.assertRaises(ValueError):
+            walk_forward_splits('2022-01-01', '2023-01-01', train_span='120D',
+                                eval_span='30D', embargo='0D')
+
+    def test_gap_smaller_than_embargo_raises(self):
+        # 3-day actual gap, but 5-day embargo required.
+        tight = WalkForwardWindow(
+            train_start=pd.Timestamp('2022-01-01'), train_end=pd.Timestamp('2022-04-01'),
+            eval_start=pd.Timestamp('2022-04-04'), eval_end=pd.Timestamp('2022-05-01'))
+        with self.assertRaises(ValueError):
+            assert_causal([tight], '5D')
+        # ...but accepted when the required embargo is <= the actual gap.
+        assert_causal([tight], '3D')
+
+    def test_deterministic(self):
+        a = walk_forward_splits('2022-01-01', '2023-06-01', train_span='150D',
+                                eval_span='45D', embargo='7D')
+        b = walk_forward_splits('2022-01-01', '2023-06-01', train_span='150D',
+                                eval_span='45D', embargo='7D')
+        self.assertEqual([w.as_dict() for w in a], [w.as_dict() for w in b])
 
 
 if __name__ == '__main__':

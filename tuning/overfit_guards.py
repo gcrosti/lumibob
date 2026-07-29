@@ -23,6 +23,7 @@ Pearson so there is no scipy dependency.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -354,6 +355,128 @@ def complexity_ratio(n_free_params: int, n_independent_units: int) -> dict:
         'n_free_params': int(n_free_params),
         'n_independent_units': int(n_independent_units),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Temporal split — walk-forward with an embargo gap (causality guard)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class WalkForwardWindow:
+    """One (train, eval) split.  Eval is strictly after train + embargo (see below).
+
+    All four bounds are ``pd.Timestamp``; windows are half-open in spirit but stored as
+    explicit start/end so callers can slice inclusively or exclusively as they like.
+    """
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    eval_start: pd.Timestamp
+    eval_end: pd.Timestamp
+
+    @property
+    def gap(self) -> pd.Timedelta:
+        """Calendar gap between the end of train and the start of eval (the embargo)."""
+        return self.eval_start - self.train_end
+
+    def as_dict(self) -> dict:
+        return {
+            'train_start': self.train_start, 'train_end': self.train_end,
+            'eval_start': self.eval_start, 'eval_end': self.eval_end,
+        }
+
+
+def _to_ts(x) -> pd.Timestamp:
+    return x if isinstance(x, pd.Timestamp) else pd.Timestamp(x)
+
+
+def _to_td(x) -> pd.Timedelta:
+    return x if isinstance(x, pd.Timedelta) else pd.Timedelta(x)
+
+
+def assert_causal(windows: Sequence[WalkForwardWindow], embargo) -> None:
+    """Raise unless every eval window starts strictly after its train end + embargo.
+
+    This is the hard causality guard: in a temporal study the eval/test data must lie
+    strictly in the *future* of the train data, separated by a positive embargo gap so
+    that no leakage crosses the boundary (autocorrelation, overlapping forward-outcome
+    horizons, publication lag).  Leave-one-fold-out is NOT sufficient — it can place a
+    "held-out" fold chronologically *before* its training folds and leak future→past;
+    walk-forward + embargo makes that impossible.
+
+    Rejected cases (each raises ``ValueError``):
+      * ``embargo <= 0`` — a zero (or negative) embargo is not a gap;
+      * a degenerate window (``train_start >= train_end`` or ``eval_start >= eval_end``);
+      * ``eval_start < train_end + embargo`` — eval overlaps, abuts, or precedes train
+        (the "eval-before-train" and "zero-gap" failures).
+
+    Pure and deterministic; no I/O.
+    """
+    emb = _to_td(embargo)
+    if emb <= pd.Timedelta(0):
+        raise ValueError(f'embargo must be a positive gap, got {emb!r}')
+    for i, w in enumerate(windows):
+        if w.train_start >= w.train_end:
+            raise ValueError(f'window {i}: train_start {w.train_start} >= train_end {w.train_end}')
+        if w.eval_start >= w.eval_end:
+            raise ValueError(f'window {i}: eval_start {w.eval_start} >= eval_end {w.eval_end}')
+        required = w.train_end + emb
+        if w.eval_start < required:
+            raise ValueError(
+                f'window {i}: eval_start {w.eval_start} is not strictly after '
+                f'train_end {w.train_end} + embargo {emb} (= {required}); '
+                f'actual gap {w.gap} < embargo {emb} — causality/embargo violated')
+
+
+def walk_forward_splits(start, end, train_span, eval_span, embargo, step=None
+                        ) -> list[WalkForwardWindow]:
+    """Generate rolling walk-forward ``(train, eval)`` windows over ``[start, end]``.
+
+    Each window trains on ``[train_start, train_end]``, then — after a strictly positive
+    ``embargo`` gap — evaluates on ``[eval_start, eval_end]`` that lies entirely in the
+    future of train.  Windows roll forward by ``step`` (default ``eval_span`` → adjacent,
+    non-overlapping eval windows).  Generation stops once an eval window would run past
+    ``end``.
+
+    This is the temporal-split primitive scoring/backtest studies should use instead of
+    leave-one-fold-out: it guarantees the eval/test data is strictly after (and embargoed
+    from) the train data.  Every returned schedule is passed through :func:`assert_causal`
+    before return, so an invalid schedule can never escape this function.
+
+    Args:
+        start, end: overall date range (anything ``pd.Timestamp`` accepts).
+        train_span, eval_span, embargo, step: durations (anything ``pd.Timedelta``
+            accepts, e.g. ``'180D'`` or a ``pd.Timedelta``).  ``step`` defaults to
+            ``eval_span``.
+        embargo: strictly positive gap inserted between train_end and eval_start.
+
+    Returns:
+        A list of :class:`WalkForwardWindow` (possibly empty if the range is too short
+        to fit even one window).
+
+    Raises:
+        ValueError: if ``embargo <= 0`` or any generated window violates causality
+            (defensive — by construction they never should).
+    """
+    start_ts, end_ts = _to_ts(start), _to_ts(end)
+    train_td, eval_td, emb_td = _to_td(train_span), _to_td(eval_span), _to_td(embargo)
+    step_td = _to_td(step) if step is not None else eval_td
+    if emb_td <= pd.Timedelta(0):
+        raise ValueError(f'embargo must be a positive gap, got {emb_td!r}')
+    if step_td <= pd.Timedelta(0):
+        raise ValueError(f'step must be positive, got {step_td!r}')
+
+    windows: list[WalkForwardWindow] = []
+    train_start = start_ts
+    while True:
+        train_end = train_start + train_td
+        eval_start = train_end + emb_td
+        eval_end = eval_start + eval_td
+        if eval_end > end_ts:
+            break
+        windows.append(WalkForwardWindow(train_start, train_end, eval_start, eval_end))
+        train_start = train_start + step_td
+
+    assert_causal(windows, emb_td)  # defensive: never return a leaky schedule
+    return windows
 
 
 # --------------------------------------------------------------------------- #
