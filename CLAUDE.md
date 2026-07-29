@@ -250,7 +250,9 @@ For complex multi-step tasks, follow the relevant workflow:
 - **Backtesting a change** → backtest-agent workflow below
 - **Strategy deep dive / underperformance analysis** → deepdive-agent workflow below
 - **PR review** → pr-reviewer workflow below
+- **AWS cost audit / bill investigation** → cost-audit workflow below
 
 @.claude/skills/backtest-agent.md
 @.claude/skills/deepdive-agent.md
 @.claude/skills/pr-reviewer.md
+@.claude/skills/cost-audit.md
