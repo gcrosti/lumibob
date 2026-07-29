@@ -6,6 +6,18 @@
 > earlier backtest-objective framing of this plan — the study runs a scoring script,
 > not a backtest.
 
+> **⛔ OUTCOME — NO-GO (reweighting the composite is not a lever).** The study was built
+> and run (WS1–WS3 below). Under **out-of-fold validation at the live-faithful lookback
+> (152)** it does **not** rank dislocated pairs by forward P&L: pair-level
+> `Spearman(component, forward_gross)` ≈ 0 (well-powered, n 572–946/fold), top-K-by-score
+> ≈ random-K, held-out (leave-one-fold-out) objective **negative in all three folds**. The
+> initially-reported +52 / `w_corr_short`→0.2 was on a **non-live-faithful 400-day cache
+> without out-of-fold validation** and is **retracted as overfit** — it is the post-mortem
+> that produced `tuning/overfit_guards.py` and the `optuna-study` skill. This re-confirms
+> the deep dive: the composite is a good **filter**, a poor fine-grained **ranker**.
+> **WS1 (log half-life) stands as a valid standalone fix.** Success criteria and workstream
+> results below are kept for the record but must be read through this verdict.
+
 ## Problem
 
 The composite score's weights are **noise-selected**. The old Pass A objective was
@@ -124,37 +136,42 @@ nor the outcome — this stays light.
 - **Validation:** the cached matrix reproduces the Phase 2 numbers (catastrophic
   counts, quintile table) when scored with the gate-run weights **and windows**.
 
-### WS3 — The scoring-quality study *(depends on WS1 + WS2; small once cached)* — **DONE (first pass)**
+### WS3 — The scoring-quality study *(depends on WS1 + WS2)* — **DONE — NO-GO**
 
 **Implemented** as `tuning/studies/scoring_study.py` (Optuna, top-K mean forward gross with the
 0.5·mean + 0.5·min per-fold floor; corr windows tuned; corr recomputed per trial from
 cached returns).
 
-**Result (2026-07-23, 300 trials):**
+**Verdict: NO-GO — reweighting the composite does not generalize.** At the live-faithful
+lookback (152) with **out-of-fold validation** the composite does **not** rank dislocated
+pairs by forward P&L: pair-level `Spearman(component, forward_gross)` ≈ 0 (well-powered, n
+**572–946/fold**), top-K-by-score is **indistinguishable from random-K**, and the
+leave-one-fold-out held-out objective is **negative in all three folds**. Composite
+reweighting is **not a lever**; this re-confirms the deep dive — the composite is a good
+**filter**, a poor fine-grained **ranker**. WS4/WS5 downstream of the reweight are moot.
+**WS1 (log half-life) stands as a valid standalone fix.**
+
+**Retracted in-sample result (2026-07-23, 300 trials — do NOT use):** the first pass was run
+on a **non-live-faithful 400-day cache without out-of-fold validation**, and reported an
+in-sample lift that did not survive the guard panel:
 
 | | objective | corr_long | **corr_short** | coint | halflife | per-fold (side/bull/mixed) |
 |---|---|---|---|---|---|---|
 | Baseline (gate weights) | +36.7 | 0.19 | **0.002** | 0.41 | 0.41 | +39 / +33 / +49 |
-| Best trial | **+52.2** | 0.32 | **0.187** | 0.38 | 0.11 | +55 / +73 / +46 |
+| Best trial *(retracted — overfit)* | **+52.2** | 0.32 | **0.187** | 0.38 | 0.11 | +55 / +73 / +46 |
 
-- **G1 (power) — met.** The objective resolves weights (best +52 vs baseline +37, all
-  folds positive), unlike the old noise gate (p>0.1 on 4 of 5 weights).
-- **G2 (tail+edge) — met.** Top-K mean gross positive in every fold, materially above
-  baseline.
-- **G3 (weight by signal) — met, with nuance.** `w_corr_short` rises from 0.002 to
-  **~0.1–0.23** (seed-dependent: 0.09 / 0.21 / 0.23; always ≫ 0.002). The exact value
-  isn't pinned because corr_short/corr_long are 0.73-collinear (a ridge) — the robust
-  statement is *correlation quality is badly underweighted by the noise gate*. Half-life,
-  freed to vary by WS1, earns **~0.11** (vs its noise-selected 0.41) — confirming Phase 2
-  that it does not discriminate.
-- **G-window — partial.** `corr_short_window` lands consistently low (~14–19);
-  `corr_long_window` is not pinned (115–205). Windows need the fuller sensitivity pass.
+The apparent G1/G2/G3 "wins" (objective resolves weights, `w_corr_short`→~0.2, top-K
+positive per fold) were **artifacts of the non-live-faithful cache and the absence of
+held-out validation**; under OOF at the live lookback they vanish (held-out negative in all
+three folds). This is the exact failure — a great in-sample number that is pure
+overfitting — that motivated the guard panel in `tuning/overfit_guards.py`. **Do not treat
+the +52 or the `w_corr_short`→0.2 reweight as a result.**
 
-**Caveats (honest):** metric is **gross** (costs = WS4); pool sampled at 4 dates/fold
-(not daily); forward outcome uses the frozen exit; `z_depth` excluded as inert among
-tradeable pairs (all dislocated → constant — its *live* weight is untouched). Not yet a
-persistent Optuna study in the DB (`study1_pass_a_v4`) — this is a standalone harness
-run; promoting it to the shared study store is the remaining WS3 productionization.
+**Why the original run misled:** metric was **gross** (costs deferred to WS4); the 400-day
+cache was **not live-faithful** (live scoring uses lookback 152 → the +2 window dims fit
+data the live path never sees); pool sampled at 4 dates/fold; `z_depth` excluded as inert
+among tradeable pairs. The decisive defect was the **absence of out-of-fold validation** —
+add the guard panel and the optimum is exposed as noise.
 
 
 Optuna optimizes the composite **weights and the two predictor windows**
@@ -196,7 +213,13 @@ study deliberately does not tune.
 - **Validation (G-cost):** net-positive per fold, or a quantified residual gap that
   routes to H-C (entry magnitude) / sizing — *not* back into the scoring loop.
 
-### WS5 — Soft corr_short floor *(conditional)* — **RESOLVED: NOT NEEDED (2026-07-23)**
+### WS5 — Soft corr_short floor *(conditional)* — **MOOT under the NO-GO** (was "NOT NEEDED, 2026-07-23")
+
+> Superseded by the WS3 NO-GO: since composite reweighting does not generalize, there is no
+> `w_corr_short` lever for a floor to refine. The analysis below ran on the **same retracted
+> non-live-faithful cache**, so its `+54.7 / +56.4` figures are not live-faithful either.
+> Its conclusion (*do not build the floor*) still holds — now for the stronger reason that
+> the whole reweighting question is closed.
 
 Tested directly on the WS2 cache (no new data). A knee transform on `score_corr_short`
 strictly contains the linear case (knee=0 ≡ linear), yet with equal budget it scored
