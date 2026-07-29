@@ -48,7 +48,7 @@ def load_cache() -> pd.DataFrame:
     return df[df.forward_gross.notna()].reset_index(drop=True)
 
 
-def _corr_at(ret_lead, ret_lag, window) -> tuple[float, float]:
+def _corr_at(ret_lead, ret_lag, window) -> float:
     """corr over the trailing `window` returns (score = clip to [0,1] happens later)."""
     n = min(len(ret_lead), len(ret_lag))
     if n < window:
