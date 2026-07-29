@@ -125,18 +125,21 @@ def _score_pair(px: pd.DataFrame, lead: str, lag: str, T: pd.Timestamp,
     # --- Forward outcome (only (T, T+HORIZON]), hedge frozen on pre-T ---
     forward_gross = np.nan
     try:
+        # DB get_prices can return NUMERIC as decimal.Decimal; np.log on Decimal raises
+        # TypeError. Cast to float first (matching StockEvaluator's price handling), and
+        # keep TypeError in the guard below as a belt-and-braces net.
         hedge = float(np.polyfit(
-            np.log(pre[lead].clip(lower=1e-9)).to_numpy(),
-            np.log(pre[lag].clip(lower=1e-9)).to_numpy(), 1)[0])
-        spread = (np.log(both[lag].clip(lower=1e-9))
-                  - hedge * np.log(both[lead].clip(lower=1e-9)))
+            np.log(pre[lead].astype(float).clip(lower=1e-9)).to_numpy(),
+            np.log(pre[lag].astype(float).clip(lower=1e-9)).to_numpy(), 1)[0])
+        spread = (np.log(both[lag].astype(float).clip(lower=1e-9))
+                  - hedge * np.log(both[lead].astype(float).clip(lower=1e-9)))
         zc = (spread - spread.rolling(ZSCORE_WINDOW).mean()) / spread.rolling(ZSCORE_WINDOW).std()
         z0_signed = zc.iloc[pos]
         spread_fwd = spread.iloc[pos:pos + HORIZON + 1].to_numpy()
         z_fwd = zc.iloc[pos:pos + HORIZON + 1].abs().to_numpy()
         if len(spread_fwd) >= 2 and np.isfinite(z_fwd[0]) and np.isfinite(z0_signed):
             forward_gross = _forward_gross(spread_fwd, z_fwd, z0_signed, hedge)
-    except (np.linalg.LinAlgError, ValueError, KeyError):
+    except (np.linalg.LinAlgError, ValueError, KeyError, TypeError):
         forward_gross = np.nan
 
     return dict(
