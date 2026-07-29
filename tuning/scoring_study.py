@@ -115,7 +115,9 @@ def run_study(df: pd.DataFrame, n_trials: int = 200, seed: int = 42):
         return _wcache[key]
 
     def objective(trial):
-        cl_w = trial.suggest_int('corr_long_window', 45, 252)
+        # corr_long capped at ~100: lookback_window=152 cal (~105 td) bounds the
+        # available returns, matching live scoring (scoring_replay.MAX_CORR_LONG).
+        cl_w = trial.suggest_int('corr_long_window', 45, 100)
         cs_w = trial.suggest_int('corr_short_window', 10, min(60, cl_w))
         params = {w: trial.suggest_float(w, 0.0, 1.0) for w in _WEIGHTS}
         d = windowed(cl_w, cs_w)

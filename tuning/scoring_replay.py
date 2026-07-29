@@ -43,9 +43,11 @@ EXIT_Z = 0.5                # frozen: take-profit convention for the forward out
 COINT_CEIL = 0.20           # fixed normalisation constant (not tunable)
 MAX_HALFLIFE = 60.0         # log-ceiling for halflife_to_score (WS1)
 HORIZON = 40                # forward trading days for the outcome
-MAX_CORR_LONG = 252         # widest corr_long_window WS3 may request -> returns to cache
+LOOKBACK_WINDOW = 152       # frozen: component window in CAL days (matches live
+                            # start_date = end_date - lookback_window); ~105 td
+MAX_CORR_LONG = 100         # widest corr_long_window (bounded by LOOKBACK_WINDOW) -> returns cached
 
-LOOKBACK_CAL = 400          # calendar days of pre-T history (>=252 td for corr_long + warmup)
+LOOKBACK_CAL = 400          # calendar days of pre-T history to FETCH (bounded to LOOKBACK_WINDOW in-code)
 HORIZON_CAL = 70            # calendar days after T to cover HORIZON trading days
 
 # Default corr windows (gate values) — used for the baseline column; WS3 re-windows.
@@ -86,11 +88,16 @@ def _score_pair(px: pd.DataFrame, lead: str, lag: str, T: pd.Timestamp,
     both = px[[lead, lag]].dropna()
     if both.empty:
         return None
-    # Align to the last trading day <= T (index is stamped at 05:00, not midnight).
+    # Align to the last trading day <= T (index is stamped at 05:00, not midnight),
+    # and bound the component window to lookback_window (matches live scoring, which
+    # feeds coint/half-life/corr/z a series of exactly lookback_window days).
     pos = int(both.index.searchsorted(T, side='right')) - 1
-    if pos < ZSCORE_WINDOW + MAX_CORR_LONG // 4:
+    if pos < 0:
         return None
-    pre = both.iloc[:pos + 1]
+    lo = int(both.index.searchsorted(T - timedelta(days=LOOKBACK_WINDOW), side='left'))
+    pre = both.iloc[lo:pos + 1]
+    if len(pre) < ZSCORE_WINDOW + 15:
+        return None
     lead_pre, lag_pre = pre[lead], pre[lag]
 
     # --- Dislocation gate FIRST (cheap): only tradeable pairs are kept/scored ---
