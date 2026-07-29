@@ -342,6 +342,57 @@ SPY-beating is *not* required here — that gate belongs to paper trading.
 
 ---
 
+## Overfitting gates
+
+Mandatory for **every** tuning study before any result is declared or committed.
+These exist because Pass A v4 reported a great in-sample objective (+52) that was pure
+overfitting: it optimized 6 params against an objective aggregated over only **3 regime
+folds**, when the independent units were the hundreds of scored *pairs*. Leave-one-fold-out
+held-out scores were negative, top-K-by-score was no better than random, the raw
+components had ~0 rank-correlation with the outcome at the pair level, and the winning
+weights swung wildly across seeds. Deterministic, reusable guards live in
+`tuning/overfit_guards.py` (pure, seeded, no DB) with tests in
+`tests/test_overfit_guards.py`.
+
+**(a) Declare the independent evaluation unit up front.** Before tuning, state — in the
+study spec — what the independent unit is (for a scoring-quality study it is the scored
+*pair-observation*, not the fold, not the date). Evaluate signal at that level. Report
+the a-priori design check `complexity_ratio(n_free_params, n_independent_units)`: **red**
+(free ≥ units) is a hard stop, **amber** (< 3× units per param) means expect fragile
+optima. Pass A v4 was red (6 params / 3 folds); at the pair level it is green.
+
+**(b) Run the guard panel; report held-out, never in-sample best.** Every study's
+write-up quotes the leave-one-unit-group-out held-out number from `holdout_gap`, not the
+best in-sample objective. Use `report_panel(...)` for the compact red/green summary. A
+result is not "done" because the in-sample optimum looks good.
+
+**(c) Unit-level signal is the MANDATORY FIRST gate.** Run
+`unit_level_signal(df, component_cols, outcome_col, group_col)` and its `all_null(...)`
+convenience **before tuning anything**. If every raw component's bootstrap CI includes 0
+in every group (`all_null` is True), no weighting can rank the outcome — **stop**, and
+fix the components or the outcome definition before spending compute on weights. This is
+the check that would have killed Pass A v4 on day one.
+
+**(d) Null-baseline, held-out-gap, and seed-stability checks (default thresholds).**
+
+| Guard | Function | Default pass threshold |
+|---|---|---|
+| Null baseline | `null_baseline(...)` | real selection ≥ **90th percentile** of the random-k and outcome-shuffled nulls (z ≳ 2); a score near the 50th percentile is no better than random |
+| Held-out gap | `holdout_gap(...)` | `mean_holdout` **> 0** and the train−holdout gap ≤ its magnitude; a negative held-out with a large positive gap is textbook overfitting |
+| Seed stability | `seed_stability(...)` | winning params' across-seed **range within ~20% of their search span**; flag any key exceeding the threshold. Wildly swinging weights ⇒ a noise-dominated objective |
+
+**(e) Fragility smell-test.** Re-run the winning config under a reasonable data
+perturbation — drop one fold/date, jitter the sampled dates, or re-seed the study. If the
+selected config flips (weights reorder, a param moves across its range), treat it as
+**fragile**: do not commit it, and prefer the simpler/lower-complexity configuration.
+`seed_stability` mechanizes the re-seed variant; the fold-drop variant is `holdout_gap`
+read qualitatively (does the winner change per held-out fold?).
+
+Do not declare a study's gate passed, and do not feed its output downstream, until the
+panel is green (or ambers are explicitly justified in the ledger).
+
+---
+
 ## Cloud execution
 
 Operational steps (launching instances, security groups, tunnels) live in
