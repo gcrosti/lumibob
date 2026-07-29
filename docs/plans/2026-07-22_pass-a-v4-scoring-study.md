@@ -6,17 +6,33 @@
 > earlier backtest-objective framing of this plan — the study runs a scoring script,
 > not a backtest.
 
-> **⛔ OUTCOME — NO-GO (reweighting the composite is not a lever).** The study was built
-> and run (WS1–WS3 below). Under **out-of-fold validation at the live-faithful lookback
-> (152)** it does **not** rank dislocated pairs by forward P&L: pair-level
-> `Spearman(component, forward_gross)` ≈ 0 (well-powered, n 572–946/fold), top-K-by-score
-> ≈ random-K, held-out (leave-one-fold-out) objective **negative in all three folds**. The
-> initially-reported +52 / `w_corr_short`→0.2 was on a **non-live-faithful 400-day cache
-> without out-of-fold validation** and is **retracted as overfit** — it is the post-mortem
-> that produced `tuning/overfit_guards.py` and the `optuna-study` skill. This re-confirms
-> the deep dive: the composite is a good **filter**, a poor fine-grained **ranker**.
-> **WS1 (log half-life) stands as a valid standalone fix.** Success criteria and workstream
-> results below are kept for the record but must be read through this verdict.
+> **OUTCOME — reweighting is a risk/variance lever, not a mean-edge lever (hard NO-GO
+> retracted).** The study was built and run (WS1–WS3 below). The weight-*optimization* pass
+> did not manufacture generalizing mean edge, and the initially-reported +52 /
+> `w_corr_short`→0.2 was on a **non-live-faithful 400-day cache without out-of-fold
+> validation** — **retracted as overfit** (the post-mortem that produced
+> `tuning/overfit_guards.py` and the `optuna-study` skill). But the follow-up
+> **optimization-free** re-analysis (marginal Spearman of each raw component vs forward gross
+> P&L, swept over lookbacks {100–300} and corr windows, per fold — no weights fit, no
+> selection) corrects the earlier hard "score is not a ranker" framing:
+> - **Correlation quality carries real signal about the SHAPE of the outcome, not the mean.**
+>   As correlation rises, win *frequency* is flat (~72%), win *size* falls (monotonic within
+>   every fold), and disaster rate falls (directional). **Correlation is a variance/tail dial,
+>   not an edge dial** — the composite already weights it positively, toward tail safety.
+> - **coint and half-life do not rank the outcome at any lookback (100–300)** — ≈0 Spearman
+>   throughout. Confirmed dead weight for ranking (this part of the NO-GO stands).
+> - The **mean** P&L effect of correlation is ambiguous/noisy per fold (smaller-wins penalty
+>   ≈ fewer-disasters benefit); reweighting reshapes the distribution (lower variance, thinner
+>   tail), it does not robustly create mean edge. The mean edge must still come from tail
+>   management (position sizing) and cost economics (H-C/H-D), not reweighting.
+> - **Descriptive, not OOS-tradeable** — characterized in-sample on 3 correlated regime folds
+>   with survivorship bias (current, not point-in-time, universe) and non-independent pairs;
+>   acting on it needs a walk-forward pass + a point-in-time universe.
+>
+> **WS1 (log half-life) stands as a valid standalone fix.** Full write-up:
+> `docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md` (Update 2026-07-29 —
+> "hard NO-GO retracted"). Success criteria and workstream results below are kept for the
+> record but must be read through this verdict.
 
 ## Problem
 
@@ -136,20 +152,39 @@ nor the outcome — this stays light.
 - **Validation:** the cached matrix reproduces the Phase 2 numbers (catastrophic
   counts, quintile table) when scored with the gate-run weights **and windows**.
 
-### WS3 — The scoring-quality study *(depends on WS1 + WS2)* — **DONE — NO-GO**
+### WS3 — The scoring-quality study *(depends on WS1 + WS2)* — **DONE — reweight = risk lever, not edge lever**
 
 **Implemented** as `tuning/studies/scoring_study.py` (Optuna, top-K mean forward gross with the
 0.5·mean + 0.5·min per-fold floor; corr windows tuned; corr recomputed per trial from
 cached returns).
 
-**Verdict: NO-GO — reweighting the composite does not generalize.** At the live-faithful
-lookback (152) with **out-of-fold validation** the composite does **not** rank dislocated
-pairs by forward P&L: pair-level `Spearman(component, forward_gross)` ≈ 0 (well-powered, n
-**572–946/fold**), top-K-by-score is **indistinguishable from random-K**, and the
-leave-one-fold-out held-out objective is **negative in all three folds**. Composite
-reweighting is **not a lever**; this re-confirms the deep dive — the composite is a good
-**filter**, a poor fine-grained **ranker**. WS4/WS5 downstream of the reweight are moot.
-**WS1 (log half-life) stands as a valid standalone fix.**
+**Verdict: reweighting is a risk/variance lever, not a mean-edge lever (the earlier hard
+"score is not a ranker" NO-GO is retracted).** The weight-*optimization* pass did not
+manufacture generalizing mean edge, and its headline +52 was overfit (see the retracted table
+below). But an **optimization-free** re-analysis — marginal Spearman of each raw component vs
+forward gross P&L, swept over lookbacks {100,150,200,250,300} and corr windows, per fold (no
+weights fit, no selection) — reads the components correctly:
+
+- **Correlation quality is a real signal about the SHAPE of the outcome, not the mean.** As
+  correlation rises: win *frequency* flat (~72%), win *size* falls (monotonic within every
+  fold — robust), disaster rate falls (directional). **Correlation is a variance/tail dial,
+  not an edge dial**; the composite already weights it positively (toward tail safety).
+- **coint and half-life do not rank the outcome at any lookback (100–300)** — ≈0 Spearman
+  throughout. Confirmed dead weight *for ranking* (this part of the original NO-GO stands).
+- **The mean (tradeable P&L) effect of correlation is ambiguous/noisy per fold** — the
+  smaller-wins penalty and the fewer-disasters benefit roughly offset; which wins depends on
+  fold/window. Reweighting toward correlation does **not** robustly manufacture mean edge; it
+  reshapes the distribution (lower variance, thinner tail). The mean edge must still come from
+  tail management (position sizing) and cost economics (H-C/H-D), not reweighting.
+- **Descriptive, not OOS-tradeable** — characterized in-sample on 3 correlated regime folds,
+  with survivorship bias (current, not point-in-time, universe) and non-independent pairs
+  (bootstrap CIs too narrow); acting on it needs a walk-forward pass + a point-in-time
+  universe.
+
+Full write-up: `docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md` (Update
+2026-07-29 — "hard NO-GO retracted"). WS4/WS5 (a post-*reweight* cost backtest and a soft
+floor) are moot for the reweight-for-mean-edge question. **WS1 (log half-life) stands as a
+valid standalone fix.**
 
 **Retracted in-sample result (2026-07-23, 300 trials — do NOT use):** the first pass was run
 on a **non-live-faithful 400-day cache without out-of-fold validation**, and reported an
@@ -213,13 +248,14 @@ study deliberately does not tune.
 - **Validation (G-cost):** net-positive per fold, or a quantified residual gap that
   routes to H-C (entry magnitude) / sizing — *not* back into the scoring loop.
 
-### WS5 — Soft corr_short floor *(conditional)* — **MOOT under the NO-GO** (was "NOT NEEDED, 2026-07-23")
+### WS5 — Soft corr_short floor *(conditional)* — **MOOT** (was "NOT NEEDED, 2026-07-23")
 
-> Superseded by the WS3 NO-GO: since composite reweighting does not generalize, there is no
-> `w_corr_short` lever for a floor to refine. The analysis below ran on the **same retracted
-> non-live-faithful cache**, so its `+54.7 / +56.4` figures are not live-faithful either.
-> Its conclusion (*do not build the floor*) still holds — now for the stronger reason that
-> the whole reweighting question is closed.
+> Superseded by the WS3 verdict: reweighting is a risk/variance lever, not a mean-edge lever,
+> so there is no `w_corr_short` mean-edge lever for a floor to refine. The analysis below ran
+> on the **same retracted non-live-faithful cache**, so its `+54.7 / +56.4` figures are not
+> live-faithful either. Its conclusion (*do not build the floor*) still holds — now for the
+> stronger reason that the reweight-for-mean-edge question is closed (correlation reshapes the
+> tail; it is not a knob that manufactures mean edge).
 
 Tested directly on the WS2 cache (no new data). A knee transform on `score_corr_short`
 strictly contains the linear case (knee=0 ≡ linear), yet with equal budget it scored
