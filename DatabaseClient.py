@@ -446,11 +446,14 @@ class DatabaseClient:
                 (symbol, cik, accession, form, items, filed_at, source)
             VALUES %s
             ON CONFLICT (symbol, accession) DO NOTHING
+            RETURNING 1
         """
         with self._conn() as conn:
             cur = conn.cursor()
-            psycopg2.extras.execute_values(cur, sql, rows)
-            return cur.rowcount
+            # fetch=True collects RETURNING rows across all execute_values
+            # pages; cur.rowcount alone would only reflect the last page.
+            inserted = psycopg2.extras.execute_values(cur, sql, rows, fetch=True)
+            return len(inserted)
 
     def get_filing_events(
         self,
@@ -525,11 +528,14 @@ class DatabaseClient:
             VALUES %s
             ON CONFLICT (symbol, day) DO UPDATE
                 SET nav = EXCLUDED.nav, source = EXCLUDED.source
+            RETURNING 1
         """
         with self._conn() as conn:
             cur = conn.cursor()
-            psycopg2.extras.execute_values(cur, sql, rows)
-            return cur.rowcount
+            # fetch=True collects RETURNING rows across all execute_values
+            # pages; cur.rowcount alone would only reflect the last page.
+            written = psycopg2.extras.execute_values(cur, sql, rows, fetch=True)
+            return len(written)
 
     def get_nav_prices(self, symbols: list[str], start, end) -> pd.DataFrame:
         """Daily NAVs for *symbols* in [start, end] as [symbol, day, nav]."""
