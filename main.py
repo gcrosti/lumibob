@@ -84,8 +84,9 @@ if __name__ == '__main__':
     else:
         from lumibot.backtesting import YahooDataBacktesting
 
-        backtesting_start = datetime(2024, 1, 2)
-        backtesting_end = datetime(2024, 3, 26)
+        # WS1 smoke test: 2-week window inside price-cache coverage.
+        backtesting_start = datetime(2024, 3, 4)
+        backtesting_end = datetime(2024, 3, 18)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,

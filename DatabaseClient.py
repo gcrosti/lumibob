@@ -393,6 +393,96 @@ class DatabaseClient:
         with self._conn() as conn:
             psycopg2.extras.execute_values(conn.cursor(), sql, rows)
 
+    def migrate_filing_events(self) -> None:
+        """
+        Idempotent migration: create the filing_events table (plan WS2a).
+
+        One row per (symbol, filing).  ``filed_at`` is the EDGAR acceptance
+        timestamp — the moment the event became public knowledge — so studies
+        and the live veto stay point-in-time honest.  ``form`` is the SEC form
+        ('8-K', '8-K/A', ...) or the synthetic 'EARNINGS_SCHEDULED' for
+        forward-calendar rows; ``items`` holds comma-separated 8-K item codes.
+        """
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS filing_events (
+                symbol      VARCHAR(20)  NOT NULL,
+                cik         BIGINT,
+                accession   VARCHAR(30)  NOT NULL,
+                form        VARCHAR(25)  NOT NULL,
+                items       TEXT,
+                filed_at    TIMESTAMPTZ  NOT NULL,
+                source      VARCHAR(20)  NOT NULL DEFAULT 'edgar',
+                fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (symbol, accession)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_filing_events_symbol_time
+                ON filing_events (symbol, filed_at)
+            """,
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
+    def upsert_filing_events(self, records: list[dict]) -> int:
+        """
+        Insert filing events, ignoring rows already present.  Each record:
+            symbol, cik (int | None), accession, form, items (str | None),
+            filed_at (tz-aware datetime), source (default 'edgar').
+        Returns the number of rows actually inserted.
+        """
+        if not records:
+            return 0
+        rows = [
+            (r['symbol'], r.get('cik'), r['accession'], r['form'],
+             r.get('items'), r['filed_at'], r.get('source', 'edgar'))
+            for r in records
+        ]
+        sql = """
+            INSERT INTO filing_events
+                (symbol, cik, accession, form, items, filed_at, source)
+            VALUES %s
+            ON CONFLICT (symbol, accession) DO NOTHING
+        """
+        with self._conn() as conn:
+            cur = conn.cursor()
+            psycopg2.extras.execute_values(cur, sql, rows)
+            return cur.rowcount
+
+    def get_filing_events(
+        self,
+        symbols: list[str],
+        start,
+        end,
+        forms: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Filing events for *symbols* with ``filed_at`` in [start, end], oldest
+        first, as a DataFrame [symbol, form, items, filed_at, source].
+        ``forms`` optionally restricts to specific form types.
+        """
+        cols = ['symbol', 'form', 'items', 'filed_at', 'source']
+        if not symbols:
+            return pd.DataFrame(columns=cols)
+        sql = """
+            SELECT symbol, form, items, filed_at, source
+            FROM   filing_events
+            WHERE  symbol = ANY(%s) AND filed_at >= %s AND filed_at <= %s
+        """
+        params: list = [symbols, start, end]
+        if forms:
+            sql += ' AND form = ANY(%s)'
+            params.append(forms)
+        sql += ' ORDER BY filed_at'
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+
     def upsert_sec_metadata(self, records: list[dict]) -> None:
         """
         Insert or update ticker metadata from SEC EDGAR SIC data.
