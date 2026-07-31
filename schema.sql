@@ -274,3 +274,18 @@ CREATE TABLE IF NOT EXISTS filing_events (
 
 CREATE INDEX IF NOT EXISTS idx_filing_events_symbol_time
     ON filing_events (symbol, filed_at);
+
+-- ---------------------------------------------------------------------------
+-- Closed-end fund NAVs (plan WS3a: discount z-score feature)
+-- ---------------------------------------------------------------------------
+
+-- Daily CEF NAVs keyed by the fund's trading symbol.  Fetched via the free
+-- Nasdaq mirror symbols (X<ticker>X); day-T NAV is struck after the close and
+-- is usable at day T+1's decision point.
+CREATE TABLE IF NOT EXISTS nav_prices (
+    symbol   VARCHAR(20)  NOT NULL,
+    day      DATE         NOT NULL,
+    nav      NUMERIC      NOT NULL,
+    source   VARCHAR(20)  NOT NULL DEFAULT 'nasdaq_mirror',
+    PRIMARY KEY (symbol, day)
+);

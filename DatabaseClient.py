@@ -483,6 +483,71 @@ class DatabaseClient:
                 rows = cur.fetchall()
         return pd.DataFrame(rows, columns=cols)
 
+    def migrate_nav_prices(self) -> None:
+        """
+        Idempotent migration: create the nav_prices table (plan WS3a).
+
+        Daily closed-end-fund NAVs, keyed by the *fund's* trading symbol (the
+        Nasdaq X<ticker>X mirror symbol used to fetch is an implementation
+        detail).  Day-T NAV is struck after the close: treat it as usable at
+        day T+1's decision point.
+        """
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS nav_prices (
+                symbol   VARCHAR(20)  NOT NULL,
+                day      DATE         NOT NULL,
+                nav      NUMERIC      NOT NULL,
+                source   VARCHAR(20)  NOT NULL DEFAULT 'nasdaq_mirror',
+                PRIMARY KEY (symbol, day)
+            )
+            """,
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
+    def upsert_nav_prices(self, records: list[dict]) -> int:
+        """
+        Insert daily NAV rows, replacing values on conflict (mirror feeds
+        occasionally restate).  Each record: symbol, day (date), nav (float),
+        source (default 'nasdaq_mirror').  Returns rows written.
+        """
+        if not records:
+            return 0
+        rows = [
+            (r['symbol'], r['day'], r['nav'], r.get('source', 'nasdaq_mirror'))
+            for r in records
+        ]
+        sql = """
+            INSERT INTO nav_prices (symbol, day, nav, source)
+            VALUES %s
+            ON CONFLICT (symbol, day) DO UPDATE
+                SET nav = EXCLUDED.nav, source = EXCLUDED.source
+        """
+        with self._conn() as conn:
+            cur = conn.cursor()
+            psycopg2.extras.execute_values(cur, sql, rows)
+            return cur.rowcount
+
+    def get_nav_prices(self, symbols: list[str], start, end) -> pd.DataFrame:
+        """Daily NAVs for *symbols* in [start, end] as [symbol, day, nav]."""
+        cols = ['symbol', 'day', 'nav']
+        if not symbols:
+            return pd.DataFrame(columns=cols)
+        sql = """
+            SELECT symbol, day, nav
+            FROM   nav_prices
+            WHERE  symbol = ANY(%s) AND day >= %s AND day <= %s
+            ORDER BY symbol, day
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (symbols, start, end))
+                rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+
     def upsert_sec_metadata(self, records: list[dict]) -> None:
         """
         Insert or update ticker metadata from SEC EDGAR SIC data.
