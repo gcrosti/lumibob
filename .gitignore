@@ -39,3 +39,6 @@ notebooks/.virtual_documents/
 
 # Pass A v4 scoring-study cache (regenerable via tuning/studies/scoring_replay.py)
 tuning/studies/_scoring_cache/
+
+# Study 2 event-retro cache (regenerable via tuning/studies/study2_event_retro/)
+tuning/studies/study2_event_retro/_event_cache/
