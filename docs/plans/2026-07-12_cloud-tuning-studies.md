@@ -68,7 +68,8 @@ Do not proceed past a failed gate without a root-cause investigation.
 | Study 00 — cloud pipe check | `cloud_smoke_v1` | **Done** (2026-07-14) | **Passed** — after catching and fixing a run-attribution bug: under concurrent workers, `_find_run_id`'s most-recent-run heuristic scored the same run for two trials. Fixed via `tuning_trial_token` in `backtest_runs.settings` (branch `feat/study1-pass-b`); rerun verified 3 workers → 3 distinct correctly-matched runs. Also required opening postgres on the DB instance to the VPC subnet (listen_addresses + pg_hba scoped to lumibob/172.31.0.0/16). Measured c6i.4xlarge trial times: 31–95 min per 5-month fold (median ~43). |
 | Study 1 Pass A v2 | `study1_pass_a_v2` | **Invalid — do not use** (2026-07-14) | Fleet of 12 workers launched 16:01 UTC; at 16:17 one worker's mass Alpaca fetch failure wrote 4,607 false `failed_tickers` rows, and the global blocklist in `BobsBrain.initialize()` then emptied the universe of every subsequent run: 89 of 100 trials completed degenerate (0 pairs scanned, 0 trades, penalty scores) and the gate's "FAIL 0/3" ran on 0-trade backtests. 11 healthy trials (best 0.2061) are salvageable. Poison rows deleted 2026-07-15 (backup kept); root causes fixed in `fix/failed-ticker-poisoning`. |
 | Study 1 Pass A v3 | `study1_pass_a_v3` | **Done** (2026-07-17) — **GATE FAILED** | 97 healthy completed trials (11 seeded + 86 new; 0 failed/pruned, all runs with real fills — incident fixes verified). Best value 0.2061 (a *seeded* v2 trial; 86 new trials did not beat it). Gate re-ran best params on all 3 folds with full backtests: rho = **−0.040 (sideways), −0.111 (bull), −0.046 (mixed)** — 0/3 pass, not borderline. Per sequencing: **do not run Pass B**; investigate score structure first. Note: the best trial's own fold re-run produced negative rho vs its positive in-sample score — in-sample rho estimates may be noise-dominated. Trial times ~54 min avg on c6a.4xlarge with `price_cache_only` (vs ~100 min v2). Ran on spot (reclaimed 2026-07-15 after 10 trials) then on-demand to completion. |
-| Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) — **blocked** | Blocked with Studies 2/3 by the 2026-07-17 deepdive (see below). |
+| Study 1 Pass A v4 | cache harness (`tuning/studies/scoring_replay.py` + `scoring_study.py`) | **Done — reweight = risk lever, not edge lever** | Cache-based P&L-free scoring-quality study. **Reweighting the composite is a risk/variance lever, not a mean-edge lever** (the earlier hard "not a ranker / NO-GO" framing is retracted). An optimization-free re-analysis (marginal Spearman of each raw component vs forward gross P&L, swept over lookbacks 100–300 and corr windows, per fold): **correlation quality carries real signal about the SHAPE of the outcome** — as correlation rises, win frequency is flat (~72%), win size falls (monotonic within every fold), disaster rate falls; correlation is a **variance/tail dial, not an edge dial**. **coint and half-life do NOT rank the outcome at any lookback (100–300)** — ≈0 Spearman throughout (confirmed dead weight for ranking). The **mean** effect of correlation is ambiguous/noisy per fold (smaller-wins ≈ fewer-disasters); reweighting reshapes the distribution, it does not robustly manufacture mean edge — that must come from position sizing + cost economics. The earlier +52 / `w_corr_short`→0.2 result was on a **non-live-faithful 400-day cache without out-of-fold validation — retracted as overfit** (the post-mortem behind `tuning/overfit_guards.py`). Descriptive, not OOS-tradeable: 3 correlated regime folds, survivorship bias (current not point-in-time universe), non-independent pairs — acting on it needs a walk-forward pass + a point-in-time universe. **WS1 (log half-life) stands as a valid standalone fix.** Full write-up: `docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md` (Update 2026-07-29 — "hard NO-GO retracted"); full spec below; plan: `docs/plans/2026-07-22_pass-a-v4-scoring-study.md`. |
+| Study 1 Pass B | `study1_pass_b_v1` | Script ready (PR #46) — **re-scoped, blocked** | Now absorbs the params the cache can't optimize (`zscore_window`, `cooldown_days`, `lookback_window`) on top of its discovery/sizing set. Still blocked on the WS4 cost model + a sound post-cost objective. See below. |
 | Study 2 — per-regime Tier 3 | `study2_<regime>_v1` (one per regime) | **Blocked — structural NO-GO** | |
 | Study 3 — dense walk-forward | `study3_v1` | **Blocked — structural NO-GO** | |
 
@@ -91,6 +92,44 @@ Do not proceed past a failed gate without a root-cause investigation.
 > objective (H-A). Exit-mechanics work is closed. See the deepdive's Update
 > section.
 
+> **Restructure (2026-07-23) — Pass A becomes a cache-based scoring-quality
+> study; two-study split.** The 2026-07-22 investigation (deepdive Update
+> 2026-07-22; plan `2026-07-22_pass-a-v4-scoring-study.md`) showed the old Pass A
+> objective was **70% noise**: it was indifferent to 4 of 5 weights, so the
+> "best" weights were a lucky draw (40% on a dead half-life component, 0.2% on
+> `corr_short`). Pass A is rebuilt as a **P&L-free scoring-quality study** that
+> scores the *full* candidate pool (removing the range restriction that crushed
+> the old gate) and optimizes for a **tail-sensitive top-K forward-P&L metric**
+> (below) — no backtests, seconds per trial. This cleanly optimizes only the
+> **ranking** params (composite weights + `corr_long/short_window`).
+>
+> The params the cache **cannot** judge move to a **re-scoped Pass B** (backtest):
+> `zscore_window` (defines the outcome → target leakage if tuned on the cache),
+> `cooldown_days` (discovery timing, no per-pair scoring effect), and
+> `lookback_window` (a cache-build dimension — bounds the component window). This
+> collapses the earlier "1b" idea into Pass B: everything a backtest must judge
+> lives in one backtest study, co-tuned so their interactions are captured. The
+> two studies are coupled (Pass A's cache is built at a fixed
+> `zscore_window`/`lookback`; a material Pass B change there means refreshing the
+> Pass A cache — coordinate descent). WS1 (log half-life) and the WS2/WS3 harness
+> are done; WS4 cost model + Pass B objective redesign remain.
+>
+> **Conclusion (Pass A v4 = reweight is a risk lever, not an edge lever):** the WS3 scoring
+> study ran; the weight-*optimization* pass produced an overfit +52 that is **retracted**
+> (non-live-faithful 400-day cache, no OOF — the post-mortem behind the guard panel). But an
+> **optimization-free** re-analysis (marginal Spearman of each raw component vs forward gross
+> P&L, swept over lookbacks 100–300 and corr windows, per fold) corrects the earlier hard
+> "not a ranker" framing: **correlation quality carries real, tail-shaping signal** — as
+> correlation rises, win frequency is flat, win size falls (monotonic within every fold),
+> disasters fall; it is a **variance/tail dial, not a mean-edge dial**. **coint and half-life
+> do not rank the outcome at any lookback (100–300)** — confirmed dead weight for ranking.
+> Reweighting reshapes the distribution (lower variance, thinner tail); the mean edge must
+> come from position sizing + cost economics, not reweighting. Descriptive, not OOS-tradeable
+> (3 correlated folds, survivorship bias, non-independent pairs → needs a walk-forward pass +
+> a point-in-time universe to act on). See the ledger row and the v4 spec; full write-up:
+> `docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md` (Update 2026-07-29 —
+> "hard NO-GO retracted"). **WS1 stands as a valid standalone fix.**
+
 ---
 
 ## Objective functions
@@ -98,7 +137,29 @@ Do not proceed past a failed gate without a root-cause investigation.
 Two objectives, both implemented in `tuning/objective.py` via
 `discriminatory_weight`:
 
-**Blended discriminatory** (`discriminatory_weight=0.7`) — Study 1 Pass A only:
+**Scoring-quality** — Study 1 Pass A **v4** (cache harness). Computed on the full-pool
+replay cache, no backtest. **NOTE: the weight-*optimization* pass over this objective did not
+manufacture generalizing mean edge and its headline +52 was overfit (retracted).** The signal
+that *does* exist was found optimization-free, not by this objective: correlation quality is a
+tail/variance dial (real signal about the outcome's shape, not its mean), while coint/half-life
+do not rank the outcome at any lookback. So reweighting is a risk lever, not a mean-edge lever
+(see the ledger row and the v4 spec below). Documented here as the objective that was *tried*,
+not one that succeeded:
+
+```
+fold_metric = mean over the fold's scoring dates of
+              [ mean forward_gross of the top-K (K=20) pairs by composite score ]
+objective   = 0.5 · mean_over_folds(fold_metric) + 0.5 · min_over_folds(fold_metric)
+```
+
+Tail-sensitive by construction: it is a *mean* (not a rank correlation) over the
+*top-K selection*, so a catastrophic pair the weights admit to the top-20 directly
+craters that fold. The `0.5·min` term is the per-fold floor (LORO discipline). The
+in-sample number looked good but did **not** survive out-of-fold validation — the failure
+that motivated `tuning/overfit_guards.py`.
+
+**Blended discriminatory** (`discriminatory_weight=0.7`) — **superseded for Pass A**
+(kept for historical reference; the old v1–v3 runs used it):
 
 ```
 score = 0.7 × Spearman_rho(composite_score_at_entry, round_trip_pnl)
@@ -108,11 +169,10 @@ subject to: mean(round_trip_pnl) > pnl_floor (−100)
             n_round_trips ≥ 10
 ```
 
-Pure Sharpe conflates score quality with regime luck — a well-discriminating
-score in a losing regime gets discarded even when it ranks pairs exactly
-right. Pass A's question is score quality, so the objective must measure
-discrimination directly. The 0.3 Sharpe term and the P&L floor keep the
-optimizer from rewarding a perfectly-ranked set of uniformly losing pairs.
+The intent was to measure discrimination directly, but the `Spearman_rho` term was
+≈ 0 (range-restricted to entered pairs, n 30–60, se 0.13–0.19), so 70% of the
+objective was noise and the weights it selected were arbitrary. The v4 scoring
+objective fixes this by scoring the full pool P&L-free.
 
 **Pure Sharpe** (`discriminatory_weight=0.0`) — everything else:
 
@@ -128,7 +188,55 @@ measure for that.
 
 ## Study specifications
 
-### Study 1 Pass A v2 — signal construction (timescales + weights)
+### Study 1 Pass A v4 — scoring quality (cache-based, ranking params only)
+
+Cache harness: `tuning/studies/scoring_replay.py` (builds the full-pool observation cache) +
+`tuning/studies/scoring_study.py` (Optuna over the cache). No backtests, no cloud fleet —
+runs in seconds locally. Plan: `docs/plans/2026-07-22_pass-a-v4-scoring-study.md`.
+
+| Setting | Value |
+|---|---|
+| Free params (ranking only) | `w_corr_long`, `w_corr_short`, `w_coint`, `w_halflife`, `corr_long_window`, `corr_short_window`. (`w_z_depth` excluded — `z_depth`=1 for all tradeable pairs, inert here; its live weight is untouched.) |
+| Frozen (outcome contract) | `zscore_window`, exit rule, hedge/coint lookback, `COINT_CEIL`, `MAX_HALFLIFE` — tuning any would leak into the target. `lookback_window` frozen at the live value (bounds the component window; caps `corr_long_window`). |
+| Pool | Full candidate pool reconstructed via the strategy's own clusterer at 4 sampled dates/fold (clustering params fixed) |
+| Outcome | Per-pair **gross forward spread P&L** under the frozen exit, dislocated (`|z|≥2`) pairs only |
+| Folds | Same three 5-month windows as v2 |
+| Objective | Scoring-quality (above) |
+
+**Half-life fix (WS1, done):** `score_halflife` was a near-constant 0.96 (linear
+`1 - hl/60` over 1–3 day half-lives) → replaced by a log-spaced `halflife_to_score`
+so it varies. Without this, no weight over half-life is interpretable.
+
+**Outcome — reweighting is a risk/variance lever, not a mean-edge lever (hard NO-GO
+retracted).** The weight-*optimization* pass over this cache did not manufacture generalizing
+mean edge, and its initial +37→+52 in-sample number was produced on a **non-live-faithful
+400-day cache without out-of-fold validation** — under the guard panel
+(`tuning/overfit_guards.py`) at the live-faithful lookback (152) it collapses, so the +52 /
+`w_corr_short`→0.2 is **retracted as overfit** (the post-mortem behind the guard panel). But a
+follow-up **optimization-free** re-analysis (marginal Spearman of each raw component vs forward
+gross P&L, swept over lookbacks 100–300 and corr windows, per fold — no weights fit, no
+selection) corrects the earlier hard "not a ranker" framing:
+
+- **Correlation quality carries real signal about the SHAPE of the outcome, not the mean** —
+  as correlation rises, win frequency is flat (~72%), win size falls (monotonic within every
+  fold), disaster rate falls. Correlation is a **variance/tail dial, not an edge dial**; the
+  composite already weights it positively (toward tail safety).
+- **coint and half-life do not rank the outcome at any lookback (100–300)** — ≈0 Spearman
+  throughout (confirmed dead weight for ranking).
+- The **mean** effect of correlation is ambiguous/noisy per fold (smaller-wins ≈
+  fewer-disasters); reweighting reshapes the distribution, it does not robustly manufacture
+  mean edge, which must come from position sizing + cost economics.
+- Descriptive, not OOS-tradeable — 3 correlated regime folds, survivorship bias (current not
+  point-in-time universe), non-independent pairs → needs a walk-forward pass + a point-in-time
+  universe to act on.
+
+WS4/WS5 downstream of the reweight-for-mean-edge idea are moot; WS5 (soft floor) was
+separately tested on the cache and **rejected**. **WS1 (log half-life) stands as a valid
+standalone fix.** Full write-up:
+`docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability.md` (Update 2026-07-29 —
+"hard NO-GO retracted").
+
+### Study 1 Pass A v2 — signal construction (timescales + weights)  *(superseded by v4)*
 
 Everything below is already implemented in `tuning/studies/study1_pass_a.py`.
 
@@ -151,18 +259,32 @@ structure is broken.
 ### Study 1 Pass B — discovery + portfolio construction
 
 Implemented in `tuning/studies/study1_pass_b.py` — same fold-rotating
-pattern as Pass A, same three 5-month folds (identical windows so Pass A's
-best params transfer cleanly). Base params are loaded from the completed
-Pass A study in Optuna storage at startup (fails loudly if Pass A has no
-completed trials).
+pattern as Pass A, same three 5-month folds. Because **Pass A v4 showed reweighting is a
+risk/variance lever, not a mean-edge lever** (correlation reshapes the tail but does not
+robustly manufacture mean edge; coint/half-life don't rank at all), Pass B **keeps the
+composite weights + corr windows at their existing live defaults** — the score's *filter*
+role is intact, correlation is already weighted positively toward tail safety, and there is
+no tuned "Pass A v4 result" that adds generalizing mean edge to load.
+
+**Re-scoped (2026-07-23):** Pass B now also absorbs the three params the cache
+study cannot judge — `zscore_window`, `cooldown_days`, `lookback_window` — on top
+of its discovery/sizing set. These are backtest-only (they define the outcome,
+entry timing, and component window respectively); co-tuning them with sizing in one
+backtest captures their interactions. This collapses the interim "1b" idea into
+Pass B.
 
 | Setting | Value |
 |---|---|
-| Free params (8, `PASS_B_PARAMS`) | `hdbscan_min_samples` [1, 5], `hdbscan_cluster_selection_epsilon` [0, 0.5], `min_intra_cluster_corr` [0.1, 0.6], `cluster_recompute_days` [14, 90], `max_daily_candidates` [50, 300], `target_deployed_pct` [0.4, 0.9], `max_k` [5, 50], `max_halflife_days` [20, 120] — note `hdbscan_min_cluster_size` is excluded: Tier 1, computed dynamically at runtime |
-| Fixed params | Pass A best-trial signal params (weights re-normalised) + Tier 1/Tier 3 defaults |
+| Free params (signal) | `zscore_window`, `lookback_window` — moved from old Pass A |
+| Free params (discovery/timing) | `cooldown_days` (moved from old Pass A), `max_daily_candidates` [50, 300], `cluster_recompute_days` [14, 90], `hdbscan_min_samples` [1, 5], `hdbscan_cluster_selection_epsilon` [0, 0.5], `min_intra_cluster_corr` [0.1, 0.6] |
+| Free params (sizing) | `target_deployed_pct` [0.4, 0.9], `max_k` [5, 50], `max_halflife_days` [20, 120] |
+| Fixed params | Composite ranking weights + corr windows at live defaults (Pass A v4: reweight is a risk lever, not a mean-edge lever — no retuned set adds generalizing edge); Tier 1/Tier 3 defaults |
 | Folds | Same three 5-month folds as Pass A |
-| Trials | 75 (~25/fold) — 8 free params want a little more than the plan's original 60 |
-| Objective | Pure Sharpe |
+| Objective | **Post-cost** Sharpe/expectancy — **NOT** the old blended rho (needs the WS4 cost model + a redesign that avoids the noise-objective trap) |
+
+**Blocked on:** the WS4 cost model and the objective redesign above. **Coupling:** if
+Pass B's tuned `zscore_window`/`lookback_window` move materially from the values the
+Pass A cache was built at, rebuild the Pass A cache and re-run it (coordinate descent).
 
 **Gate:** none — output feeds Study 2 as `base_params`.
 
@@ -264,6 +386,16 @@ old "warm up 2024–2025 prices first" precondition is already satisfied.
 
 **Gate:** positive Sharpe on the 2025 holdout in ≥ 3 of 4 quarters.
 SPY-beating is *not* required here — that gate belongs to paper trading.
+
+---
+
+## Overfitting gates
+
+Moved to the **`optuna-study` skill** (`.claude/skills/optuna-study.md` /
+`.cursor/skills/optuna-study/SKILL.md`), now the single source of truth for the
+anti-overfitting methodology, the guard panel, the default thresholds, and the
+pre-launch checklist. Mandatory for **every** tuning study before any result is
+declared or committed.
 
 ---
 

@@ -13,6 +13,29 @@ class SpreadScores(NamedTuple):
     halflife_days: float | None  # AR(1) half-life in trading days; None if non-stationary
 
 
+def halflife_to_score(halflife_days: float | None, max_halflife_days: float) -> float:
+    """Map an AR(1) half-life (trading days) to a [0, 1] mean-reversion score.
+
+    Log-spaced rather than linear.  Predicted half-lives cluster tightly at the
+    low end (~1-3 days), and the old ``1 - hl / ceiling`` map collapsed that
+    whole cluster to ~0.96 — a near-constant component with no discriminatory
+    power (see docs/deepdives/2026-07-17_pass-a-score-signal-and-exploitability).
+    In log space a 1-day half-life scores 1.0, ``max_halflife_days`` scores 0.0,
+    and the dense low-half-life region is spread across the range so the
+    component actually varies pair-to-pair.
+
+    Returns 0.0 for missing / non-finite / non-stationary half-lives, and for a
+    degenerate ceiling (<= 1 day, where the log denominator collapses).
+    """
+    if halflife_days is None or not np.isfinite(halflife_days):
+        return 0.0
+    ceil_log = np.log(float(max_halflife_days))
+    if ceil_log <= 0.0:
+        return 0.0
+    hl = min(max(float(halflife_days), 1.0), float(max_halflife_days))
+    return float(np.clip((ceil_log - np.log(hl)) / ceil_log, 0.0, 1.0))
+
+
 class StockEvaluator:
     """
     Evaluates the relationship between two stocks
@@ -262,7 +285,7 @@ class StockEvaluator:
 
             halflife_days = float(-np.log(2) / np.log(abs_rho))
             halflife_days = max(1.0, min(halflife_days, 252.0))
-            halflife_score = max(0.0, 1.0 - halflife_days / max_halflife_days)
+            halflife_score = halflife_to_score(halflife_days, max_halflife_days)
 
             return SpreadScores(coint_score, halflife_score, p_value, halflife_days)
 

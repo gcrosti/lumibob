@@ -36,3 +36,6 @@ pairs/
 # IDE / Anaconda environment artefacts
 anaconda_projects/
 notebooks/.virtual_documents/
+
+# Pass A v4 scoring-study cache (regenerable via tuning/studies/scoring_replay.py)
+tuning/studies/_scoring_cache/
