@@ -97,3 +97,36 @@ addressable with any filing or NAV data, and falls to position sizing.
 - Single-stock leveraged ETFs (AAPB/AAPU→AAPL, FBL→META) were mapped to their
   underlying's earnings; other derivative structures (preferreds, baby bonds)
   were not classified.
+
+## Addendum 2026-07-31 — EDGAR item-group dry run and NAV sanity anchor
+
+With the WS2a `filing_events` pipeline in place, the item groups preregistered
+for Study E1 were dry-run on the same 175 entered pairs
+(`edgar_event_analysis.py`; window = hold + 7 days pre-entry):
+
+| group | catastrophic rate | rest rate | odds ratio | p |
+|---|---|---|---|---|
+| results (2.02) | 43% | 4% | 16.5 | 0.0001 |
+| exec_change (5.02) | 29% | 2% | 15.7 | 0.0015 |
+| guidance (7.01) | 14% | 3% | 5.2 | 0.10 |
+| foreign (any 6-K) | 7% | 2% | 4.1 | 0.29 |
+| deals (1.01/2.01) | 0% | 1% | — | 1.0 |
+| restatement (4.02) | 0% | 0% | no variation | — |
+
+With item-coded filings, **all 7 stock-legged disasters fire on
+results-or-foreign** (RGLD via its interim 2.02; SHEL/E via Eni's 6-K).
+`exec_change` is not independent signal — every disaster firing it also fires
+`results` (compensation 5.02s cluster in results season). Deals and
+restatements are unobservable at n = 14; the replay-pool E1 is where they get
+a real base rate. Foreign-issuer caveat: EDGAR 6-K timing can lag the actual
+announcement (Eni's 2023-02-22 results appear as a 2023-03-02 6-K), so the
+scheduled-earnings calendar is the primary live source for foreign legs.
+
+**NAV sanity anchor (Study N1 preview, small-n):** with mirror-symbol NAVs
+backfilled for 20 CEFs, the 18 fund pairs with a covered leg (2 catastrophic)
+show *lower* mean |discount z| at entry for disasters (0.28) than for
+survivors (1.13). Consistent with the mechanism being a discount dislocation
+*during* the hold (VKQ/VMO entered at a normal discount before the Oct-2023
+rate spike), not a stretched discount at entry. Preliminary and partially
+covered — but it leans toward N1's stop clause: entry-time discount z may not
+be the right framing, and the fund tail may belong to position sizing.
