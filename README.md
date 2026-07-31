@@ -142,11 +142,9 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `w_corr_long` | Composite weight on long correlation | `0.3` |
 | `w_corr_short` | Composite weight on short correlation | `0.5` |
 | `w_z_depth` | Composite weight on Z-score depth | `0.2` |
-| `w_coint` | Composite weight on cointegration quality (ADF p-value) | `0.25` |
-| `w_halflife` | Composite weight on mean-reversion speed (AR(1) half-life) | `0.15` |
-| `max_halflife_days` | Half-life ceiling for scoring; pairs at or above this score 0 | `60` |
+| `max_halflife_days` | Half-life ceiling for the persisted `score_halflife` observability column | `60` |
 
-All five `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
+The composite is these three components only. Cointegration and half-life were removed from the score as dead weight for ranking (PR #50 / Pass A v4); their per-pair component scores (`score_coint`, `score_halflife`) and inputs (`coint_pvalue`, `halflife_days`) are still computed and persisted for post-hoc analysis. All `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
 
 ### Discovery
 

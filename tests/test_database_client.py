@@ -360,26 +360,24 @@ class TestPairs:
             "score_corr_long": 0.85, "score_corr_short": 0.76,
             "score_z_depth": 0.60,
             "score_coint": 0.90, "score_halflife": 0.50,
-            "w_corr_long": 0.2143, "w_corr_short": 0.3571,
-            "w_z_depth": 0.1429, "w_coint": 0.1786, "w_halflife": 0.1071,
+            "w_corr_long": 0.3, "w_corr_short": 0.5, "w_z_depth": 0.2,
         }
         client.save_pair(pair, "run01")
 
         _sql, params = mock_cur.execute.call_args[0]
         # composite_score is the 17th param (index 16)
         assert params[16] == 0.72
-        # component scores follow at indices 17–21
+        # component scores follow at indices 17–21 (coint/halflife persisted
+        # for observability even though no longer in the composite)
         assert params[17] == 0.85   # score_corr_long
         assert params[18] == 0.76   # score_corr_short
         assert params[19] == 0.60   # score_z_depth
         assert params[20] == 0.90   # score_coint
         assert params[21] == 0.50   # score_halflife
-        # weights at indices 22–26
-        assert params[22] == 0.2143  # w_corr_long
-        assert params[23] == 0.3571  # w_corr_short
-        assert params[24] == 0.1429  # w_z_depth
-        assert params[25] == 0.1786  # w_coint
-        assert params[26] == 0.1071  # w_halflife
+        # weights at indices 22–24 (w_coint/w_halflife no longer written)
+        assert params[22] == 0.3    # w_corr_long
+        assert params[23] == 0.5    # w_corr_short
+        assert params[24] == 0.2    # w_z_depth
 
     def test_save_pair_score_components_default_to_none(self):
         """Score columns are NULL when not provided — legacy callers stay compatible."""
@@ -391,7 +389,7 @@ class TestPairs:
 
         _sql, params = mock_cur.execute.call_args[0]
         # composite_score and all component/weight params should be None
-        for idx in range(16, 27):
+        for idx in range(16, 25):
             assert params[idx] is None, f"param[{idx}] expected None, got {params[idx]}"
 
     def test_migrate_pairs_score_components_adds_all_columns(self):

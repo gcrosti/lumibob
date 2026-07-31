@@ -148,12 +148,11 @@ class TestDefaults:
 
 
 class TestNormalizeWeights:
-    _weight_names = {'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife'}
+    _weight_names = {'w_corr_long', 'w_corr_short', 'w_z_depth'}
 
     def test_weights_sum_to_one(self):
         params = {
             'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4,
-            'w_coint': 0.3, 'w_halflife': 0.2,
         }
         result = normalize_weights(params)
         total = sum(result[w] for w in self._weight_names)
@@ -161,12 +160,25 @@ class TestNormalizeWeights:
 
     def test_already_normalized_unchanged(self):
         params = {
-            'w_corr_long': 0.2, 'w_corr_short': 0.4, 'w_z_depth': 0.2,
-            'w_coint': 0.1, 'w_halflife': 0.1,
+            'w_corr_long': 0.3, 'w_corr_short': 0.5, 'w_z_depth': 0.2,
         }
         result = normalize_weights(params)
         for k, v in params.items():
             assert abs(result[k] - v) < 1e-9
+
+    def test_legacy_coint_halflife_keys_pass_through(self):
+        """Pre-PR#50 param dicts still carry w_coint/w_halflife; they are no
+        longer weight names, so they pass through untouched while the live
+        weights normalise among themselves."""
+        params = {
+            'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4,
+            'w_coint': 0.3, 'w_halflife': 0.2,
+        }
+        result = normalize_weights(params)
+        total = sum(result[w] for w in self._weight_names)
+        assert abs(total - 1.0) < 1e-9
+        assert result['w_coint'] == 0.3
+        assert result['w_halflife'] == 0.2
 
     def test_does_not_mutate_original(self):
         original = {'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4}
@@ -212,7 +224,6 @@ class TestSuggest:
         result = suggest(trial, tiers=(2,))
         total = (
             result['w_corr_long'] + result['w_corr_short'] + result['w_z_depth']
-            + result['w_coint'] + result['w_halflife']
         )
         assert abs(total - 1.0) < 1e-9
 

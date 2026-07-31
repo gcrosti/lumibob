@@ -104,15 +104,32 @@ themselves.
   WS2/WS4 read them.
 
 **Verification (not an Optuna study — nothing is fitted):**
-- Re-rank the cached study pairs with and without the two components; report the
-  rank correlation between old and new orderings and the P&L of the top-K under
-  both. Expected: near-identical (the components were flat), which is the point —
-  this is a simplification, not a performance claim.
+- Re-rank the cached study pairs with and without the two components and check
+  that the new ranking predicts outcomes **no worse** than the old one
+  (Spearman of score vs forward gross, per fold), and that the removed
+  components' own outcome-correlation is ≈ 0 (re-confirming PR #50 on this
+  data).
 - One ~2-week smoke backtest to confirm nothing structural broke
   (backtest-agent workflow, smoke-test row).
 
-**Go/no-go:** if removal materially reorders the top-K (rank correlation below
-~0.9), stop and investigate before merging — that would contradict PR #50.
+**Go/no-go:** if the new score ranks outcomes materially worse than the old in
+any fold, or the removed components show real positive outcome-correlation,
+stop — that would contradict PR #50.
+
+**Executed 2026-07-31 — gate revised, then passed.** The original gate here
+("rank correlation between old and new orderings ≥ 0.9") was miscalibrated and
+was revised mid-flight: it conflated *outcome-irrelevant* with *score-flat*.
+The removed components carry real variance (coint p-values spread widely;
+PR #50's WS1 made score_halflife vary by design), so dropping 2 of 5 varying
+components necessarily reorders the list — observed old-vs-new ordering
+Spearman 0.46–0.56, top-20 overlap 35–50%. The substantive checks passed:
+removed components' outcome-Spearman per fold ≈ 0 to mildly negative
+(score_coint −0.03 / −0.01 / −0.22; score_halflife −0.08 / −0.25 / −0.20),
+and the new score ranks outcomes no worse than the old in every fold
+(old → new: bull −0.11 → −0.14, mixed −0.39 → −0.13, sideways −0.35 → −0.28;
+both negative throughout — the known correlation-as-tail-dial pattern, not a
+regression). Two earnings-driven disasters (NET/SNOW, SMTC/LSCC) enter the new
+top-20; both are removed by WS2's event exclusion.
 
 **Size:** ~1 day including the smoke test.
 

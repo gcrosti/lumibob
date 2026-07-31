@@ -301,7 +301,9 @@ class DatabaseClient:
             score_coint                  -- normalised cointegration component
             score_halflife               -- normalised half-life component
             w_corr_long/short/z_depth    -- weights active at discovery time
-            w_coint / w_halflife         -- weights active at discovery time
+            w_coint / w_halflife         -- legacy: no longer written (removed
+                                            from the composite, PR #50); kept
+                                            so historical rows stay queryable
         """
         columns = [
             ("composite_score",  "DOUBLE PRECISION"),
@@ -449,10 +451,10 @@ class DatabaseClient:
                  composite_score,
                  score_corr_long, score_corr_short, score_z_depth,
                  score_coint, score_halflife,
-                 w_corr_long, w_corr_short, w_z_depth, w_coint, w_halflife,
+                 w_corr_long, w_corr_short, w_z_depth,
                  discovered_at, last_updated, active)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -497,7 +499,6 @@ class DatabaseClient:
                     _f("score_corr_long"), _f("score_corr_short"), _f("score_z_depth"),
                     _f("score_coint"), _f("score_halflife"),
                     _f("w_corr_long"), _f("w_corr_short"), _f("w_z_depth"),
-                    _f("w_coint"), _f("w_halflife"),
                     today,
                     today,
                 ))

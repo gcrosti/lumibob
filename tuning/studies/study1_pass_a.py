@@ -116,13 +116,16 @@ GATE_FOLDS: list[tuple[str, date, date]] = [
 _GATE_RHO_THRESHOLD = 0.15
 _GATE_MIN_PASSING_FOLDS = 2
 
-# The 10 signal-construction params this study frees (see module docstring).
+# The signal-construction params this study frees (see module docstring).
 # Tier 2 also contains discovery/sizing params (max_k, target_deployed_pct,
 # max_daily_candidates, HDBSCAN params, ...) — those stay at defaults here
 # and are optimized in Pass B on top of this study's output.
+# w_coint / w_halflife were removed from the parameter space with the composite
+# score cleanup (PR #50) — any re-run of this study frees 8 params, not the
+# original 10, and per the optuna-study skill would need a version bump.
 PASS_A_PARAMS = frozenset({
     'lookback_window', 'zscore_window', 'cooldown_days',
-    'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife',
+    'w_corr_long', 'w_corr_short', 'w_z_depth',
     'corr_long_window', 'corr_short_window',
 })
 
