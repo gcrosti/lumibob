@@ -28,7 +28,7 @@ main.py
       └── TickerClusterer              correlation-distance HDBSCAN, sector pre-partition
 
 tuning/
-  parameter_space.py   26 tunable parameters across 3 tiers; suggest() for Optuna
+  parameter_space.py   28 tunable parameters across 3 tiers; suggest() for Optuna
   objective.py         BacktestObjective — Optuna callable; Sharpe-based scoring
   walk_forward.py      WalkForward fold generator (train + holdout windows)
   regime_detector.py   Market regime classifier (calm_bull / vol_shock / sideways / trend_bull)
@@ -37,10 +37,15 @@ tuning/
     tier2_slow.py       Phase 1 proof study (Tier 2, single window)
     phase3_battery.py   Phase 3 five-regime battery vs baseline
     phase4_coarse.py    Phase 4 regime-conditioned Tier 3 tuning (12-fold walk-forward)
+    scoring_replay.py   Pass A v4 full-pool observation cache (P&L-free scoring replay)
+    scoring_study.py    Optuna study over the scoring-replay cache
+    study2_event_retro/ Earnings/filing events vs catastrophic losses (2026-07-31 deepdive)
 
 scripts/
   prewarm_cache.py          Pre-warm stock_prices for historical regime windows
   refresh_ticker_metadata.py  Re-fetch SEC EDGAR SIC metadata for all universe tickers
+  backfill_filing_events.py Backfill/refresh item-coded 8-K/6-K filings from SEC EDGAR
+  backfill_nav_prices.py    Backfill daily CEF NAVs via Nasdaq X-mirror symbols
   after_battery.sh          Post-battery summary and artefact archiving
   watch_and_cutover.sh      Cut over active_parameters when gate criterion is met
 
@@ -57,6 +62,7 @@ migrations/
 | `AlpacaClient.py` | Thin wrapper around `alpaca-py` for assets and OHLCV |
 | `DatabaseClient.py` | All PostgreSQL access — tickers, prices, metadata, pairs, runs, trades, snapshots |
 | `StockDataCache.py` | Read-through cache: DB first, Alpaca for gaps (with exponential-backoff retry) |
+| `EdgarClient.py` | SEC EDGAR: ticker→CIK map, item-coded filing histories (fair-access rate-limited) |
 | `StockEvaluator.py` | `get_correlation_dual`, Z-score spread and depth, legacy cointegration/correlation helpers |
 | `TickerClusterer.py` | Correlation-distance HDBSCAN with sector pre-partition and sanity gate |
 | `PairSimulator.py` | Optional offline pair simulation / grid search (not wired into current discovery) |

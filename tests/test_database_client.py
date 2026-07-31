@@ -789,3 +789,106 @@ class TestCointegrationCache:
         result = client.load_coint_cache(date(2022, 2, 1), 130)
 
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# filing_events (plan WS2a)
+# ---------------------------------------------------------------------------
+
+class TestFilingEvents:
+    def test_migrate_creates_table_and_index(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_filing_events()
+
+        all_sql = " ".join(c[0][0] for c in mock_cur.execute.call_args_list)
+        assert "CREATE TABLE IF NOT EXISTS filing_events" in all_sql
+        assert "idx_filing_events_symbol_time" in all_sql
+
+    def test_upsert_maps_records_and_counts_returning_rows(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool)
+        filed = datetime(2023, 10, 11, 13, 0, 14)
+        records = [dict(symbol="RGLD", cik=85535, accession="0001-23-1",
+                        form="8-K", items="2.02,7.01", filed_at=filed)]
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            mock_ev.return_value = [(1,)]
+            n = client.upsert_filing_events(records)
+
+        assert n == 1
+        sql = mock_ev.call_args[0][1]
+        assert "ON CONFLICT (symbol, accession) DO NOTHING" in sql
+        assert "RETURNING" in sql
+        assert mock_ev.call_args[0][2] == [
+            ("RGLD", 85535, "0001-23-1", "8-K", "2.02,7.01", filed, "edgar")
+        ]
+        assert mock_ev.call_args[1].get("fetch") is True
+
+    def test_upsert_empty_returns_zero_without_touching_db(self):
+        client, mock_pool = _make_client()
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            assert client.upsert_filing_events([]) == 0
+        mock_ev.assert_not_called()
+
+    def test_get_returns_dataframe_and_applies_forms_filter(self):
+        client, mock_pool = _make_client()
+        filed = datetime(2023, 10, 11, 13, 0, 14)
+        _, mock_cur = _mock_conn(
+            mock_pool, fetchall_return=[("RGLD", "8-K", "2.02", filed, "edgar")])
+
+        df = client.get_filing_events(
+            ["RGLD"], date(2023, 9, 1), date(2023, 11, 1), forms=["8-K"])
+
+        assert list(df.columns) == ["symbol", "form", "items", "filed_at", "source"]
+        assert df.symbol.tolist() == ["RGLD"]
+        sql, params = mock_cur.execute.call_args[0]
+        assert "form = ANY(%s)" in sql
+        assert params[-1] == ["8-K"]
+
+    def test_get_empty_symbols_returns_empty_frame(self):
+        client, _ = _make_client()
+        df = client.get_filing_events([], date(2023, 1, 1), date(2023, 2, 1))
+        assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# nav_prices (plan WS3a)
+# ---------------------------------------------------------------------------
+
+class TestNavPrices:
+    def test_migrate_creates_table(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(mock_pool)
+
+        client.migrate_nav_prices()
+
+        all_sql = " ".join(c[0][0] for c in mock_cur.execute.call_args_list)
+        assert "CREATE TABLE IF NOT EXISTS nav_prices" in all_sql
+
+    def test_upsert_replaces_on_conflict_and_counts(self):
+        client, mock_pool = _make_client()
+        _mock_conn(mock_pool)
+        records = [dict(symbol="VKQ", day=date(2023, 8, 30), nav=9.60)]
+
+        with patch("DatabaseClient.psycopg2.extras.execute_values") as mock_ev:
+            mock_ev.return_value = [(1,)]
+            n = client.upsert_nav_prices(records)
+
+        assert n == 1
+        sql = mock_ev.call_args[0][1]
+        assert "ON CONFLICT (symbol, day) DO UPDATE" in sql
+        assert mock_ev.call_args[0][2] == [
+            ("VKQ", date(2023, 8, 30), 9.60, "nasdaq_mirror")
+        ]
+
+    def test_get_returns_dataframe(self):
+        client, mock_pool = _make_client()
+        _, mock_cur = _mock_conn(
+            mock_pool, fetchall_return=[("VKQ", date(2023, 8, 30), 9.60)])
+
+        df = client.get_nav_prices(["VKQ"], date(2023, 8, 1), date(2023, 9, 1))
+
+        assert list(df.columns) == ["symbol", "day", "nav"]
+        assert df.nav.tolist() == [9.60]
