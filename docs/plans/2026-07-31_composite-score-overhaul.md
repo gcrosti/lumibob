@@ -171,6 +171,31 @@ Finnhub or FMP's free earnings-calendar endpoint into the same table with
   consistent in every fold. Expected winner: 2.02.
 - **Size:** ~1 day once the pipeline exists.
 
+**Executed 2026-07-31 — GATE PASSED.** Runner:
+`tuning/studies/study3_e1_event_discrimination.py` on the replay cache (2,043
+tradeable observations, 275 catastrophic = 13.5%; exit replay verified against
+the cached outcomes 2,043/2,043). Catastrophic vs rest in-window rates:
+
+| group | cat | rest | OR | p | CI (diff, pp) | per-fold |
+|---|---|---|---|---|---|---|
+| results (2.02) | 33.5% | 12.2% | 3.6 | 1e-16 | +15.6..+27.0 | +/+/+ |
+| deals (1.01/2.01) | 13.1% | 1.9% | 7.7 | 9e-15 | +7.3..+15.2 | +/+/+ |
+| exec_change (5.02) | 20.7% | 5.8% | 4.3 | 5e-14 | +10.3..+19.9 | +/+/+ |
+| guidance (7.01) | 26.5% | 10.4% | 3.1 | 7e-12 | +10.7..+21.5 | +/+/+ |
+| foreign (any 6-K) | 2.5% | 1.9% | 1.3 | 0.49 | −1.3..+2.7 | mixed |
+| restatement (4.02) | 0% | 0% | — | — | no occurrences | — |
+
+The duration confound from the entered-pairs dry run is resolved at this n:
+non-catastrophic results-rates are flat across hold buckets (12.3 / 12.7 /
+7.5%) while catastrophic sits at 33.5% — separation is not exposure time.
+Notable upgrades vs the dry run: **deals (M&A) emerges as the strongest odds
+ratio** (unobservable at n = 14), supporting the reactive-exit mechanism; and
+**undifferentiated 6-K presence carries no signal** (routine filings dominate)
+— foreign-leg protection must come from the scheduled calendar, not 6-K
+counting. Caveats: dislocated-candidates pool (range-restricted), current-
+universe survivorship (PR #50 caveat), actual dates proxy scheduled knowledge.
+E2 is unblocked.
+
 ### 5c. Study E2 — event exclusion (the tradeable rule)
 
 **Design decision (fixed, not studied):** candidates exposed to a scheduled
