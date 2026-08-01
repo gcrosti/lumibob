@@ -300,10 +300,21 @@ fragility.
   book's worst pair (−4,861) is event-free and *in* the top-20. Null baseline
   passes only marginally (+5.16 vs +4.15) at small n. Final test showed the
   **pre-event exit creating a catastrophic trade** (exiting into a −305
-  drawdown that recovered to −72 by natural exit). Side-finding consistent
-  with PR #50's negative score→outcome Spearman: the top-20 composite book's
-  baseline mean is **−31.9 bps vs +26.5 for the full pool** on this replay —
-  the score's selection is anti-predictive on scoring-date replay.
+  drawdown that recovered to −72 by natural exit). Side-finding: the top-20
+  composite book's baseline mean was **−31.9 bps vs +26.5 for the full pool**
+  on this replay.
+
+  **Correction (2026-08-01).** That side-finding was over-read as "the score is
+  anti-predictive." The deficit is mean-only — top-20 median +23.8 vs pool
+  +43.7, same ordering, driven by three trades of which two share a leg — and
+  the date-clustered 95% CI is **−160.5 .. +9.3, which includes zero**. What
+  stands: no evidence the score selects *positively* (a random ranker's top-20
+  beats it on the point estimate; score-outcome Spearman is negative in all
+  three folds among live entered pairs, pooled −0.297). What does not stand:
+  that it is actively anti-predictive at the portfolio level. Root cause in
+  `docs/deepdives/2026-08-01_score-selection-and-the-missing-entry-gate.md` —
+  the strategy has **no dislocation gate on entry**, so only 6% of live
+  entries met its own stated entry condition.
 
 **What stands and what doesn't:** E1's discrimination (events mark fat-tailed
 observations) stands. E2's claim — that excluding them is validated tail
