@@ -261,6 +261,43 @@ becomes a candidate that day.
   backtest (backtest-agent workflow, two runs: exclusion off / on).
 - **Size:** ~2-3 days plus one comparative backtest.
 
+**Executed 2026-07-31 — NO-GO on both preregistered designs.** Runners:
+`study3_e2_event_exclusion.py` (v1, full replay pool) and `_v2.py` (version
+bump, top-20-by-composite book per date). Both use verified forward paths
+(2,043/2,043 reproduce cached outcomes), the preregistered grid, the reserved
+2023-10-16 final test, the calendar-shift null baseline, and drop-one-fold
+fragility.
+
+- **v1 (full pool, 2,043 obs, 275 catastrophic):** no config cuts catastrophic
+  loss magnitude ≥ 50% (best 29.7% at H=25+reactive vs the ≥50% gate).
+  **Null baseline FAILED** — real mean-delta +0.37 bps vs +3.46 at the null
+  90th percentile: the veto's mean effect is indistinguishable from randomly
+  pruning ~12% of candidates. Selection fold-fragile (drops to H=25 without
+  bull_2023). Diagnosis: the full pool's disasters are far less
+  event-concentrated than the *entered* pairs' (the 66% loss-share evidence
+  came from score-selected holdings), and the pool's worst blowups
+  (−4,861 bps) are not event-driven.
+- **v2 (top-20 book, 240 obs, 19 catastrophic):** cat-loss cut ≤ 11.5%; the
+  book's worst pair (−4,861) is event-free and *in* the top-20. Null baseline
+  passes only marginally (+5.16 vs +4.15) at small n. Final test showed the
+  **pre-event exit creating a catastrophic trade** (exiting into a −305
+  drawdown that recovered to −72 by natural exit). Side-finding consistent
+  with PR #50's negative score→outcome Spearman: the top-20 composite book's
+  baseline mean is **−31.9 bps vs +26.5 for the full pool** on this replay —
+  the score's selection is anti-predictive on scoring-date replay.
+
+**What stands and what doesn't:** E1's discrimination (events mark fat-tailed
+observations) stands. E2's claim — that excluding them is validated tail
+insurance at the portfolio level — did **not** replicate beyond the 175
+entered pairs, where it was driven by a single −1,554 blowup. Per the
+methodology, the branch stops here rather than iterating universes until
+something passes. The §1 design decision (exclude on principle: event wins
+are surprise-direction variance, not harvestable edge) remains available as a
+philosophy-driven risk policy, but it cannot cite this study as evidence, the
+pre-event exit variant showed active harm, and the faithful universe for any
+retest is actual backtest holdings (comparative backtests, exclusion
+off/on) — not scoring-date replay.
+
 ## 6. Workstream 3 — NAV / discount data for fund pairs
 
 ### 6a. Data pipeline
