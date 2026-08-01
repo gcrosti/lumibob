@@ -188,6 +188,16 @@ the cached outcomes 2,043/2,043). Catastrophic vs rest in-window rates:
 The duration confound from the entered-pairs dry run is resolved at this n:
 non-catastrophic results-rates are flat across hold buckets (12.3 / 12.7 /
 7.5%) while catastrophic sits at 33.5% — separation is not exposure time.
+
+**CI correction (2026-08-01).** The intervals above use the pair as the
+resampling unit, but replay-pool pairs share legs (one symbol appears in up to
+30 pairs on a single date), so they are not independent. Re-bootstrapped with
+the **date** as the unit, the headline results-rate difference is
+**+9.4 .. +33.3 pp** (point estimate +21.2), not the +15.6 .. +27.0 reported
+here originally. The finding survives — the interval still excludes zero — but
+is materially less precise, and per-date direction is not universal
+(2022-03-15 +0.0 pp, 2023-05-15 −2.0 pp). See
+`docs/deepdives/2026-08-01_disasters-surviving-the-event-gate.md` §3c.
 Notable upgrades vs the dry run: **deals (M&A) emerges as the strongest odds
 ratio** (unobservable at n = 14), supporting the reactive-exit mechanism; and
 **undifferentiated 6-K presence carries no signal** (routine filings dominate)
@@ -214,27 +224,36 @@ Excluding at the scan gives the same protection earlier and cheaper than scoring
 ever would, which is the spirit of "remove before clustering": the ticker never
 becomes a candidate that day.
 
-**Three mechanisms, because only scheduled events are knowable in advance:**
+**Two mechanisms, because only scheduled events are knowable in advance:**
 
-1. **Entry veto** — either leg has scheduled earnings within the veto horizon:
-   the pair cannot be entered today.
-2. **Pre-event exit** — a *held* pair's leg has earnings coming inside the next
-   few days: exit before the event. This is required for coverage, not optional:
-   earnings dates are typically announced only 2-4 weeks ahead, so an entry veto
-   alone has blind spots (date not yet public at entry, or a hold that outlasts
-   the horizon). In the retro data the disaster events hit 8-20 trading days
-   into the hold — several would only have been caught by this exit.
-3. **Reactive exit** — a surprise filing (deal/M&A 1.01/2.01, restatement 4.02)
+1. **Entry veto** — either leg has a scheduled-earnings date within the veto
+   horizon, *or* reported inside the days immediately before entry: the pair
+   cannot be entered today. (The pre-entry leg of this test is fully knowable
+   at entry and was missing from the E2 v1/v2 implementations — see §5c
+   results.)
+2. **Reactive exit** — a surprise filing (deal/M&A 1.01/2.01, restatement 4.02)
    arrives on a held leg: exit on the next open. Surprises can never be vetoed
    in advance; this is the only possible defense, driven by the nightly EDGAR
    refresh.
 
+**Dropped 2026-08-01 — pre-event exit.** An earlier design carried a third
+mechanism: exit a *held* pair a few days before a scheduled event on either
+leg. It is removed. On the E2 final test it **created** a catastrophic trade
+(exiting into a −305 bps drawdown that recovered to −72 bps by the natural
+exit), and across the E2 grid the `L` parameter never improved the outcome at
+any horizon. Mean reversion's normal path to profit runs through drawdown, so
+a deterministic exit into an open drawdown realizes losses the natural exit
+would have recovered — the same mechanism that killed the 2026-07-18 exit
+redesign. If event exposure on a held pair is a concern, the lever is not
+entering (mechanism 1), not bailing out mid-trade.
+
 - **Objective:** choose the two timing parameters and confirm the net effect of
   the exclusion package on held-out data.
 - **Free parameters (preregistered grids):** veto horizon H in {10, 15, 20, 25}
-  trading days; pre-event exit lead in {2, 5} trading days. Reactive exit is
-  on/off (compared, not tuned). Two to three free parameters over thousands of
-  replay round trips — complexity ratio green.
+  trading days. Reactive exit is on/off (compared, not tuned). One to two free
+  parameters over thousands of replay round trips — complexity ratio green.
+  (The pre-event exit lead `L` was a third parameter in the E2 v1/v2 runs; it
+  is dropped along with the mechanism.)
 - **Rigor (per the optuna-study skill):**
   - Unit-level signal gate: E1 *is* that gate — E2 does not start unless E1 passed.
   - Temporal split: choose parameters on walk-forward windows

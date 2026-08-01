@@ -1,5 +1,15 @@
 """Study E2 — right-size the event-exclusion package (plan §5c).
 
+RESULT: NO-GO (v1 here, v2 in _v2.py). Retained as the record of the runs and
+as reusable path/policy machinery for follow-up analysis; do not treat the
+policy below as a recommended design.
+
+SUPERSEDED MECHANISM: the pre-event exit (parameter `L`) was dropped
+2026-08-01 — it created a catastrophic trade on the final test and never
+improved any grid cell. It remains implemented here only so the recorded runs
+stay reproducible. New work should use H (entry veto) and R (reactive exit)
+only, and should add the pre-entry limb of the veto that these runs lacked.
+
 The decision to exclude event-exposed candidates is fixed by the plan; this
 study selects the timing parameters and reports the honest net effect:
 
