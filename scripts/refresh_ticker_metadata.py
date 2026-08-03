@@ -177,12 +177,22 @@ def refresh(dry_run: bool = False, full: bool = False, verify_etf: int = 0) -> N
             n_fund += 1
         else:
             sic = fetch_sic(cik)
-            sector = _sic_to_sector(sic)
             if sic is None:
+                # Registered with SEC but carrying no SIC code.  Operating
+                # companies essentially always have one; this bucket samples as
+                # closed-end funds, BDCs and trusts (QQQ, MXF, ASA, ADX, PHK...)
+                # — the old-style ETFs that register under their own ticker and
+                # so are missed by the no-CIK test above.  Classifying these as
+                # funds may occasionally mis-slot an odd operating company, but
+                # the cost is only which cluster partition it lands in.
                 n_nosic += 1
+                batch.append((symbol, None, True, fetched_at, None, None,
+                              'fund_inferred_nosic'))
             else:
                 n_sec += 1
-            batch.append((symbol, sector, False, fetched_at, sic, sector, 'sec_edgar'))
+                sector = _sic_to_sector(sic)
+                batch.append((symbol, sector, False, fetched_at, sic, sector,
+                              'sec_edgar'))
             time.sleep(RATE_LIMIT_SLEEP)
 
         if len(batch) >= BATCH_SIZE and not dry_run:
