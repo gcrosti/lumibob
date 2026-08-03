@@ -9,8 +9,11 @@ Each entry in PARAMETER_SPACE carries:
   - log          : sample in log-space (for float / int only)
   - choices      : list of allowed values (categorical only)
 
-The composite score weights (w_corr_long, w_corr_short, w_z_depth) are
-sampled freely and normalised inside suggest() so they always sum to 1.0.
+The composite score and its weights were removed with the 2026-08-01
+entry-criteria overhaul; candidates are gated on dislocation + magnitude and
+ranked by expected_gross_bps.  ``_WEIGHT_NAMES`` and ``normalize_weights`` are
+retained as no-ops so that saved parameter sets from earlier studies still load
+without error.
 """
 
 from __future__ import annotations
@@ -71,14 +74,26 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     # Tier 2 — Slow-adaptive (re-tune monthly to quarterly)
     # =========================================================================
 
+    # Target portfolio size.  K is fixed at max_k — the former dynamic-K
+    # quality_scale never varied in practice and every dynamic scheme tested
+    # underperformed a fixed K (2026-08-01 entry-criteria overhaul §4).  The
+    # upper bound is wide because more positions measured better: reducing K
+    # to 10 cost ~65 bps of mean in replay.
     'max_k': ParamSpec(
         'max_k', tier=2, default=20, low=5, high=50, dtype='int',
     ),
     'target_deployed_pct': ParamSpec(
         'target_deployed_pct', tier=2, default=0.60, low=0.40, high=0.90,
     ),
+    # Qualified candidates (both entry gates passed, fully scored) per day.
     'max_daily_candidates': ParamSpec(
         'max_daily_candidates', tier=2, default=200, low=50, high=300, dtype='int',
+    ),
+    # Pairs examined per day.  The entry gates run before the cointegration
+    # work, so an examined-but-rejected pair costs only one z-score
+    # computation; this cap bounds that cheap scan.
+    'max_daily_examined': ParamSpec(
+        'max_daily_examined', tier=2, default=2000, low=500, high=6000, dtype='int',
     ),
     'corr_long_window': ParamSpec(
         'corr_long_window', tier=2, default=90, low=45, high=252, dtype='int',
@@ -86,21 +101,14 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'corr_short_window': ParamSpec(
         'corr_short_window', tier=2, default=20, low=10, high=60, dtype='int',
     ),
-    # Weights are sampled freely and normalised in suggest() so they sum to 1.
-    'w_corr_long': ParamSpec(
-        'w_corr_long', tier=2, default=0.3, low=0.0, high=1.0,
-    ),
-    'w_corr_short': ParamSpec(
-        'w_corr_short', tier=2, default=0.5, low=0.0, high=1.0,
-    ),
-    'w_z_depth': ParamSpec(
-        'w_z_depth', tier=2, default=0.2, low=0.0, high=1.0,
-    ),
-    # w_coint / w_halflife were removed from the composite score and the space
-    # (PR #50 / Pass A v4: dead weight for ranking). max_halflife_days stays —
-    # it still shapes the persisted score_halflife observability column.
-    # Half-life normalisation ceiling (tunable so Optuna can widen or narrow the
-    # scoring window without changing the formula structure).
+    # The composite score and its weights (w_corr_long / w_corr_short /
+    # w_z_depth) were removed entirely with the 2026-08-01 entry-criteria
+    # overhaul: the composite did not select positively, and z_depth is
+    # identically 1.0 among candidates passing the dislocation gate.
+    # Candidates are now gated on dislocation + magnitude and ranked by
+    # expected_gross_bps.  Correlations remain as observability only.
+    # Half-life normalisation ceiling (shapes the persisted score_halflife
+    # observability column).
     'max_halflife_days': ParamSpec(
         'max_halflife_days', tier=2, default=60, low=20, high=120, dtype='int',
     ),
@@ -149,16 +157,23 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'max_position_pct': ParamSpec(
         'max_position_pct', tier=3, default=0.20, low=0.05, high=0.35,
     ),
-    'quality_scale_pivot': ParamSpec(
-        'quality_scale_pivot', tier=3, default=0.7, low=0.4, high=1.0,
+    # Emergency floor on trade magnitude, bps of gross notional.  Cost-viability
+    # backstop rather than a selector: sized at roughly 1x the round-trip
+    # friction estimate so it rarely binds.  Tier 3 — cost/regime dependent.
+    'min_expected_gross_bps': ParamSpec(
+        'min_expected_gross_bps', tier=3, default=25.0, low=0.0, high=80.0,
     ),
+    # quality_scale_pivot removed with dynamic-K (2026-08-01 overhaul §4).
 }
 
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
 
-_WEIGHT_NAMES = frozenset({'w_corr_long', 'w_corr_short', 'w_z_depth'})
+# Empty since the 2026-08-01 entry-criteria overhaul removed the composite
+# score.  Kept (rather than deleted) so `normalize_weights` stays a safe no-op
+# for parameter sets saved by earlier studies, which still carry w_* keys.
+_WEIGHT_NAMES: frozenset[str] = frozenset()
 
 
 def defaults() -> dict[str, Any]:
@@ -180,9 +195,9 @@ def normalize_weights(params: dict[str, Any]) -> dict[str, Any]:
     Return a copy of *params* with the composite score weights normalised to
     sum to 1.0.
 
-    Optuna stores the raw (pre-normalisation) weight values in ``best_params``
-    and ``trial.params``.  Call this before applying params to BobsBrain or
-    writing them to ``active_parameters``.
+    NO-OP since the 2026-08-01 entry-criteria overhaul: ``_WEIGHT_NAMES`` is
+    empty, so any w_* keys carried by an older saved parameter set pass through
+    untouched.  Retained so existing callers and stored studies keep working.
     """
     params = dict(params)
     present = _WEIGHT_NAMES & set(params)
@@ -211,10 +226,8 @@ def suggest(
         — e.g. Study 1 Pass A frees only the 10 signal-construction params
         even though Tier 2 contains discovery/sizing params as well.
 
-    Composite score weights (w_corr_long, w_corr_short, w_z_depth) are
-    suggested freely and then normalised so they sum to 1.0.  If only a subset
-    of the weights is being tuned, the others take their defaults before
-    normalisation.
+    The composite-score weight normalisation step is inert since the
+    2026-08-01 entry-criteria overhaul (``_WEIGHT_NAMES`` is empty).
 
     Joint timescale constraints (Study 1 Pass A):
     When the following pairs are both being tuned in the same call, the

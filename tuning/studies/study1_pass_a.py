@@ -120,12 +120,15 @@ _GATE_MIN_PASSING_FOLDS = 2
 # Tier 2 also contains discovery/sizing params (max_k, target_deployed_pct,
 # max_daily_candidates, HDBSCAN params, ...) — those stay at defaults here
 # and are optimized in Pass B on top of this study's output.
-# w_coint / w_halflife were removed from the parameter space with the composite
-# score cleanup (PR #50) — any re-run of this study frees 8 params, not the
-# original 10, and per the optuna-study skill would need a version bump.
+# HISTORICAL. The composite score and all five of its weights are gone from the
+# parameter space: w_coint / w_halflife with PR #50, then w_corr_long /
+# w_corr_short / w_z_depth with the 2026-08-01 entry-criteria overhaul.  This
+# set now frees 5 params, not the original 10, and it no longer tunes anything
+# that selects candidates — re-running the study as-is would optimise
+# observability windows.  Per the optuna-study skill, any re-run needs a new
+# study name and a redesigned free set, not a version bump of this one.
 PASS_A_PARAMS = frozenset({
     'lookback_window', 'zscore_window', 'cooldown_days',
-    'w_corr_long', 'w_corr_short', 'w_z_depth',
     'corr_long_window', 'corr_short_window',
 })
 

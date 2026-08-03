@@ -347,37 +347,38 @@ class TestPairs:
         _sql, params = mock_cur.execute.call_args[0]
         assert params[6] is None
 
-    def test_save_pair_stores_composite_score_and_components(self):
-        """Score components and weights must be written to pairs so post-hoc
-        analysis can reconstruct and validate the composite score."""
+    def test_save_pair_stores_entry_criteria_and_components(self):
+        """expected_gross_bps is the quantity candidates are selected on, so it
+        must reach the DB; correlation/coint components ride along for
+        observability.  The legacy composite_score and w_* columns are no
+        longer written (entry-criteria overhaul, 2026-08-01)."""
         client, mock_pool = _make_client()
         _, mock_cur = _mock_conn(mock_pool, fetchone_return=(42,))
 
         pair = {
             "lead_stock": "AAPL", "lag_stock": "MSFT",
             "lag": 1, "short_ma": 2, "long_ma": 5,
-            "composite_score": 0.72,
             "score_corr_long": 0.85, "score_corr_short": 0.76,
-            "score_z_depth": 0.60,
             "score_coint": 0.90, "score_halflife": 0.50,
-            "w_corr_long": 0.3, "w_corr_short": 0.5, "w_z_depth": 0.2,
+            "expected_gross_bps": 142.5, "spread_std_bps": 79.1,
+            "min_expected_gross_bps": 25.0,
         }
         client.save_pair(pair, "run01")
 
-        _sql, params = mock_cur.execute.call_args[0]
-        # composite_score is the 17th param (index 16)
-        assert params[16] == 0.72
-        # component scores follow at indices 17–21 (coint/halflife persisted
-        # for observability even though no longer in the composite)
-        assert params[17] == 0.85   # score_corr_long
-        assert params[18] == 0.76   # score_corr_short
-        assert params[19] == 0.60   # score_z_depth
-        assert params[20] == 0.90   # score_coint
-        assert params[21] == 0.50   # score_halflife
-        # weights at indices 22–24 (w_coint/w_halflife no longer written)
-        assert params[22] == 0.3    # w_corr_long
-        assert params[23] == 0.5    # w_corr_short
-        assert params[24] == 0.2    # w_z_depth
+        sql, params = mock_cur.execute.call_args[0]
+        # observability components at indices 16-19
+        assert params[16] == 0.85   # score_corr_long
+        assert params[17] == 0.76   # score_corr_short
+        assert params[18] == 0.90   # score_coint
+        assert params[19] == 0.50   # score_halflife
+        # entry criteria at 20-22
+        assert params[20] == 142.5  # expected_gross_bps
+        assert params[21] == 79.1   # spread_std_bps
+        assert params[22] == 25.0   # min_expected_gross_bps
+        # the removed columns must not be in the INSERT at all
+        assert "composite_score" not in sql
+        assert "w_corr_long" not in sql
+        assert "score_z_depth" not in sql
 
     def test_save_pair_score_components_default_to_none(self):
         """Score columns are NULL when not provided — legacy callers stay compatible."""
@@ -388,8 +389,7 @@ class TestPairs:
         client.save_pair(pair, "run01")
 
         _sql, params = mock_cur.execute.call_args[0]
-        # composite_score and all component/weight params should be None
-        for idx in range(16, 25):
+        for idx in range(16, 23):
             assert params[idx] is None, f"param[{idx}] expected None, got {params[idx]}"
 
     def test_migrate_pairs_score_components_adds_all_columns(self):

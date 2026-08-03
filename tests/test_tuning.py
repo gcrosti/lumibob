@@ -148,37 +148,18 @@ class TestDefaults:
 
 
 class TestNormalizeWeights:
-    _weight_names = {'w_corr_long', 'w_corr_short', 'w_z_depth'}
+    """normalize_weights is a no-op since the 2026-08-01 entry-criteria
+    overhaul removed the composite score.  These tests pin that contract:
+    saved parameter sets from earlier studies still carry w_* keys and must
+    load unchanged rather than raising."""
 
-    def test_weights_sum_to_one(self):
-        params = {
-            'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4,
-        }
-        result = normalize_weights(params)
-        total = sum(result[w] for w in self._weight_names)
-        assert abs(total - 1.0) < 1e-9
-
-    def test_already_normalized_unchanged(self):
-        params = {
-            'w_corr_long': 0.3, 'w_corr_short': 0.5, 'w_z_depth': 0.2,
-        }
-        result = normalize_weights(params)
-        for k, v in params.items():
-            assert abs(result[k] - v) < 1e-9
-
-    def test_legacy_coint_halflife_keys_pass_through(self):
-        """Pre-PR#50 param dicts still carry w_coint/w_halflife; they are no
-        longer weight names, so they pass through untouched while the live
-        weights normalise among themselves."""
+    def test_legacy_weight_keys_pass_through_untouched(self):
         params = {
             'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4,
             'w_coint': 0.3, 'w_halflife': 0.2,
         }
         result = normalize_weights(params)
-        total = sum(result[w] for w in self._weight_names)
-        assert abs(total - 1.0) < 1e-9
-        assert result['w_coint'] == 0.3
-        assert result['w_halflife'] == 0.2
+        assert result == params
 
     def test_does_not_mutate_original(self):
         original = {'w_corr_long': 0.6, 'w_corr_short': 0.8, 'w_z_depth': 0.4}
@@ -217,15 +198,25 @@ class TestSuggest:
         tier2_names = {n for n, s in PARAMETER_SPACE.items() if s.tier == 2}
         assert set(result.keys()) == tier2_names
 
-    def test_suggest_weights_sum_to_one(self):
+    def test_suggest_no_longer_emits_composite_weights(self):
+        """The composite score was removed 2026-08-01; suggest() must not
+        surface w_* params, or the tuner would spend trials on values
+        BobsBrain ignores."""
         import optuna
         study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=42))
         trial = study.ask()
         result = suggest(trial, tiers=(2,))
-        total = (
-            result['w_corr_long'] + result['w_corr_short'] + result['w_z_depth']
-        )
-        assert abs(total - 1.0) < 1e-9
+        assert not [k for k in result if k.startswith('w_')]
+
+    def test_suggest_emits_entry_criteria_params(self):
+        import optuna
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=42))
+        trial = study.ask()
+        result = suggest(trial, tiers=(2, 3))
+        assert 'min_expected_gross_bps' in result
+        assert 'max_daily_examined' in result
+        spec = PARAMETER_SPACE['min_expected_gross_bps']
+        assert spec.low <= result['min_expected_gross_bps'] <= spec.high
 
     def test_suggest_int_params_in_bounds(self):
         import optuna
@@ -299,18 +290,14 @@ class TestSuggest:
         assert not (PASS_A_PARAMS & PASS_B_PARAMS)
         assert PASS_A_PARAMS | PASS_B_PARAMS == tier2_names
 
-    def test_suggest_weights_normalised_with_partial_allowlist(self):
-        """When only some weights are suggested, they are normalised against
-        the defaults of the others: suggested + default weights sum to 1
-        under the shared normaliser, so each suggested weight lies in (0, 1]."""
+    def test_suggest_honours_partial_allowlist(self):
+        """An allowlist restricts suggest() to exactly those params."""
         import optuna
-        allow = frozenset({'w_corr_long', 'w_z_depth'})
+        allow = frozenset({'corr_long_window', 'max_k'})
         study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=11))
         trial = study.ask()
         result = suggest(trial, tiers=(2,), param_names=allow)
         assert set(result.keys()) == allow
-        assert 0 < result['w_corr_long'] <= 1
-        assert 0 < result['w_z_depth'] <= 1
 
     def test_find_run_id_token_path(self):
         """With a token, run recovery queries by settings token — the

@@ -271,15 +271,16 @@ class TestWeightNormalization(unittest.TestCase):
         from tuning.parameter_space import normalize_weights
         self.normalize_weights = normalize_weights
 
-    def test_three_weights_sum_to_one_after_normalisation(self):
+    def test_legacy_weights_pass_through_unchanged(self):
+        """The composite score was removed 2026-08-01; normalize_weights is a
+        no-op so saved parameter sets from earlier studies still load."""
         params = {
             'w_corr_long': 0.4,
             'w_corr_short': 0.7,
             'w_z_depth': 0.3,
         }
         result = self.normalize_weights(params)
-        total = sum(result[k] for k in params)
-        self.assertAlmostEqual(total, 1.0, places=10)
+        self.assertEqual(result, params)
 
     def test_subset_of_weights_still_normalises(self):
         """Param dicts tuning only some weights normalise against defaults."""

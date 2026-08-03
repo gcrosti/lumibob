@@ -22,15 +22,16 @@ STRATEGY_PARAMETERS = {
     'exit_threshold': 0.5,
     'zscore_window': 20,
 
-    # --- Scoring ---
+    # --- Entry criteria ---
+    # Candidates are gated on direction + dislocation (z <= -entry_threshold)
+    # and on trade magnitude, then ranked by expected_gross_bps. The composite
+    # score was removed 2026-08-01 (it did not select positively; see
+    # docs/plans/2026-08-01_entry-criteria-overhaul.md).
+    'min_expected_gross_bps': 25.0,  # emergency floor, bps of gross notional
+
+    # --- Observability windows (not used for selection) ---
     'corr_long_window': 90,
     'corr_short_window': 20,
-    # 3-component composite score — defaults already sum to 1.0 (coint/half-life
-    # removed as dead weight, PR #50).  BobsBrain uses these as-is; call
-    # tuning.parameter_space.normalize_weights() if adjusting.
-    'w_corr_long': 0.3,
-    'w_corr_short': 0.5,
-    'w_z_depth': 0.2,
     'max_halflife_days': 60,
 
     # --- Execution (H1 dollar-neutral) ---
@@ -39,16 +40,12 @@ STRATEGY_PARAMETERS = {
     'short_leg_fraction': 0.0,
 
     # --- Discovery ---
-    'max_daily_candidates': 200,
+    'max_daily_candidates': 200,    # qualified (gates passed) candidates per day
+    'max_daily_examined': 2000,     # pairs examined per day (cheap pre-gate scan)
     'cooldown_days': 7,
 
     # --- Filters ---
     'penny_threshold': 5.0,         # minimum last-close price to pass penny gate
-
-    # --- Dynamic-K quality scale ---
-    'quality_scale_pivot': 0.7,     # pool_corr is divided by this to get the raw scale
-    'quality_scale_min': 0.5,       # floor on quality_scale multiplier (K >= max_k * this)
-    'quality_scale_max': 1.0,       # ceiling on quality_scale multiplier (must be <= 1.0 to honour max_k hard ceiling)
 
     # --- Clustering / HDBSCAN ---
     'cluster_lookback_days': 126,               # calendar days of price history for clustering

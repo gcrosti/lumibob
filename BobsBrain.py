@@ -81,7 +81,10 @@ class BobsBrain(Strategy):
         self._ticker_metadata: dict[str, dict] = {}
         self._metadata_loaded = False
 
-        # Position size bounds as a fraction of portfolio (from composite score).
+        # Position size as a fraction of portfolio.  Sizing is FLAT within the
+        # selected book: nothing in the entry criteria ranks pair *quality*, so
+        # betting more on any qualified pair is unvalidated.  min_position_pct
+        # is the flat allocation; max_position_pct caps the deployment-gap boost.
         self.min_position_pct = self.parameters.get('min_position_pct', 0.03)
         self.max_position_pct = self.parameters.get('max_position_pct', 0.20)
         # Target fraction deployed; shortfall increases per-buy allocation.
@@ -94,38 +97,40 @@ class BobsBrain(Strategy):
         self.zscore_window = self.parameters.get('zscore_window', 20)
 
         # Log-return correlation windows (bars); long vs short horizon.
+        # Correlations are persisted for observability and cluster health; they
+        # no longer select or rank candidates (PR #50: the composite did not
+        # select positively, and post-gate correlation ranks outcomes
+        # negatively — see docs/plans/2026-08-01_entry-criteria-overhaul.md).
         self.corr_long_window = self.parameters.get('corr_long_window', 90)
         self.corr_short_window = self.parameters.get('corr_short_window', 20)
-        # Composite score weights (3 components); normalised to sum to 1.
-        # coint/half-life were removed from the score (dead weight for ranking,
-        # PR #50 / Pass A v4); their component scores are still computed and
-        # persisted for observability and post-hoc studies.
-        self.w_corr_long = self.parameters.get('w_corr_long', 0.3)
-        self.w_corr_short = self.parameters.get('w_corr_short', 0.5)
-        self.w_z_depth = self.parameters.get('w_z_depth', 0.2)
         # Ceiling for half-life scoring: pairs with halflife >= this score 0.
         self.max_halflife_days = self.parameters.get('max_halflife_days', 60)
 
-        # Max new pairs scored per day (global budget).
+        # Emergency floor: a candidate whose expected reversion is worth less
+        # than this many bps of gross notional is never bought, however it
+        # ranks.  Cost-viability backstop, not a selector — sized at ~1x the
+        # round-trip friction estimate so it rarely binds.
+        self.min_expected_gross_bps = self.parameters.get('min_expected_gross_bps', 25.0)
+
+        # Max new pairs QUALIFIED (gates passed, fully scored) per day.
         self.max_daily_candidates = self.parameters.get('max_daily_candidates', 200)
+        # Max pairs EXAMINED per day.  The entry gates run before the expensive
+        # cointegration work, so most examined pairs cost only one z-score
+        # computation; this cap bounds that cheap scan.
+        self.max_daily_examined = self.parameters.get('max_daily_examined', 2000)
         # Days before the same unordered pair can be scored again.
         self.cooldown_days = self.parameters.get('cooldown_days', 7)
 
         # Minimum price for a ticker to pass the penny-stock filter.
         self.penny_threshold = self.parameters.get('penny_threshold', 5.0)
 
-        # Hard ceiling on target portfolio size (Tier 2 tunable).
-        # K floats between max_k * quality_scale_min and max_k based on daily
-        # pool quality.  The buy loop's cash check enforces affordability; K
-        # itself is purely a quality / concentration target.
+        # Target portfolio size.  Fixed: the former dynamic-K quality_scale
+        # clipped to 1.0 on every scoring date measured, so K always equalled
+        # max_k anyway, and every dynamic scheme tested underperformed a fixed
+        # K — reducing K hurts (diversification is doing real work) and the
+        # natural scaling signals peak on regime-break dates.  See
+        # docs/plans/2026-08-01_entry-criteria-overhaul.md §4.
         self.max_k = self.parameters.get('max_k', 20)
-
-        # Quality-scale curve for dynamic-K: pool_corr is divided by the pivot
-        # and the result is clamped to [min, max], then multiplied by max_k.
-        # quality_scale_max must be <= 1.0 so that k_target never exceeds max_k.
-        self.quality_scale_pivot = self.parameters.get('quality_scale_pivot', 0.7)
-        self.quality_scale_min = self.parameters.get('quality_scale_min', 0.5)
-        self.quality_scale_max = self.parameters.get('quality_scale_max', 1.0)
 
         # TickerClusterer parameters (passed through at construction time).
         self.cluster_lookback_days = self.parameters.get('cluster_lookback_days', 126)
@@ -250,22 +255,18 @@ class BobsBrain(Strategy):
                 'entry_threshold': self.entry_threshold,
                 'exit_threshold': self.exit_threshold,
                 'zscore_window': self.zscore_window,
-                # Scoring
+                # Scoring / observability windows
                 'corr_long_window': self.corr_long_window,
                 'corr_short_window': self.corr_short_window,
-                'w_corr_long': self.w_corr_long,
-                'w_corr_short': self.w_corr_short,
-                'w_z_depth': self.w_z_depth,
                 'max_halflife_days': self.max_halflife_days,
+                # Entry criteria
+                'min_expected_gross_bps': self.min_expected_gross_bps,
                 # Discovery
                 'max_daily_candidates': self.max_daily_candidates,
+                'max_daily_examined': self.max_daily_examined,
                 'cooldown_days': self.cooldown_days,
                 # Filters
                 'penny_threshold': self.penny_threshold,
-                # Dynamic-K quality scale
-                'quality_scale_pivot': self.quality_scale_pivot,
-                'quality_scale_min': self.quality_scale_min,
-                'quality_scale_max': self.quality_scale_max,
                 # Clustering / HDBSCAN
                 'cluster_lookback_days': self.cluster_lookback_days,
                 'hdbscan_min_cluster_size': self.hdbscan_min_cluster_size,
@@ -309,13 +310,18 @@ class BobsBrain(Strategy):
 
     def before_market_opens(self):
         """
-        Score-and-rank pipeline. Runs once per trading day.
+        Gate-and-rank pipeline. Runs once per trading day.
 
-        Phase 1: Hard gates (penny, sector) reduce the within-cluster universe.
-        Phase 2: Score all eligible new candidates AND existing positions with a
-                 composite score (corr_long, corr_short, z_depth).
-        Phase 3: Build unified ranked list, determine target portfolio of top K,
-                 and set actions (buy/sell) for on_trading_iteration().
+        Phase 1: Cheap gates (penny, cooldown) reduce the within-cluster universe.
+        Phase 2: Entry gates — direction + dislocation (z <= -entry_threshold)
+                 and the magnitude floor (expected_gross >= min_expected_gross_bps)
+                 — applied BEFORE the expensive cointegration work.  Survivors
+                 are fully scored; existing positions are re-valued on their
+                 remaining expected reversion.
+        Phase 3: Rank everything by expected_gross_bps, take the top max_k, and
+                 set actions (buy/sell) for on_trading_iteration().
+
+        Design rationale: docs/plans/2026-08-01_entry-criteria-overhaul.md
         """
         evaluator = StockEvaluator()
         end_date = self.get_datetime()
@@ -350,15 +356,11 @@ class BobsBrain(Strategy):
             if lag_data is None or lead_data is None:
                 pair['action'] = 'sell'
                 pair['exit_reason'] = 'data_missing'
-                pair['composite_score'] = -1.0
+                pair['expected_gross_bps'] = -1.0
                 continue
 
             corr_long, corr_short = evaluator.get_correlation_dual(
                 lead_data, lag_data, self.corr_long_window, self.corr_short_window,
-            )
-            z_depth, z_raw = evaluator.compute_z_depth(
-                lead_data, lag_data, self.zscore_window,
-                self.entry_threshold, self.exit_threshold,
             )
 
             action, current_z = evaluator.get_zscore_action(
@@ -368,12 +370,23 @@ class BobsBrain(Strategy):
                 exit_threshold=self.exit_threshold,
             )
 
+            # An open position competes for its slot on the reversion it has
+            # LEFT, not the one it was opened on: a pair that has already run
+            # most of the way to its exit is worth less than a fresh
+            # dislocation of the same quality.  (The exit rule still closes it
+            # on its own terms once z reverts past exit_threshold.)
+            metrics = evaluator.compute_entry_metrics(
+                lead_data, lag_data, self.zscore_window, self.exit_threshold,
+            )
             pair['corr_long'] = corr_long
             pair['corr_short'] = corr_short
-            pair['z_depth'] = z_depth
-            pair['current_zscore'] = current_z if current_z is not None else z_raw
-            pair['composite_score'] = self._composite_score(
-                corr_long, corr_short, z_depth,
+            pair['current_zscore'] = (
+                current_z if current_z is not None
+                else (metrics.z if metrics else None)
+            )
+            pair['spread_std_bps'] = metrics.spread_std_bps if metrics else None
+            pair['expected_gross_bps'] = (
+                metrics.expected_gross_bps if metrics else 0.0
             )
 
             pid = pair.get('pair_id')
@@ -400,10 +413,11 @@ class BobsBrain(Strategy):
 
         pairs_scanned = 0
         candidates_found = 0
-        gate_counts = {'penny': 0, 'cooldown': 0}
+        gate_counts = {'penny': 0, 'cooldown': 0, 'dislocation': 0, 'magnitude': 0}
         new_penny_stocks: set[str] = set()
         scored_candidates: list[dict] = []
         budget_remaining = self.max_daily_candidates
+        examined_remaining = self.max_daily_examined
 
         n_clusters = len(clusters)
         start_idx = 0
@@ -411,7 +425,8 @@ class BobsBrain(Strategy):
         if n_clusters > 0:
             start_idx = self._next_cluster_idx % n_clusters
 
-            while budget_remaining > 0 and clusters_tried < n_clusters:
+            while (budget_remaining > 0 and examined_remaining > 0
+                   and clusters_tried < n_clusters):
                 ci = (start_idx + clusters_tried) % n_clusters
                 cluster = clusters[ci]
                 top_pairs = self._clusterer.get_top_pairs_by_corr(
@@ -419,7 +434,7 @@ class BobsBrain(Strategy):
                 )
 
                 for stock1, stock2, cluster_corr in top_pairs:
-                    if budget_remaining <= 0:
+                    if budget_remaining <= 0 or examined_remaining <= 0:
                         break
 
                     if stock2 in self.pairs or stock2 in position_symbols:
@@ -449,15 +464,37 @@ class BobsBrain(Strategy):
                             new_penny_stocks.add(stock2)
                         continue
 
+                    examined_remaining -= 1
+
+                    # --- Entry gates, BEFORE the expensive cointegration work ---
+                    # Both gates come from one z-score computation; the ADF test
+                    # below costs ~10x more, so gating first keeps the daily scan
+                    # cheap (measured in tuning/studies/scoring_replay.py).
+                    metrics = evaluator.compute_entry_metrics(
+                        s1, s2, self.zscore_window, self.exit_threshold,
+                    )
+                    if metrics is None:
+                        continue
+
+                    # Gate 1 — direction + dislocation.  The strategy buys the
+                    # lag leg when it is CHEAP relative to the lead, so only a
+                    # sufficiently negative z is tradeable.  Nothing checked
+                    # this before: entry was purely rank-based, and only 6% of
+                    # live entries actually met it.
+                    if metrics.z > -self.entry_threshold:
+                        gate_counts['dislocation'] += 1
+                        continue
+
+                    # Gate 2 — emergency floor on trade magnitude.
+                    if metrics.expected_gross_bps < self.min_expected_gross_bps:
+                        gate_counts['magnitude'] += 1
+                        continue
+
                     pairs_scanned += 1
                     self._pair_evaluated_at[pair_key] = end_date
 
                     corr_long, corr_short = evaluator.get_correlation_dual(
                         s1, s2, self.corr_long_window, self.corr_short_window,
-                    )
-                    z_depth, z_raw = evaluator.compute_z_depth(
-                        s1, s2, self.zscore_window,
-                        self.entry_threshold, self.exit_threshold,
                     )
 
                     # Cointegration / half-life scores — cache-first.
@@ -472,11 +509,10 @@ class BobsBrain(Strategy):
                         self._coint_cache[cache_key] = (coint_pvalue, halflife_days)
                         self._coint_cache_new[cache_key] = (coint_pvalue, halflife_days)
 
-                    # Not part of the composite (dead weight for ranking, PR #50)
-                    # but still computed and persisted for post-hoc analysis.
+                    # Observability only — none of these select or rank
+                    # candidates any more (PR #50; entry-criteria overhaul).
                     coint_score = max(0.0, 1.0 - coint_pvalue / _COINT_PVALUE_CEILING)
                     halflife_score = halflife_to_score(halflife_days, self.max_halflife_days)
-                    score = self._composite_score(corr_long, corr_short, z_depth)
 
                     candidates_found += 1
                     budget_remaining -= 1
@@ -485,21 +521,19 @@ class BobsBrain(Strategy):
                         'lag_stock': stock2,
                         'corr_long': corr_long,
                         'corr_short': corr_short,
-                        'z_depth': z_depth,
-                        'z_raw': z_raw,
+                        'z_raw': metrics.z,
                         'coint_pvalue': coint_pvalue,
                         'halflife_days': halflife_days,
-                        'composite_score': score,
-                        # Normalised [0,1] component scores — stored for post-hoc analysis
+                        # Selection quantity: bps of gross notional expected
+                        # from reverting to the exit threshold.
+                        'expected_gross_bps': metrics.expected_gross_bps,
+                        'spread_std_bps': metrics.spread_std_bps,
+                        # Component scores — stored for post-hoc analysis
                         'score_corr_long': min(max(corr_long, 0.0), 1.0),
                         'score_corr_short': min(max(corr_short, 0.0), 1.0),
-                        'score_z_depth': z_depth,
                         'score_coint': coint_score,
                         'score_halflife': halflife_score,
-                        # Weights active at discovery time
-                        'w_corr_long': self.w_corr_long,
-                        'w_corr_short': self.w_corr_short,
-                        'w_z_depth': self.w_z_depth,
+                        'min_expected_gross_bps': self.min_expected_gross_bps,
                     })
 
                 clusters_tried += 1
@@ -516,47 +550,42 @@ class BobsBrain(Strategy):
             self._db.mark_ticker_failed(sym, 'penny stock')
 
         # --- Phase 3: Unified portfolio construction ---
+        # Existing positions and new candidates compete on the same quantity:
+        # expected remaining reversion, in bps of gross notional.
         existing_scored = [
             (symbol, pair)
             for symbol, pair in self.pairs.items()
-            if pair.get('composite_score', -1) >= 0 and pair.get('action') != 'sell'
+            if pair.get('expected_gross_bps', -1) >= 0 and pair.get('action') != 'sell'
         ]
 
         all_scored: list[tuple[str, float, dict | None, str | None]] = []
 
         for symbol, pair in existing_scored:
-            all_scored.append((symbol, pair['composite_score'], None, 'existing'))
+            all_scored.append((symbol, pair['expected_gross_bps'], None, 'existing'))
 
         for cand in scored_candidates:
             all_scored.append((
                 cand['lag_stock'],
-                cand['composite_score'],
+                cand['expected_gross_bps'],
                 cand,
                 'candidate',
             ))
 
         all_scored.sort(key=lambda x: x[1], reverse=True)
 
+        # Pool correlation is retained as an observability metric only; it no
+        # longer scales K (see the max_k comment in initialize()).
         corr_short_values = [
             c['corr_short'] for c in scored_candidates
-            if c['z_depth'] > 0 and not np.isnan(c['corr_short'])
+            if not np.isnan(c['corr_short'])
         ]
         for symbol, pair in existing_scored:
             cs = pair.get('corr_short')
-            if cs is not None and not np.isnan(cs) and pair.get('z_depth', 0) > 0:
+            if cs is not None and not np.isnan(cs):
                 corr_short_values.append(cs)
 
         pool_corr = median(corr_short_values) if corr_short_values else 0.0
-
-        # K is a quality-scaled fraction of max_k.  pool_corr / pivot gives the
-        # raw scale; clamped to [quality_scale_min, quality_scale_max] so K
-        # stays between max_k×min and max_k regardless of pool quality extremes.
-        # Affordability is not encoded here — the buy loop's cash check handles it.
-        quality_scale = max(
-            self.quality_scale_min,
-            min(pool_corr / self.quality_scale_pivot, self.quality_scale_max),
-        )
-        k_target = max(1, round(self.max_k * quality_scale))
+        k_target = self.max_k
 
         target_portfolio: dict[str, dict] = {}
         candidates_buy_ready = 0
@@ -575,8 +604,8 @@ class BobsBrain(Strategy):
                     'lag_stock': cand_data['lag_stock'],
                     'corr_long': cand_data['corr_long'],
                     'corr_short': cand_data['corr_short'],
-                    'z_depth': cand_data['z_depth'],
-                    'composite_score': cand_data['composite_score'],
+                    'expected_gross_bps': cand_data['expected_gross_bps'],
+                    'spread_std_bps': cand_data['spread_std_bps'],
                     'current_zscore': cand_data.get('z_raw'),
                     'coint_pvalue': cand_data.get('coint_pvalue', 1.0),
                     'halflife_days': cand_data.get('halflife_days'),
@@ -585,15 +614,12 @@ class BobsBrain(Strategy):
                     'zscore_window': self.zscore_window,
                     'entry_threshold': self.entry_threshold,
                     'exit_threshold': self.exit_threshold,
-                    # Score components and weights — forwarded from candidate for DB storage
+                    # Observability components — forwarded for DB storage
                     'score_corr_long': cand_data.get('score_corr_long'),
                     'score_corr_short': cand_data.get('score_corr_short'),
-                    'score_z_depth': cand_data.get('score_z_depth'),
                     'score_coint': cand_data.get('score_coint'),
                     'score_halflife': cand_data.get('score_halflife'),
-                    'w_corr_long': cand_data.get('w_corr_long'),
-                    'w_corr_short': cand_data.get('w_corr_short'),
-                    'w_z_depth': cand_data.get('w_z_depth'),
+                    'min_expected_gross_bps': cand_data.get('min_expected_gross_bps'),
                 }
                 new_pair['lead_short_qty'] = None
                 new_pair['pair_id'] = self._db.save_pair(new_pair, self._run_id)
@@ -602,8 +628,8 @@ class BobsBrain(Strategy):
                 candidates_buy_ready += 1
                 print(
                     f"New candidate: {cand_data['lead_stock']} -> {symbol} | "
-                    f"score={score:.3f} corr_s={cand_data['corr_short']:.3f} "
-                    f"z_depth={cand_data['z_depth']:.2f}"
+                    f"exp_gross={score:.0f}bps z={cand_data['z_raw']:.2f} "
+                    f"corr_s={cand_data['corr_short']:.3f}"
                 )
 
         for symbol in list(self.pairs.keys()):
@@ -613,7 +639,8 @@ class BobsBrain(Strategy):
             if symbol not in target_portfolio and symbol in position_symbols:
                 pair['action'] = 'sell'
                 pair['exit_reason'] = 'displaced'
-                print(f"Displaced from target portfolio: {symbol} (score={pair.get('composite_score', 0):.3f})")
+                print(f"Displaced from target portfolio: {symbol} "
+                      f"(exp_gross={pair.get('expected_gross_bps', 0):.0f}bps)")
             elif symbol in target_portfolio and symbol not in position_symbols:
                 pair['action'] = 'buy'
 
@@ -721,14 +748,18 @@ class BobsBrain(Strategy):
             n_candidates = len(buy_pairs)
 
             buy_pairs_ranked = sorted(
-                buy_pairs, key=lambda p: p.get('composite_score', 0), reverse=True,
+                buy_pairs, key=lambda p: p.get('expected_gross_bps', 0), reverse=True,
             )
 
             for pair in buy_pairs_ranked:
-                score = pair.get('composite_score', 0.0)
-                base_budget = (
-                    self.min_position_pct + score * (self.max_position_pct - self.min_position_pct)
-                ) * portfolio_value
+                # FLAT sizing.  Size previously scaled with composite_score, but
+                # nothing in the entry criteria ranks pair *quality* — and the
+                # selection quantity (expected_gross) correlates with disaster
+                # rate, so sizing by it would put the most capital in the
+                # fattest-tailed trades.  Order still follows expected_gross so
+                # that, under a cash constraint, the largest opportunities fill
+                # first.  See docs/plans/2026-08-01_entry-criteria-overhaul.md §3.
+                base_budget = self.min_position_pct * portfolio_value
                 if deployment_gap > 0 and n_candidates > 0:
                     gap_share = deployment_gap / n_candidates
                     base_budget = min(base_budget + gap_share, self.max_position_pct * portfolio_value)
@@ -1069,25 +1100,3 @@ class BobsBrain(Strategy):
         else:
             print(msg)
 
-    def _composite_score(
-        self,
-        corr_long: float,
-        corr_short: float,
-        z_depth: float,
-    ) -> float:
-        """
-        Weighted composite of three scoring components.  Each correlation value
-        is clamped to [0, 1] before weighting; z_depth is already in [0, 1] by
-        construction.
-
-        Cointegration and half-life were removed from the composite (PR #50 /
-        Pass A v4: near-zero rank correlation with forward P&L at every
-        lookback); their component scores are still persisted per pair.
-        """
-        cl = max(corr_long, 0.0) if not np.isnan(corr_long) else 0.0
-        cs = max(corr_short, 0.0) if not np.isnan(corr_short) else 0.0
-        return (
-            self.w_corr_long * min(cl, 1.0)
-            + self.w_corr_short * min(cs, 1.0)
-            + self.w_z_depth * z_depth
-        )

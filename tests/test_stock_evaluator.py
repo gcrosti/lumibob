@@ -9,7 +9,8 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from StockEvaluator import StockEvaluator, SpreadScores, halflife_to_score
+from StockEvaluator import (EntryMetrics, SpreadScores, StockEvaluator,
+                            halflife_to_score)
 
 
 class TestHalflifeToScore(unittest.TestCase):
@@ -354,6 +355,63 @@ class TestComputeZDepth(unittest.TestCase):
         s = pd.Series(np.cumsum(rng.normal(0, 1, 80)) + 100)
         z_depth, _ = self.evaluator.compute_z_depth(s, s)
         self.assertAlmostEqual(z_depth, 0.0, places=1)
+
+
+class TestComputeEntryMetrics(unittest.TestCase):
+    """The entry criteria depend on this; see
+    docs/plans/2026-08-01_entry-criteria-overhaul.md."""
+
+    def setUp(self):
+        self.evaluator = StockEvaluator()
+
+    def _pair(self, noise=0.5, n=80, seed=42):
+        rng = np.random.default_rng(seed)
+        lead = pd.Series(np.cumsum(rng.normal(0, 1, n)) + 100)
+        lag = lead + rng.normal(0, noise, n)
+        return lead, lag
+
+    def test_returns_entry_metrics(self):
+        m = self.evaluator.compute_entry_metrics(*self._pair())
+        self.assertIsInstance(m, EntryMetrics)
+        self.assertTrue(np.isfinite(m.z))
+        self.assertGreater(m.spread_std_bps, 0.0)
+
+    def test_short_series_returns_none(self):
+        short = pd.Series([100.0, 101.0])
+        self.assertIsNone(self.evaluator.compute_entry_metrics(short, short))
+
+    def test_identical_series_returns_none(self):
+        """A zero-width spread has no scale, so no tradeable magnitude."""
+        rng = np.random.default_rng(7)
+        s = pd.Series(np.cumsum(rng.normal(0, 1, 80)) + 100)
+        self.assertIsNone(self.evaluator.compute_entry_metrics(s, s))
+
+    def test_expected_gross_is_zero_when_inside_exit_band(self):
+        """|z| below the exit threshold means there is nothing left to capture."""
+        m = self.evaluator.compute_entry_metrics(
+            *self._pair(), exit_threshold=10.0)
+        self.assertEqual(m.expected_gross_bps, 0.0)
+
+    def test_expected_gross_scales_with_spread_size(self):
+        """Two pairs at comparable |z| but different spread scale must produce
+        proportionally different expected gross — the whole point of the
+        measure, since the z-score normalises scale away."""
+        tight = self.evaluator.compute_entry_metrics(*self._pair(noise=0.2))
+        wide = self.evaluator.compute_entry_metrics(*self._pair(noise=2.0))
+        self.assertGreater(wide.spread_std_bps, tight.spread_std_bps)
+
+    def test_expected_gross_matches_formula(self):
+        m = self.evaluator.compute_entry_metrics(*self._pair(), exit_threshold=0.5)
+        expected = max(abs(m.z) - 0.5, 0.0) * m.spread_std_bps
+        self.assertAlmostEqual(m.expected_gross_bps, expected, places=9)
+
+    def test_z_sign_matches_compute_zscore(self):
+        """The gate tests signed z, so the sign convention must agree with the
+        exit path's compute_zscore."""
+        lead, lag = self._pair()
+        m = self.evaluator.compute_entry_metrics(lead, lag, window=20)
+        z_series = self.evaluator.compute_zscore(lead, lag, window=20)
+        self.assertAlmostEqual(m.z, float(z_series.iloc[-1]), places=9)
 
 
 class TestComputeSpreadScores(unittest.TestCase):

@@ -96,6 +96,7 @@ PASS_B_PARAMS = frozenset({
     'min_intra_cluster_corr',
     'cluster_recompute_days',
     'max_daily_candidates',
+    'max_daily_examined',
     'target_deployed_pct',
     'max_k',
     'max_halflife_days',

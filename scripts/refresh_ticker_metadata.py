@@ -1,23 +1,37 @@
 """
-Standalone SEC EDGAR metadata refresh for all tickers in the `tickers` table.
+Ticker metadata refresh: sector (SIC) + instrument class, for all tickers.
 
-Run once before Phase 3 (and nightly thereafter) to maximise sector coverage.
+Run nightly. Populates `ticker_metadata`, which `TickerClusterer` uses to
+pre-partition the universe (ETFs and each sector cluster separately).
 
-Key improvements over the inline BobsBrain fetch:
-  - Uses company_tickers.json (all SEC registrants) instead of the exchange-
-    only file, giving meaningfully broader CIK coverage.
-  - Retries every ticker that currently has a NULL sector (not just missing
-    rows), so stale placeholder records get a second chance.
-  - Removes dotted-symbol artifacts (preferred shares, warrants, etc.) that
-    slipped into ticker_metadata before the '.' filter was added to
-    AlpacaClient.get_tradeable_assets().
-  - Prints a before/after coverage summary.
+2026-08-01 rewrite — the previous version had four defects that between them
+disabled the ETF partition in live clustering (see
+`docs/deepdives/2026-08-01_disasters-surviving-the-event-gate.md` §4):
+
+  1. `is_etf` was HARDCODED False on every SEC upsert, so this script actively
+     clobbered any correct ETF flag written by another source. QQQ carried
+     source='sec_edgar', is_etf=False for exactly this reason.
+  2. The re-fetch query skipped rows already flagged `is_etf`, so a symbol
+     could never be re-classified, while genuine funds were retried against
+     EDGAR forever (they have no CIK and never resolve).
+  3. It DELETEd every dotted symbol as an "artifact". Those are preferred
+     shares — the best-performing cohort in the replay pool (+96 to +272 bps
+     mean). Deleting their metadata drops them into the unknown-sector
+     partition.
+  4. `sector` mixed two taxonomies: SIC-derived strings from this script and
+     yfinance's own strings from another path, so e.g. "Financial Services"
+     and "Finance, Insurance & Real Estate" partitioned separately.
+
+Instrument classification: a symbol absent from SEC's company_tickers.json is
+almost certainly a fund (ETFs/CEFs file under trust CIKs, not their trading
+symbol). That is the primary signal and it is free. `--verify-etf` adds an
+optional yfinance `quoteType` pass to confirm a sample.
 
 Usage:
-    python scripts/refresh_ticker_metadata.py [--dry-run]
+    python scripts/refresh_ticker_metadata.py [--dry-run] [--full] [--verify-etf N]
 
 Env:
-    DB_URL  (default: postgresql://postgres:lumibob@localhost:5432/lumibob)
+    DB_URL  (default: postgresql://lumibob@localhost:5432/lumibob)
 """
 from __future__ import annotations
 
@@ -32,22 +46,16 @@ import psycopg2
 import psycopg2.extras
 import requests
 
-# ---------------------------------------------------------------------------
-# Path setup so we can import BobsBrain._sic_to_sector without importing the
-# full strategy class (which would trigger lumibot imports).
-# ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from BobsBrain import _sic_to_sector  # noqa: E402
 
-DB_URL = os.getenv('DB_URL', 'postgresql://postgres:lumibob@localhost:5432/lumibob')
-EDGAR_HEADERS = {'User-Agent': 'LumiBob research@lumibob.local'}
+DB_URL = os.getenv('DB_URL', 'postgresql://lumibob@localhost:5432/lumibob')
+EDGAR_HEADERS = {'User-Agent': os.getenv(
+    'EDGAR_USER_AGENT', 'LumiBob research (contact: gcrosti@gmail.com)')}
 RATE_LIMIT_SLEEP = 0.11   # ~9 req/s — SEC fair-access guideline
-BATCH_SIZE = 200          # upsert rows in batches to avoid huge transactions
+BATCH_SIZE = 200
+STALE_DAYS = 30           # re-resolve rows older than this on a --full run
 
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
 
 def _conn():
     return psycopg2.connect(DB_URL)
@@ -57,196 +65,150 @@ def coverage_report(label: str) -> dict:
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT
-                    COUNT(*)                                               AS total,
-                    COUNT(sector)                                          AS has_sector,
-                    COUNT(CASE WHEN is_etf THEN 1 END)                    AS etf_count
+                SELECT COUNT(*),
+                       COUNT(sector),
+                       COUNT(CASE WHEN is_etf THEN 1 END),
+                       COUNT(sic_code)
                 FROM ticker_metadata
             """)
-            total, has_sector, etf_count = cur.fetchone()
+            total, has_sector, etf, has_sic = cur.fetchone()
             cur.execute('SELECT COUNT(*) FROM tickers')
             universe = cur.fetchone()[0]
-    pct = has_sector / total * 100 if total else 0
     print(f"\n[coverage:{label}]")
-    print(f"  ticker_metadata rows : {total}")
     print(f"  universe (tickers)   : {universe}")
-    print(f"  with sector          : {has_sector} ({pct:.1f}%)")
-    print(f"  marked ETF           : {etf_count}")
-    return {'total': total, 'has_sector': has_sector, 'universe': universe}
+    print(f"  ticker_metadata rows : {total}")
+    print(f"  with sector          : {has_sector} ({has_sector / max(total,1) * 100:.1f}%)")
+    print(f"  with SIC code        : {has_sic} ({has_sic / max(total,1) * 100:.1f}%)")
+    print(f"  marked ETF/fund      : {etf} ({etf / max(total,1) * 100:.1f}%)")
+    return {'total': total, 'has_sector': has_sector, 'etf': etf}
 
 
-def fetch_symbols_needing_refresh() -> list[str]:
+def symbols_to_process(full: bool) -> list[str]:
     """
-    Return every symbol from the `tickers` table that either:
-      - has no row in ticker_metadata at all, OR
-      - has a NULL sector and is not an ETF (stale placeholder).
+    Symbols needing (re)classification.
 
-    Also removes dotted-symbol artifacts (e.g. ABR.PRD) that pre-date
-    the '.' exclusion filter in AlpacaClient.get_tradeable_assets().
+    Default: rows missing entirely, or never successfully classified — i.e. no
+    SIC code AND not yet identified as a fund.  `--full` additionally re-resolves
+    anything older than STALE_DAYS.
+
+    Unlike the previous version this does NOT delete dotted symbols (preferred
+    shares are tradeable and well-performing) and does NOT skip rows flagged
+    is_etf (a wrong flag must be correctable).
     """
+    sql = """
+        SELECT t.symbol
+        FROM tickers t
+        LEFT JOIN ticker_metadata m ON t.symbol = m.symbol
+        WHERE m.symbol IS NULL
+           OR (m.sic_code IS NULL AND NOT m.is_etf)
+    """
+    if full:
+        sql += f"   OR m.fetched_at < NOW() - INTERVAL '{STALE_DAYS} days'"
+    sql += ' ORDER BY t.symbol'
     with _conn() as conn:
         with conn.cursor() as cur:
-            # Remove dotted-symbol artifacts that shouldn't be in the table
-            cur.execute("""
-                DELETE FROM ticker_metadata
-                WHERE symbol LIKE '%.%'
-            """)
-            deleted = cur.rowcount
-            if deleted:
-                print(f"[refresh] Removed {deleted} dotted-symbol artifact rows "
-                      "(preferred shares / warrants — filtered by AlpacaClient).")
+            cur.execute(sql)
+            return [r[0] for r in cur.fetchall()]
 
-            cur.execute("""
-                SELECT t.symbol
-                FROM tickers t
-                LEFT JOIN ticker_metadata m ON t.symbol = m.symbol
-                WHERE m.symbol IS NULL          -- no metadata row yet
-                   OR (m.sector IS NULL AND NOT m.is_etf)  -- stale placeholder
-                ORDER BY t.symbol
-            """)
-            symbols = [row[0] for row in cur.fetchall()]
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# EDGAR helpers
-# ---------------------------------------------------------------------------
 
 def build_cik_map() -> dict[str, int]:
-    """
-    Download the broader company_tickers.json (all SEC registrants) and return
-    a {TICKER_UPPER: cik} dict.  Falls back to company_tickers_exchange.json
-    when the broader file is unavailable.
-    """
-    urls = [
-        'https://www.sec.gov/files/company_tickers.json',
-        'https://www.sec.gov/files/company_tickers_exchange.json',
-    ]
+    """{TICKER: cik} for every SEC registrant. Absence implies a fund."""
+    urls = ['https://www.sec.gov/files/company_tickers.json',
+            'https://www.sec.gov/files/company_tickers_exchange.json']
     for url in urls:
         try:
             resp = requests.get(url, headers=EDGAR_HEADERS, timeout=20)
             resp.raise_for_status()
             data = resp.json()
-            # company_tickers.json is {index: {cik_str, ticker, title}, ...}
-            # company_tickers_exchange.json is {fields:[...], data:[[...],...]}
             if 'fields' in data:
-                fields = data['fields']
-                rows = data['data']
-                df_data = [dict(zip(fields, r)) for r in rows]
-                cik_map = {
-                    str(r['ticker']).upper(): int(r['cik'])
-                    for r in df_data
-                    if r.get('ticker')
-                }
+                rows = [dict(zip(data['fields'], r)) for r in data['data']]
+                cik_map = {str(r['ticker']).upper(): int(r['cik'])
+                           for r in rows if r.get('ticker')}
             else:
-                cik_map = {
-                    str(v['ticker']).upper(): int(v['cik_str'])
-                    for v in data.values()
-                    if isinstance(v, dict) and v.get('ticker')
-                }
-            print(f"[edgar] Loaded CIK map from {url}: {len(cik_map):,} entries")
+                cik_map = {str(v['ticker']).upper(): int(v['cik_str'])
+                           for v in data.values()
+                           if isinstance(v, dict) and v.get('ticker')}
+            print(f"[edgar] CIK map from {url}: {len(cik_map):,} entries")
             return cik_map
         except Exception as exc:
             print(f"[edgar] {url} failed: {exc}")
-    raise RuntimeError("Could not download EDGAR CIK map from any URL.")
+    raise RuntimeError('Could not download EDGAR CIK map.')
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Broker tickers use '.'/'/' where EDGAR uses '-' (BRK.B -> BRK-B)."""
+    return symbol.upper().replace('.', '-').replace('/', '-')
 
 
 def fetch_sic(cik: int) -> int | None:
-    """Fetch SIC code for a single CIK from the submissions endpoint."""
-    cik_padded = str(int(cik)).zfill(10)
-    url = f'https://data.sec.gov/submissions/CIK{cik_padded}.json'
+    url = f'https://data.sec.gov/submissions/CIK{int(cik):010d}.json'
     try:
-        r = requests.get(url, headers=EDGAR_HEADERS, timeout=6)
+        r = requests.get(url, headers=EDGAR_HEADERS, timeout=10)
         if r.status_code == 200:
-            return r.json().get('sic')
+            sic = r.json().get('sic')
+            return int(sic) if sic else None
     except Exception:
         pass
     return None
 
 
-# ---------------------------------------------------------------------------
-# Main refresh logic
-# ---------------------------------------------------------------------------
+def refresh(dry_run: bool = False, full: bool = False, verify_etf: int = 0) -> None:
+    print('=' * 60)
+    print('Ticker metadata refresh (sector + instrument class)')
+    print('=' * 60)
+    before = coverage_report('before')
 
-def refresh(dry_run: bool = False) -> None:
-    print("=" * 60)
-    print("SEC EDGAR ticker metadata refresh")
-    print("=" * 60)
-
-    before = coverage_report("before")
-
-    symbols = fetch_symbols_needing_refresh()
-    print(f"\n[refresh] Symbols to process: {len(symbols)}")
-
+    symbols = symbols_to_process(full)
+    print(f"\n[refresh] symbols to process: {len(symbols)}")
     if not symbols:
-        print("[refresh] Nothing to do — all tickers have sector data.")
+        print('[refresh] nothing to do.')
         return
 
-    print("[edgar] Downloading CIK map...")
     cik_map = build_cik_map()
-
     fetched_at = datetime.now(timezone.utc)
-    matched_records: list[dict] = []
-    unmatched: list[str] = []
-    total = len(symbols)
+    batch: list[tuple] = []
+    n_sec, n_fund, n_nosic = 0, 0, 0
 
     for i, symbol in enumerate(symbols, start=1):
-        cik = cik_map.get(symbol.upper())
+        cik = cik_map.get(normalize_symbol(symbol))
         if cik is None:
-            unmatched.append(symbol)
+            # No SEC registrant under this ticker -> fund (ETF/CEF/trust).
+            batch.append((symbol, None, True, fetched_at, None, None, 'fund_inferred'))
+            n_fund += 1
         else:
             sic = fetch_sic(cik)
             sector = _sic_to_sector(sic)
-            matched_records.append({
-                'symbol':     symbol,
-                'sic_code':   int(sic) if sic else None,
-                'sic_sector': sector,
-                'is_etf':     False,
-                'fetched_at': fetched_at,
-            })
+            if sic is None:
+                n_nosic += 1
+            else:
+                n_sec += 1
+            batch.append((symbol, sector, False, fetched_at, sic, sector, 'sec_edgar'))
             time.sleep(RATE_LIMIT_SLEEP)
 
-        if i % 100 == 0 or i == total:
-            pct = i / total * 100
-            print(f"[edgar] {i}/{total} ({pct:.1f}%) — matched: {len(matched_records)}, "
-                  f"unmatched: {len(unmatched)}")
+        if len(batch) >= BATCH_SIZE and not dry_run:
+            _upsert(batch)
+            batch = []
+        if i % 250 == 0 or i == len(symbols):
+            print(f"[refresh] {i}/{len(symbols)} ({i / len(symbols) * 100:.1f}%) — "
+                  f"sec {n_sec}, funds {n_fund}, cik-but-no-sic {n_nosic}")
 
-        # Flush matched records in batches
-        if len(matched_records) >= BATCH_SIZE and not dry_run:
-            _upsert_sec_batch(matched_records)
-            matched_records = []
+    if batch and not dry_run:
+        _upsert(batch)
 
-    # Final flush of matched records
-    if matched_records and not dry_run:
-        _upsert_sec_batch(matched_records)
+    if verify_etf and not dry_run:
+        _verify_etf_sample(verify_etf)
 
-    # Store placeholders for unmatched so we don't retry every run
-    if unmatched and not dry_run:
-        _upsert_placeholder_batch(unmatched, fetched_at)
-
-    print(f"\n[refresh] Done. Matched: {len(matched_records) + (BATCH_SIZE - len(matched_records) % BATCH_SIZE) % BATCH_SIZE}, "
-          f"unmatched (placeholders stored): {len(unmatched)}")
-
-    after = coverage_report("after")
-    delta = after['has_sector'] - before['has_sector']
-    print(f"\n[refresh] Sector coverage delta: +{delta} tickers")
+    after = coverage_report('after')
+    print(f"\n[refresh] sector delta +{after['has_sector'] - before['has_sector']}, "
+          f"ETF/fund delta +{after['etf'] - before['etf']}")
 
 
-def _upsert_sec_batch(records: list[dict]) -> None:
-    rows = [
-        (
-            r['symbol'],
-            r['sic_sector'],
-            r['is_etf'],
-            r['fetched_at'],
-            r['sic_code'],
-            r['sic_sector'],
-            'sec_edgar',
-        )
-        for r in records
-    ]
+def _upsert(rows: list[tuple]) -> None:
+    """Upsert. NB: is_etf and sector are now written from real signals, never
+    hardcoded, so a wrong prior value is corrected rather than preserved."""
     sql = """
-        INSERT INTO ticker_metadata (symbol, sector, is_etf, fetched_at, sic_code, sic_sector, source)
+        INSERT INTO ticker_metadata
+            (symbol, sector, is_etf, fetched_at, sic_code, sic_sector, source)
         VALUES %s
         ON CONFLICT (symbol) DO UPDATE
             SET sector     = EXCLUDED.sector,
@@ -260,27 +222,40 @@ def _upsert_sec_batch(records: list[dict]) -> None:
         psycopg2.extras.execute_values(conn.cursor(), sql, rows)
 
 
-def _upsert_placeholder_batch(symbols: list[str], fetched_at: datetime) -> None:
-    rows = [(s, None, False, fetched_at) for s in symbols]
-    sql = """
-        INSERT INTO ticker_metadata (symbol, sector, is_etf, fetched_at)
-        VALUES %s
-        ON CONFLICT (symbol) DO UPDATE
-            SET fetched_at = EXCLUDED.fetched_at
-    """
+def _verify_etf_sample(n: int) -> None:
+    """Spot-check the fund inference against yfinance quoteType."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        print('[verify] yfinance not installed; skipping')
+        return
     with _conn() as conn:
-        psycopg2.extras.execute_values(conn.cursor(), sql, rows)
+        with conn.cursor() as cur:
+            cur.execute('SELECT symbol, is_etf FROM ticker_metadata '
+                        'ORDER BY random() LIMIT %s', (n,))
+            sample = cur.fetchall()
+    agree = checked = 0
+    for symbol, is_etf in sample:
+        try:
+            qt = yf.Ticker(symbol).info.get('quoteType', '')
+        except Exception:
+            continue
+        if not qt:
+            continue
+        checked += 1
+        agree += int(bool(is_etf) == (qt.upper() in ('ETF', 'MUTUALFUND', 'CLOSEDEND')))
+        time.sleep(0.3)
+    if checked:
+        print(f"\n[verify] fund inference agrees with yfinance quoteType on "
+              f"{agree}/{checked} ({agree / checked * 100:.0f}%)")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Refresh SEC EDGAR ticker metadata.')
-    parser.add_argument(
-        '--dry-run', action='store_true',
-        help='Fetch and report without writing to the DB.',
-    )
-    args = parser.parse_args()
-    refresh(dry_run=args.dry_run)
+    ap = argparse.ArgumentParser(description='Refresh ticker metadata.')
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--full', action='store_true',
+                    help=f're-resolve rows older than {STALE_DAYS} days')
+    ap.add_argument('--verify-etf', type=int, default=0, metavar='N',
+                    help='spot-check N symbols against yfinance quoteType')
+    args = ap.parse_args()
+    refresh(dry_run=args.dry_run, full=args.full, verify_etf=args.verify_etf)

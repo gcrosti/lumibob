@@ -295,7 +295,12 @@ class DatabaseClient:
         per-component weights to the pairs table.  Safe to call on every startup.
 
         Columns added:
-            composite_score              -- final weighted score at discovery
+            expected_gross_bps           -- SELECTION quantity: bps expected
+                                            from reverting to the exit
+            spread_std_bps               -- spread std over the z window, bps
+            min_expected_gross_bps       -- magnitude floor in force
+            composite_score              -- legacy: no longer written (the
+                                            composite was removed 2026-08-01)
             score_corr_long/short        -- normalised [0,1] correlation components
             score_z_depth                -- z-score depth component
             score_coint                  -- normalised cointegration component
@@ -317,6 +322,12 @@ class DatabaseClient:
             ("w_z_depth",        "DOUBLE PRECISION"),
             ("w_coint",          "DOUBLE PRECISION"),
             ("w_halflife",       "DOUBLE PRECISION"),
+            # Entry criteria (2026-08-01 overhaul): the quantity candidates are
+            # actually selected on, the spread scale it derives from, and the
+            # floor in force at discovery.
+            ("expected_gross_bps",     "DOUBLE PRECISION"),
+            ("spread_std_bps",         "DOUBLE PRECISION"),
+            ("min_expected_gross_bps", "DOUBLE PRECISION"),
         ]
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -609,13 +620,12 @@ class DatabaseClient:
                  correlation, simulated_return, sim_sharpe, signal_type, zscore_window,
                  entry_threshold, exit_threshold, coint_pvalue, halflife_days,
                  lead_short_qty,
-                 composite_score,
-                 score_corr_long, score_corr_short, score_z_depth,
+                 score_corr_long, score_corr_short,
                  score_coint, score_halflife,
-                 w_corr_long, w_corr_short, w_z_depth,
+                 expected_gross_bps, spread_std_bps, min_expected_gross_bps,
                  discovered_at, last_updated, active)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -656,10 +666,10 @@ class DatabaseClient:
                     float(coint_pvalue) if coint_pvalue is not None else None,
                     float(halflife_days) if halflife_days is not None else None,
                     float(lead_short_qty) if lead_short_qty is not None else None,
-                    _f("composite_score"),
-                    _f("score_corr_long"), _f("score_corr_short"), _f("score_z_depth"),
+                    _f("score_corr_long"), _f("score_corr_short"),
                     _f("score_coint"), _f("score_halflife"),
-                    _f("w_corr_long"), _f("w_corr_short"), _f("w_z_depth"),
+                    _f("expected_gross_bps"), _f("spread_std_bps"),
+                    _f("min_expected_gross_bps"),
                     today,
                     today,
                 ))

@@ -102,19 +102,27 @@ CREATE TABLE IF NOT EXISTS pairs (
     halflife_days DOUBLE PRECISION,
     -- H1: open short quantity on lead (paper restart / analytics); NULL when long-only
     lead_short_qty NUMERIC,
-    -- Composite score and per-component breakdown recorded at discovery time.
-    -- Allows post-hoc analysis of score discriminatory power and weight tuning.
-    composite_score  DOUBLE PRECISION,
+    -- Entry criteria recorded at discovery time (2026-08-01 overhaul).
+    -- expected_gross_bps is the quantity candidates are SELECTED on:
+    -- (|z| - exit_threshold) * spread_std_bps, i.e. bps of gross notional
+    -- expected from reverting to the exit.
+    expected_gross_bps     DOUBLE PRECISION,
+    spread_std_bps         DOUBLE PRECISION,  -- spread std over the z window, bps
+    min_expected_gross_bps DOUBLE PRECISION,  -- floor in force at discovery
+    -- Component scores retained for observability only — these no longer
+    -- select or rank candidates.  composite_score and the w_* weights are
+    -- LEGACY: no longer written, kept so historical rows stay queryable.
     score_corr_long  DOUBLE PRECISION,  -- normalised corr_long  in [0, 1]
     score_corr_short DOUBLE PRECISION,  -- normalised corr_short in [0, 1]
-    score_z_depth    DOUBLE PRECISION,  -- z-score depth         in [0, 1]
     score_coint      DOUBLE PRECISION,  -- normalised coint p-val in [0, 1]
     score_halflife   DOUBLE PRECISION,  -- normalised half-life   in [0, 1]
-    w_corr_long      DOUBLE PRECISION,  -- weight active at discovery
-    w_corr_short     DOUBLE PRECISION,
-    w_z_depth        DOUBLE PRECISION,
-    w_coint          DOUBLE PRECISION,
-    w_halflife       DOUBLE PRECISION
+    composite_score  DOUBLE PRECISION,  -- legacy
+    score_z_depth    DOUBLE PRECISION,  -- legacy
+    w_corr_long      DOUBLE PRECISION,  -- legacy
+    w_corr_short     DOUBLE PRECISION,  -- legacy
+    w_z_depth        DOUBLE PRECISION,  -- legacy
+    w_coint          DOUBLE PRECISION,  -- legacy
+    w_halflife       DOUBLE PRECISION   -- legacy
 );
 
 -- One active configuration per (run, lead, lag, lag_days) triple.

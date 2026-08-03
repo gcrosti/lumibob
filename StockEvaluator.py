@@ -13,6 +13,21 @@ class SpreadScores(NamedTuple):
     halflife_days: float | None  # AR(1) half-life in trading days; None if non-stationary
 
 
+class EntryMetrics(NamedTuple):
+    """Everything the entry criteria need, from one spread computation.
+
+    ``expected_gross_bps`` is the quantity the Z-score normalises away: how
+    many basis points reverting from here to the exit threshold is worth.  The
+    Z-score says how *stretched* a spread is relative to its own history;
+    this says how much that stretch is worth in money, which is what has to
+    clear trading costs.  See
+    docs/deepdives/2026-08-01_score-selection-and-the-missing-entry-gate.md.
+    """
+    z: float                  # signed Z-score at the latest bar
+    spread_std_bps: float     # spread std over the Z window, bps of gross notional
+    expected_gross_bps: float # (|z| - exit_threshold) * spread_std_bps, floored at 0
+
+
 def halflife_to_score(halflife_days: float | None, max_halflife_days: float) -> float:
     """Map an AR(1) half-life (trading days) to a [0, 1] mean-reversion score.
 
@@ -84,6 +99,15 @@ class StockEvaluator:
     ) -> tuple[float, float | None]:
         """
         Continuous [0, 1] score measuring how far the spread has diverged.
+
+        NOT ON THE LIVE PATH since 2026-08-01 — retained for the cached replay
+        studies in tuning/studies/, whose caches carry a z_depth column.
+        BobsBrain uses ``compute_entry_metrics`` instead.  The reason: this test
+        is on *signed* z, so a spread at z=+5 scores 0.0 ("not diverged"), which
+        makes it a direction flag rather than a depth measure.  Among candidates
+        that pass a ``z <= -entry_threshold`` gate it is identically 1.0 — a
+        constant, carrying no ranking information.  See
+        docs/deepdives/2026-08-01_score-selection-and-the-missing-entry-gate.md §3c.
 
         Returns (z_depth, raw_z).  z_depth is 0.0 when the spread has not
         diverged past exit_threshold, scales linearly to 1.0 at entry_threshold,
@@ -165,6 +189,52 @@ class StockEvaluator:
         roll_std = spread.rolling(window=window, min_periods=window).std()
         zscore = (spread - roll_mean) / roll_std.replace(0, np.nan)
         return zscore
+
+    def compute_entry_metrics(
+        self,
+        lead: 'pd.Series',
+        lag: 'pd.Series',
+        window: int = 20,
+        exit_threshold: float = 0.5,
+    ) -> 'EntryMetrics | None':
+        """
+        Signed Z-score plus the spread's absolute scale, in one pass.
+
+        ``compute_zscore`` divides the spread by its rolling standard deviation
+        and discards that denominator.  The denominator is the size of a typical
+        dislocation in log-spread units; scaled by ``1 / (1 + |hedge|)`` and
+        1e4 it becomes bps of the pair's gross notional — directly comparable
+        to round-trip costs.
+
+        Returns None when the inputs are too short, the hedge fit fails, or the
+        latest Z-score / std is not finite.
+        """
+        log_lead = np.log(lead.astype(float).clip(lower=1e-9))
+        log_lag = np.log(lag.astype(float).clip(lower=1e-9))
+        common = log_lead.index.intersection(log_lag.index)
+        if len(common) < window + 2:
+            return None
+        ll, lg = log_lead.loc[common], log_lag.loc[common]
+        try:
+            hedge = float(np.polyfit(ll.values, lg.values, 1)[0])
+        except (np.linalg.LinAlgError, ValueError):
+            return None
+
+        spread = lg - hedge * ll
+        roll_mean = spread.rolling(window=window, min_periods=window).mean()
+        roll_std = spread.rolling(window=window, min_periods=window).std()
+        std = float(roll_std.iloc[-1])
+        if not np.isfinite(std) or std <= 0:
+            return None
+        z = float((spread.iloc[-1] - roll_mean.iloc[-1]) / std)
+        if not np.isfinite(z):
+            return None
+
+        # bps of gross notional: both legs are transacted, so the move is
+        # scaled by the total notional (1 long + |hedge| short).
+        std_bps = std / (1.0 + abs(hedge)) * 1e4
+        expected = max(abs(z) - exit_threshold, 0.0) * std_bps
+        return EntryMetrics(z=z, spread_std_bps=std_bps, expected_gross_bps=expected)
 
     def get_zscore_action(
         self,

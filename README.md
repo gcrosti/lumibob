@@ -1,16 +1,16 @@
 # LumiBob
 
-A **score-and-rank** lead/lag pairs-trading strategy built on [Lumibot](https://github.com/Lumiwealth/lumibot) and [Alpaca](https://alpaca.markets). LumiBob clusters a tradeable universe, scores pairs with a composite model (dual-horizon correlation plus Z-score depth), builds a daily **target portfolio** (top K, with displacement of weaker names), and trades the **lag** leg using Z-score spread signals. Use backtests and paper trading to validate behaviour before risking real capital.
+A **gate-and-rank** lead/lag pairs-trading strategy built on [Lumibot](https://github.com/Lumiwealth/lumibot) and [Alpaca](https://alpaca.markets). LumiBob clusters a tradeable universe, gates candidates on **dislocation** (the spread must be stretched in the tradeable direction) and **magnitude** (the expected reversion must be worth enough to cover costs), builds a daily **target portfolio** of the top `max_k` by expected reversion, and trades the **lag** leg using Z-score spread signals. Use backtests and paper trading to validate behaviour before risking real capital.
 
 ## How It Works
 
 Each trading day:
 
-1. **Pair maintenance** — Existing pairs are re-scored with the same composite model (long/short correlation, Z-score depth). Positions that fall out of the target set are marked to sell (`displaced`); names entering the target set are marked to buy when not yet held. Sells where the Z-score reverted below `exit_threshold` are tagged `zscore_exit`; sells where price data was unavailable are tagged `data_missing`.
+1. **Pair maintenance** — Existing pairs are re-valued on their *remaining* expected reversion, so an open position competes for its slot against fresh dislocations. Positions that fall out of the target set are marked to sell (`displaced`); names entering the target set are marked to buy when not yet held. Sells where the Z-score reverted below `exit_threshold` are tagged `zscore_exit`; sells where price data was unavailable are tagged `data_missing`.
 
-2. **Pair discovery** — Tickers are grouped with **`TickerClusterer`** (HDBSCAN on a **correlation-distance matrix** — `1 − Pearson ρ` — with **sector pre-partitioning**: ETFs, each known SIC sector, and unknown-sector tickers each cluster independently). A per-cluster sanity gate (`min_intra_cluster_corr`) dissolves loosely correlated clusters. Discovery walks **within-cluster** pairs, applies a penny-stock filter, respects a **global daily scoring budget** (`max_daily_candidates`) and **pair cooldown**. Candidates receive a **composite score**; together with existing positions they are ranked into a target book sized by **dynamic K** (`k_target = round(max_k * quality_scale)`, where `max_k` is a hard ceiling).
+2. **Pair discovery** — Tickers are grouped with **`TickerClusterer`** (HDBSCAN on a **correlation-distance matrix** — `1 − Pearson ρ` — with **sector pre-partitioning**: ETFs, each known SIC sector, and unknown-sector tickers each cluster independently). A per-cluster sanity gate (`min_intra_cluster_corr`) dissolves loosely correlated clusters. Discovery walks **within-cluster** pairs, applies a penny-stock filter, respects a **global daily scoring budget** (`max_daily_candidates`) and **pair cooldown**. Surviving candidates are ranked with existing positions by **`expected_gross_bps`** into a target book of fixed size **`max_k`** (dynamic K was removed on 2026-08-01 — it never varied in practice and every dynamic scheme tested underperformed a fixed K).
 
-3. **Execution** — Sells run first, then buys. Buy size scales between **`min_position_pct`** and **`max_position_pct`** using each pair's **`composite_score`**, with a **deployment-gap** boost toward **`target_deployed_pct`**. If a buy exceeds available cash, the loop **continues** to smaller candidates rather than stopping.
+3. **Execution** — Sells run first, then buys. Buy size is **flat** at `min_position_pct` with a **deployment-gap** boost toward **`target_deployed_pct`** (capped at `max_position_pct`); nothing in the entry criteria ranks pair *quality*, so sizing does not vary by rank. Buys are ordered by `expected_gross_bps` so the largest opportunities fill first under a cash constraint. If a buy exceeds available cash, the loop **continues** to smaller candidates rather than stopping.
 
 Clustering uses the same **read-through price path** as the strategy (`StockDataCache`), with the first cluster build on the **first simulated session day** (correct `as_of` in backtests).
 
@@ -139,24 +139,43 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `exit_threshold` | Z-score band for spread exit | `0.5` |
 | `zscore_window` | Rolling window (bars) for spread Z-score | `20` |
 
-### Scoring (composite score)
+### Entry criteria
+
+A candidate must clear **both** gates, then competes on `expected_gross_bps`:
+
+| Parameter | Description | Default |
+|---|---|---|
+| `entry_threshold` | Dislocation gate: requires `z ≤ −entry_threshold` (the lag leg must be cheap) | `2.0` |
+| `min_expected_gross_bps` | Emergency floor on trade magnitude, bps of gross notional | `25.0` |
+
+`expected_gross_bps = (|z| − exit_threshold) × spread_std_bps` — how many basis
+points reverting from here to the exit is worth. The Z-score says how *stretched*
+a spread is relative to its own history; this says what that stretch is worth in
+money, which is what must clear trading costs. Both quantities come from one
+`compute_entry_metrics` call, and the gates run **before** the cointegration
+work, so rejected candidates cost only a Z-score computation.
+
+The former composite score (`w_corr_long` / `w_corr_short` / `w_z_depth`) was
+removed on 2026-08-01: it did not select positively, and `z_depth` is
+identically 1.0 among candidates passing the dislocation gate. Correlations,
+cointegration and half-life are still computed and persisted per pair for
+observability, but no longer select or rank. See
+`docs/plans/2026-08-01_entry-criteria-overhaul.md`.
+
+### Observability windows (not used for selection)
 
 | Parameter | Description | Default |
 |---|---|---|
 | `corr_long_window` | Long-horizon correlation window (bars) | `90` |
 | `corr_short_window` | Short-horizon correlation window (bars) | `20` |
-| `w_corr_long` | Composite weight on long correlation | `0.3` |
-| `w_corr_short` | Composite weight on short correlation | `0.5` |
-| `w_z_depth` | Composite weight on Z-score depth | `0.2` |
-| `max_halflife_days` | Half-life ceiling for the persisted `score_halflife` observability column | `60` |
-
-The composite is these three components only. Cointegration and half-life were removed from the score as dead weight for ranking (PR #50 / Pass A v4); their per-pair component scores (`score_coint`, `score_halflife`) and inputs (`coint_pvalue`, `halflife_days`) are still computed and persisted for post-hoc analysis. All `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
+| `max_halflife_days` | Half-life ceiling for the persisted `score_halflife` column | `60` |
 
 ### Discovery
 
 | Parameter | Description | Default |
 |---|---|---|
-| `max_daily_candidates` | Max new candidate pairs scored per day | `200` |
+| `max_daily_candidates` | Max **qualified** candidates (both gates passed) scored per day | `200` |
+| `max_daily_examined` | Max pairs **examined** per day (cheap pre-gate scan) | `2000` |
 | `cooldown_days` | Days before the same unordered pair is scored again | `7` |
 
 ### Filters
@@ -164,14 +183,6 @@ The composite is these three components only. Cointegration and half-life were r
 | Parameter | Description | Default |
 |---|---|---|
 | `penny_threshold` | Min price for penny-stock filter | `5.0` |
-
-### Dynamic-K quality scale
-
-| Parameter | Description | Default |
-|---|---|---|
-| `quality_scale_pivot` | Pool-correlation pivot for quality multiplier | `0.7` |
-| `quality_scale_min` | Floor on quality_scale multiplier | `0.5` |
-| `quality_scale_max` | Ceiling on quality_scale multiplier (must be ≤ 1.0) | `1.0` |
 
 ### Clustering / HDBSCAN
 
