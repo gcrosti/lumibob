@@ -28,7 +28,7 @@ main.py
       └── TickerClusterer              correlation-distance HDBSCAN, sector pre-partition
 
 tuning/
-  parameter_space.py   26 tunable parameters across 3 tiers; suggest() for Optuna
+  parameter_space.py   28 tunable parameters across 3 tiers; suggest() for Optuna
   objective.py         BacktestObjective — Optuna callable; Sharpe-based scoring
   walk_forward.py      WalkForward fold generator (train + holdout windows)
   regime_detector.py   Market regime classifier (calm_bull / vol_shock / sideways / trend_bull)
@@ -37,10 +37,15 @@ tuning/
     tier2_slow.py       Phase 1 proof study (Tier 2, single window)
     phase3_battery.py   Phase 3 five-regime battery vs baseline
     phase4_coarse.py    Phase 4 regime-conditioned Tier 3 tuning (12-fold walk-forward)
+    scoring_replay.py   Pass A v4 full-pool observation cache (P&L-free scoring replay)
+    scoring_study.py    Optuna study over the scoring-replay cache
+    study2_event_retro/ Earnings/filing events vs catastrophic losses (2026-07-31 deepdive)
 
 scripts/
   prewarm_cache.py          Pre-warm stock_prices for historical regime windows
   refresh_ticker_metadata.py  Re-fetch SEC EDGAR SIC metadata for all universe tickers
+  backfill_filing_events.py Backfill/refresh item-coded 8-K/6-K filings from SEC EDGAR
+  backfill_nav_prices.py    Backfill daily CEF NAVs via Nasdaq X-mirror symbols
   after_battery.sh          Post-battery summary and artefact archiving
   watch_and_cutover.sh      Cut over active_parameters when gate criterion is met
 
@@ -57,6 +62,7 @@ migrations/
 | `AlpacaClient.py` | Thin wrapper around `alpaca-py` for assets and OHLCV |
 | `DatabaseClient.py` | All PostgreSQL access — tickers, prices, metadata, pairs, runs, trades, snapshots |
 | `StockDataCache.py` | Read-through cache: DB first, Alpaca for gaps (with exponential-backoff retry) |
+| `EdgarClient.py` | SEC EDGAR: ticker→CIK map, item-coded filing histories (fair-access rate-limited) |
 | `StockEvaluator.py` | `get_correlation_dual`, Z-score spread and depth, legacy cointegration/correlation helpers |
 | `TickerClusterer.py` | Correlation-distance HDBSCAN with sector pre-partition and sanity gate |
 | `PairSimulator.py` | Optional offline pair simulation / grid search (not wired into current discovery) |
@@ -142,11 +148,9 @@ Strategy parameters are passed in **`main.py`** via `STRATEGY_PARAMETERS` (same 
 | `w_corr_long` | Composite weight on long correlation | `0.3` |
 | `w_corr_short` | Composite weight on short correlation | `0.5` |
 | `w_z_depth` | Composite weight on Z-score depth | `0.2` |
-| `w_coint` | Composite weight on cointegration quality (ADF p-value) | `0.25` |
-| `w_halflife` | Composite weight on mean-reversion speed (AR(1) half-life) | `0.15` |
-| `max_halflife_days` | Half-life ceiling for scoring; pairs at or above this score 0 | `60` |
+| `max_halflife_days` | Half-life ceiling for the persisted `score_halflife` observability column | `60` |
 
-All five `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
+The composite is these three components only. Cointegration and half-life were removed from the score as dead weight for ranking (PR #50 / Pass A v4); their per-pair component scores (`score_coint`, `score_halflife`) and inputs (`coint_pvalue`, `halflife_days`) are still computed and persisted for post-hoc analysis. All `w_*` weights are normalised to sum to 1.0 by the tuning pipeline. When setting them manually (e.g. in `main.py`), pass pre-normalised values or call `tuning.parameter_space.normalize_weights()` before use.
 
 ### Discovery
 

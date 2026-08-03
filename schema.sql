@@ -250,3 +250,42 @@ CREATE TABLE IF NOT EXISTS active_parameters (
     params              JSONB NOT NULL,
     source_study_id     INT REFERENCES tuning_studies(study_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- Filing events (plan WS2a: EDGAR 8-K feed + scheduled-earnings calendar)
+-- ---------------------------------------------------------------------------
+
+-- One row per (symbol, filing).  filed_at is the EDGAR acceptance timestamp —
+-- the moment the event became public — keeping studies and the live event veto
+-- point-in-time honest.  form is the SEC form ('8-K', '8-K/A', ...) or the
+-- synthetic 'EARNINGS_SCHEDULED' for forward-calendar rows; items holds
+-- comma-separated 8-K item codes (e.g. '2.02,9.01').
+CREATE TABLE IF NOT EXISTS filing_events (
+    symbol      VARCHAR(20)  NOT NULL,
+    cik         BIGINT,
+    accession   VARCHAR(30)  NOT NULL,
+    form        VARCHAR(25)  NOT NULL,
+    items       TEXT,
+    filed_at    TIMESTAMPTZ  NOT NULL,
+    source      VARCHAR(20)  NOT NULL DEFAULT 'edgar',
+    fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (symbol, accession)
+);
+
+CREATE INDEX IF NOT EXISTS idx_filing_events_symbol_time
+    ON filing_events (symbol, filed_at);
+
+-- ---------------------------------------------------------------------------
+-- Closed-end fund NAVs (plan WS3a: discount z-score feature)
+-- ---------------------------------------------------------------------------
+
+-- Daily CEF NAVs keyed by the fund's trading symbol.  Fetched via the free
+-- Nasdaq mirror symbols (X<ticker>X); day-T NAV is struck after the close and
+-- is usable at day T+1's decision point.
+CREATE TABLE IF NOT EXISTS nav_prices (
+    symbol   VARCHAR(20)  NOT NULL,
+    day      DATE         NOT NULL,
+    nav      NUMERIC      NOT NULL,
+    source   VARCHAR(20)  NOT NULL DEFAULT 'nasdaq_mirror',
+    PRIMARY KEY (symbol, day)
+);

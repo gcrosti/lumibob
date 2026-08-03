@@ -96,14 +96,9 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
     'w_z_depth': ParamSpec(
         'w_z_depth', tier=2, default=0.2, low=0.0, high=1.0,
     ),
-    # H5: cointegration quality and mean-reversion speed weights.
-    # low=0.10 on w_coint prevents Optuna from zeroing out cointegration signal.
-    'w_coint': ParamSpec(
-        'w_coint', tier=2, default=0.25, low=0.10, high=1.0,
-    ),
-    'w_halflife': ParamSpec(
-        'w_halflife', tier=2, default=0.15, low=0.0, high=1.0,
-    ),
+    # w_coint / w_halflife were removed from the composite score and the space
+    # (PR #50 / Pass A v4: dead weight for ranking). max_halflife_days stays —
+    # it still shapes the persisted score_halflife observability column.
     # Half-life normalisation ceiling (tunable so Optuna can widen or narrow the
     # scoring window without changing the formula structure).
     'max_halflife_days': ParamSpec(
@@ -163,7 +158,7 @@ PARAMETER_SPACE: dict[str, ParamSpec] = {
 # Public helpers
 # ---------------------------------------------------------------------------
 
-_WEIGHT_NAMES = frozenset({'w_corr_long', 'w_corr_short', 'w_z_depth', 'w_coint', 'w_halflife'})
+_WEIGHT_NAMES = frozenset({'w_corr_long', 'w_corr_short', 'w_z_depth'})
 
 
 def defaults() -> dict[str, Any]:
@@ -216,10 +211,10 @@ def suggest(
         — e.g. Study 1 Pass A frees only the 10 signal-construction params
         even though Tier 2 contains discovery/sizing params as well.
 
-    Composite score weights (w_corr_long, w_corr_short, w_z_depth, w_coint,
-    w_halflife) are suggested freely and then normalised so they sum to 1.0.
-    If only a subset of the five weights is being tuned, the others take their
-    defaults before normalisation.
+    Composite score weights (w_corr_long, w_corr_short, w_z_depth) are
+    suggested freely and then normalised so they sum to 1.0.  If only a subset
+    of the weights is being tuned, the others take their defaults before
+    normalisation.
 
     Joint timescale constraints (Study 1 Pass A):
     When the following pairs are both being tuned in the same call, the

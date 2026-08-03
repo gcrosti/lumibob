@@ -569,31 +569,16 @@ alias db-cloud='export DB_URL=postgresql://lumibob:lumibob@localhost:5433/lumibo
 
 The tuning instance is started fresh for each study and stopped when done. You pay for it only while workers are running.
 
+**Always launch via `scripts/launch_tuning_instance.sh`, not a hand-typed `run-instances` command.** A manually retyped command dropped the `--instance-market-options` flag on 2026-07-16/17 and launched on-demand instead of spot (~3-4x the cost for that run — see the 2026-08-01 cost audit). The script hardcodes spot market options so this can't happen again.
+
 ```bash
-TUNING_INSTANCE=$(aws ec2 run-instances \
-  --image-id ami-02b2c1b57c5105166 \
-  --instance-type c6i.2xlarge \
-  --key-name lumibob-key \
-  --security-group-ids $TUNING_SG \
-  --instance-market-options '{"MarketType":"spot","SpotOptions":{"MaxPrice":"0.20"}}' \
-  --block-device-mappings '[{
-    "DeviceName":"/dev/xvda",
-    "Ebs":{"VolumeSize":20,"VolumeType":"gp3","DeleteOnTermination":true}
-  }]' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=lumibob-tuning}]' \
-  --query 'Instances[0].InstanceId' \
-  --output text)
-
-aws ec2 wait instance-running --instance-ids $TUNING_INSTANCE
-
-TUNING_IP=$(aws ec2 describe-instances \
-  --instance-ids $TUNING_INSTANCE \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-
-echo "Tuning instance: $TUNING_INSTANCE  IP: $TUNING_IP"
+scripts/launch_tuning_instance.sh              # defaults to c6i.2xlarge
+scripts/launch_tuning_instance.sh c6i.4xlarge   # heavier studies (e.g. Study 2/3)
 ```
 
-Note `DeleteOnTermination:true` here — the tuning instance's EBS volume holds only the OS and code, not data. There's nothing to preserve.
+It prints the instance ID and public IP, and requires the `lumibob-tuning-sg` security group (created once, below) to already exist.
+
+Note `DeleteOnTermination:true` on the underlying volume — the tuning instance's EBS volume holds only the OS and code, not data. There's nothing to preserve.
 
 Add a temporary entry to `~/.ssh/config`:
 

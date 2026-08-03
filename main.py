@@ -25,13 +25,12 @@ STRATEGY_PARAMETERS = {
     # --- Scoring ---
     'corr_long_window': 90,
     'corr_short_window': 20,
-    # 5-component composite score — normalised defaults (raw: 0.3, 0.5, 0.2, 0.25, 0.15 → ÷1.4).
-    # BobsBrain uses these as-is; call tuning.parameter_space.normalize_weights() if adjusting.
-    'w_corr_long': 0.2143,
-    'w_corr_short': 0.3571,
-    'w_z_depth': 0.1429,
-    'w_coint': 0.1786,
-    'w_halflife': 0.1071,
+    # 3-component composite score — defaults already sum to 1.0 (coint/half-life
+    # removed as dead weight, PR #50).  BobsBrain uses these as-is; call
+    # tuning.parameter_space.normalize_weights() if adjusting.
+    'w_corr_long': 0.3,
+    'w_corr_short': 0.5,
+    'w_z_depth': 0.2,
     'max_halflife_days': 60,
 
     # --- Execution (H1 dollar-neutral) ---
@@ -85,8 +84,9 @@ if __name__ == '__main__':
     else:
         from lumibot.backtesting import YahooDataBacktesting
 
-        backtesting_start = datetime(2024, 1, 2)
-        backtesting_end = datetime(2024, 3, 26)
+        # WS1 smoke test: 2-week window inside price-cache coverage.
+        backtesting_start = datetime(2024, 3, 4)
+        backtesting_end = datetime(2024, 3, 18)
         result = BobsBrain.backtest(
             YahooDataBacktesting,
             backtesting_start,

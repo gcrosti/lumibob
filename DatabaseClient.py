@@ -301,7 +301,9 @@ class DatabaseClient:
             score_coint                  -- normalised cointegration component
             score_halflife               -- normalised half-life component
             w_corr_long/short/z_depth    -- weights active at discovery time
-            w_coint / w_halflife         -- weights active at discovery time
+            w_coint / w_halflife         -- legacy: no longer written (removed
+                                            from the composite, PR #50); kept
+                                            so historical rows stay queryable
         """
         columns = [
             ("composite_score",  "DOUBLE PRECISION"),
@@ -391,6 +393,167 @@ class DatabaseClient:
         with self._conn() as conn:
             psycopg2.extras.execute_values(conn.cursor(), sql, rows)
 
+    def migrate_filing_events(self) -> None:
+        """
+        Idempotent migration: create the filing_events table (plan WS2a).
+
+        One row per (symbol, filing).  ``filed_at`` is the EDGAR acceptance
+        timestamp — the moment the event became public knowledge — so studies
+        and the live veto stay point-in-time honest.  ``form`` is the SEC form
+        ('8-K', '8-K/A', ...) or the synthetic 'EARNINGS_SCHEDULED' for
+        forward-calendar rows; ``items`` holds comma-separated 8-K item codes.
+        """
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS filing_events (
+                symbol      VARCHAR(20)  NOT NULL,
+                cik         BIGINT,
+                accession   VARCHAR(30)  NOT NULL,
+                form        VARCHAR(25)  NOT NULL,
+                items       TEXT,
+                filed_at    TIMESTAMPTZ  NOT NULL,
+                source      VARCHAR(20)  NOT NULL DEFAULT 'edgar',
+                fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (symbol, accession)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_filing_events_symbol_time
+                ON filing_events (symbol, filed_at)
+            """,
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
+    def upsert_filing_events(self, records: list[dict]) -> int:
+        """
+        Insert filing events, ignoring rows already present.  Each record:
+            symbol, cik (int | None), accession, form, items (str | None),
+            filed_at (tz-aware datetime), source (default 'edgar').
+        Returns the number of rows actually inserted.
+        """
+        if not records:
+            return 0
+        rows = [
+            (r['symbol'], r.get('cik'), r['accession'], r['form'],
+             r.get('items'), r['filed_at'], r.get('source', 'edgar'))
+            for r in records
+        ]
+        sql = """
+            INSERT INTO filing_events
+                (symbol, cik, accession, form, items, filed_at, source)
+            VALUES %s
+            ON CONFLICT (symbol, accession) DO NOTHING
+            RETURNING 1
+        """
+        with self._conn() as conn:
+            cur = conn.cursor()
+            # fetch=True collects RETURNING rows across all execute_values
+            # pages; cur.rowcount alone would only reflect the last page.
+            inserted = psycopg2.extras.execute_values(cur, sql, rows, fetch=True)
+            return len(inserted)
+
+    def get_filing_events(
+        self,
+        symbols: list[str],
+        start,
+        end,
+        forms: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Filing events for *symbols* with ``filed_at`` in [start, end], oldest
+        first, as a DataFrame [symbol, form, items, filed_at, source].
+        ``forms`` optionally restricts to specific form types.
+        """
+        cols = ['symbol', 'form', 'items', 'filed_at', 'source']
+        if not symbols:
+            return pd.DataFrame(columns=cols)
+        sql = """
+            SELECT symbol, form, items, filed_at, source
+            FROM   filing_events
+            WHERE  symbol = ANY(%s) AND filed_at >= %s AND filed_at <= %s
+        """
+        params: list = [symbols, start, end]
+        if forms:
+            sql += ' AND form = ANY(%s)'
+            params.append(forms)
+        sql += ' ORDER BY filed_at'
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+
+    def migrate_nav_prices(self) -> None:
+        """
+        Idempotent migration: create the nav_prices table (plan WS3a).
+
+        Daily closed-end-fund NAVs, keyed by the *fund's* trading symbol (the
+        Nasdaq X<ticker>X mirror symbol used to fetch is an implementation
+        detail).  Day-T NAV is struck after the close: treat it as usable at
+        day T+1's decision point.
+        """
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS nav_prices (
+                symbol   VARCHAR(20)  NOT NULL,
+                day      DATE         NOT NULL,
+                nav      NUMERIC      NOT NULL,
+                source   VARCHAR(20)  NOT NULL DEFAULT 'nasdaq_mirror',
+                PRIMARY KEY (symbol, day)
+            )
+            """,
+        ]
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for sql in statements:
+                    cur.execute(sql)
+
+    def upsert_nav_prices(self, records: list[dict]) -> int:
+        """
+        Insert daily NAV rows, replacing values on conflict (mirror feeds
+        occasionally restate).  Each record: symbol, day (date), nav (float),
+        source (default 'nasdaq_mirror').  Returns rows written.
+        """
+        if not records:
+            return 0
+        rows = [
+            (r['symbol'], r['day'], r['nav'], r.get('source', 'nasdaq_mirror'))
+            for r in records
+        ]
+        sql = """
+            INSERT INTO nav_prices (symbol, day, nav, source)
+            VALUES %s
+            ON CONFLICT (symbol, day) DO UPDATE
+                SET nav = EXCLUDED.nav, source = EXCLUDED.source
+            RETURNING 1
+        """
+        with self._conn() as conn:
+            cur = conn.cursor()
+            # fetch=True collects RETURNING rows across all execute_values
+            # pages; cur.rowcount alone would only reflect the last page.
+            written = psycopg2.extras.execute_values(cur, sql, rows, fetch=True)
+            return len(written)
+
+    def get_nav_prices(self, symbols: list[str], start, end) -> pd.DataFrame:
+        """Daily NAVs for *symbols* in [start, end] as [symbol, day, nav]."""
+        cols = ['symbol', 'day', 'nav']
+        if not symbols:
+            return pd.DataFrame(columns=cols)
+        sql = """
+            SELECT symbol, day, nav
+            FROM   nav_prices
+            WHERE  symbol = ANY(%s) AND day >= %s AND day <= %s
+            ORDER BY symbol, day
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (symbols, start, end))
+                rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+
     def upsert_sec_metadata(self, records: list[dict]) -> None:
         """
         Insert or update ticker metadata from SEC EDGAR SIC data.
@@ -449,10 +612,10 @@ class DatabaseClient:
                  composite_score,
                  score_corr_long, score_corr_short, score_z_depth,
                  score_coint, score_halflife,
-                 w_corr_long, w_corr_short, w_z_depth, w_coint, w_halflife,
+                 w_corr_long, w_corr_short, w_z_depth,
                  discovered_at, last_updated, active)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             ON CONFLICT (run_id, lead_symbol, lag_symbol, lag_days)
                 WHERE run_id IS NOT NULL
             DO NOTHING
@@ -497,7 +660,6 @@ class DatabaseClient:
                     _f("score_corr_long"), _f("score_corr_short"), _f("score_z_depth"),
                     _f("score_coint"), _f("score_halflife"),
                     _f("w_corr_long"), _f("w_corr_short"), _f("w_z_depth"),
-                    _f("w_coint"), _f("w_halflife"),
                     today,
                     today,
                 ))
