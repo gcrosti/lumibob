@@ -148,16 +148,130 @@ design table. Old composite vs new criteria, dedup applied.
 mean ≥ old, median materially higher. A mismatch means the implementation
 diverges from what was analysed; stop and reconcile.
 
-### V2 — Floor and k selection *(walk-forward)*
+### V2 v1 — Floor and k selection *(walk-forward)* — **FAILED 2026-08-01**
 Free parameters: `min_expected_gross_bps` ∈ {0, 15, 25, 40, 60}; `max_k` ∈
-{10, 20, 30, 40}. Two parameters over ~1,000 qualified round-trips —
-complexity green. Selection on `walk_forward_splits` with embargo ≥ 40 trading
-days (the outcome horizon). **Reserve 2023-10-16, score once.**
-**Guards:** null baseline (shuffle `expected_gross` across candidates within a
-date — the rule must beat the 90th percentile), holdout gap, drop-one-fold
-fragility.
-**Pass:** held-out median improves with CI excluding zero; the chosen config
-survives dropping any one fold.
+{10, 20, 30, 40}. Selection on `walk_forward_splits` with embargo ≥ 40 trading
+days. Reserved 2023-10-16, scored once.
+**Result: FAIL.** Complexity green (506 units/param) and holdout gap passed
+(train +96.2, holdout +60.1). But the **null baseline failed hard** — real
+−79.1 vs random null −21.0 (1st percentile), shuffled null +11.4 (0th) — and
+**fold stability failed**: the floor held at 60 across all drops while `k`
+swung 10 / 20 / 40, i.e. `k` is not identified.
+
+Diagnosis (recorded rather than patched): the objective was the **median**
+book outcome while `null_baseline` scores the **mean** of the top-k. Those
+metrics diverge by construction here, and the divergence is mechanical, not
+statistical — see the calibration table below. Two further defects: the
+selected floor (60) sat at the top edge of the grid, so it was bounded rather
+than identified; and the final-test date was uninformative because all 20 top
+picks that day already cleared 60 bps, making baseline and chosen identical.
+
+### V2 v2 — The band hypothesis *(version bump; new study name)*
+
+**Why a new version rather than a re-cut.** V2 v1's grid searched a floor with
+no ceiling, implicitly assuming "more expected gross is better." The
+calibration data contradicts that assumption:
+
+| expected-gross quintile | predicted | real median | **real mean** | disaster % | worst |
+|---|---|---|---|---|---|
+| 0 | 30.0 | 9.6 | +2.6 | 5.1 | −380 |
+| 1 | 77.2 | 40.3 | +3.4 | 16.1 | −922 |
+| 2 | 127.8 | 85.5 | **+58.8** | 11.6 | −511 |
+| 3 | 200.8 | 130.8 | **+59.6** | 15.2 | −1,661 |
+| 4 | 446.7 | **207.6** | **−42.9** | **27.6** | −4,861 |
+
+The top quintile has the best median and a *negative* mean. Trimming its three
+worst trades lifts it to +21.5 — still below q2 (+65.6) and q3 (+77.0) — so
+this is not only a few blow-ups. Win rate is flat (65–76%) across all
+quintiles, so none of it is a hit-rate effect.
+
+**Hypothesis (mechanism, stated before testing).** A very large expected gross
+means the spread has moved far in absolute terms relative to its own recent
+history. Beyond some level that stops indicating "a big opportunity" and starts
+indicating **the relationship itself is breaking** — a structural repricing
+rather than a dislocation. If true, capping expected gross should remove
+non-converging pairs and therefore improve the **mean**, not merely the median.
+
+**Design changes from v1:**
+
+1. **Primary objective is the MEAN**, not the median. A book of equal-weighted
+   positions earns the mean; the median is reported as a secondary diagnostic.
+   This also makes the objective and `null_baseline` coherent — the exact
+   incoherence that sank v1. The band hypothesis predicts a mean improvement,
+   so the mean is also the sharper test of it.
+2. **Free parameters are floor and ceiling**; `k` is FIXED at 20. v1 showed `k`
+   is not identifiable from this data, so leaving it free only adds variance.
+   Preregistered grids: floor ∈ {0, 25, 50}, ceiling ∈ {150, 250, 400, ∞}.
+3. **Mechanism checks, not just performance.** If the hypothesis is right, high
+   expected-gross pairs must look like *broken relationships*: higher
+   cap-exit (non-convergence) rate, longer holds, deeper drawdowns. These are
+   checked directly. A performance improvement without the mechanism signature
+   is treated as curve-fitting and does not pass.
+4. **Held-out estimate is leave-one-fold-out** (3 genuinely different regimes),
+   reported with its weakness stated — 3 units is thin.
+
+**Confirmatory status — read this before acting on the result.** The band
+hypothesis was *generated* from the same 12 scoring dates it would be tested
+on, and the v1 final-test date is spent. **No clean confirmatory test exists
+inside this dataset.** V2 v2 is therefore explicitly **hypothesis-generating**:
+its job is to decide whether the band is worth a real test, not to validate it.
+A genuine test requires either fresh folds (a cache rebuild on new date ranges)
+or the V4 comparative backtest over different periods.
+
+**Pass (to justify a confirmatory test, not to ship):** a band beats the
+no-ceiling configuration on the **mean** with a date-clustered CI excluding
+zero; the null baseline clears the 90th percentile; the selected ceiling
+survives dropping any one fold; **and** the mechanism checks show the predicted
+non-convergence signature at high expected gross.
+**Fail:** report and stop. Do not widen the grid.
+
+**Executed 2026-08-01 — FAIL. The hypothesis is refuted at the mechanism
+level, which matters more than the performance result.**
+
+*Mechanism — ABSENT.* High-expected-gross pairs do **not** stop converging:
+
+| quintile | expected | cap-exit % | hold days | abs disaster % | **rel disaster %** |
+|---|---|---|---|---|---|
+| 0 | 30 | 5.1 | 11 | 5.1 | 22.6 |
+| 1 | 77 | 4.2 | 12 | 16.1 | 25.8 |
+| 2 | 128 | 1.9 | 10 | 11.6 | 13.4 |
+| 3 | 201 | 3.7 | 11 | 15.2 | 15.2 |
+| 4 | 447 | 4.2 | 12 | 27.6 | 23.0 |
+
+Cap-exit rate (non-convergence) is **flat at ~4%** across the whole range, and
+holding periods are flat at 10–12 days. Pairs at 447 bps expected revert as
+reliably as pairs at 30 bps. There is no relationship-breakdown signature.
+
+*By-product worth recording:* the rising **absolute** disaster rate
+(5.1% → 27.6%) is largely a **threshold artifact**. "Disaster" is defined as
+gross < −100 bps, an absolute line; a pair whose spread is 3× larger crosses it
+3× more easily with identical relative behaviour. Normalising the outcome by
+each pair's own expected gross, the **relative** disaster rate is flat
+(22.6 / 25.8 / 13.4 / 15.2 / 23.0). Several earlier statements in this program
+— "magnitude selection concentrates fat tails" — are partly restatements of
+this artifact and should be read with it in mind.
+
+*Performance — fails on 3 of 4 remaining checks.* In-sample the band looks
+strong (floor 50 / ceiling 250: mean +58.5 vs +9.8 baseline, disaster 10.6% vs
+17.2%). But `holdout_gap` **FAILS** decisively — train +58.9, holdout **+1.5**,
+gap +57.4 — the improvement does not survive out of fold. The ceiling is
+**not stable**: dropping bull_2023 flips it to ∞. The date-clustered CI on the
+mean is **+48.7, CI −21.8 .. +115.6, includes zero**. Only the null baseline
+passes (99th pct), and that is the least meaningful check here because the band
+was derived from the same data.
+
+*Why it fails:* per-fold top-quintile means are +327.5 (mixed_2023_q4), −65.3
+(bull_2023), −97.0 (sideways_2022). A ceiling helps in two regimes and would
+**destroy value in the third**. The apparent effect is a handful of large
+losses concentrated in two folds — bull's three worst top-quintile trades alone
+sum to −13,721 bps.
+
+**Conclusion: no ceiling. `expected_gross` stays a floor-and-rank quantity.**
+Replay-level parameter selection has now failed twice on this dataset (V2 v1,
+V2 v2) for the same underlying reason: 12 correlated scoring dates, outcomes
+dominated by a few large trades, and any apparent optimum traceable to a
+specific fold. **Stop tuning on the replay pool.** The remaining honest test is
+V4, the comparative backtest over different periods with costs on.
 
 ### V3 — Supply and deployment *(the failure mode that matters operationally)*
 Log per day: candidates examined, candidates qualified, `candidates_buy_ready`,
